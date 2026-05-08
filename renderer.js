@@ -446,7 +446,7 @@ function closePane(tab, paneId) {
   if (splitParent && (splitParent.classList.contains('split-h') || splitParent.classList.contains('split-v'))) {
     const sibling = Array.from(splitParent.children).find(c => c !== el && !c.classList.contains('pane-resizer'));
     if (sibling) {
-      sibling.style.flex = '';
+      sibling.style.flex = splitParent.style.flex || '1';
       splitParent.replaceWith(sibling);
     }
   } else {
@@ -459,6 +459,8 @@ function closePane(tab, paneId) {
     tab.activePaneId = null;
     setActivePane(tab, tab.panes.keys().next().value);
   }
+  // Refit all remaining panes — xterm cols/rows must match new container size
+  requestAnimationFrame(() => { for (const [, p] of tab.panes) fitPane(p); });
   scheduleAgentRender();
 }
 
