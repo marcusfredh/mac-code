@@ -76,6 +76,55 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ---------- tab drag-to-reorder ----------
+let tabDrag = null;
+function reorderTabsMap() {
+  const newOrder = new Map();
+  for (const el of tabsEl.children) {
+    for (const [id, t] of tabs) {
+      if (t.tabEl === el) { newOrder.set(id, t); break; }
+    }
+  }
+  tabs.clear();
+  for (const [id, t] of newOrder) tabs.set(id, t);
+  updateStatus();
+}
+function wireTabPointer(tabEl, tabId) {
+  tabEl.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.tab-close') || e.target.closest('.tab-rename-input')) return;
+    if (e.button === 1) { closeTab(tabId); return; }
+    if (e.button !== 0) return;
+    setActive(tabId);
+    tabDrag = { tabEl, startX: e.clientX, started: false };
+  });
+}
+document.addEventListener('pointermove', (e) => {
+  if (!tabDrag) return;
+  const { tabEl } = tabDrag;
+  const dx = e.clientX - tabDrag.startX;
+  if (!tabDrag.started && Math.abs(dx) < 5) return;
+  if (!tabDrag.started) { tabDrag.started = true; tabEl.classList.add('dragging'); }
+  for (const other of tabsEl.children) {
+    if (other === tabEl) continue;
+    const r = other.getBoundingClientRect();
+    if (e.clientX >= r.left && e.clientX <= r.right) {
+      const before = e.clientX < r.left + r.width / 2;
+      if (before) tabsEl.insertBefore(tabEl, other);
+      else tabsEl.insertBefore(tabEl, other.nextSibling);
+      break;
+    }
+  }
+});
+const _endTabDrag = () => {
+  if (!tabDrag) return;
+  const { tabEl, started } = tabDrag;
+  tabDrag = null;
+  tabEl.classList.remove('dragging');
+  if (started) reorderTabsMap();
+};
+document.addEventListener('pointerup', _endTabDrag);
+document.addEventListener('pointercancel', _endTabDrag);
+
 // ---------- tab helpers ----------
 function getActivePane(tab) { return tab.panes.get(tab.activePaneId); }
 function tabAutoName(tab) {
@@ -491,12 +540,10 @@ async function createTab(opts = {}) {
     expandedPaths: new Set(), selectedPath: null
   };
   tabs.set(tabId, tab);
+  const autoColor = pickRandomUnusedColor();
+  if (autoColor) setTabColor(tab, autoColor);
 
-  tabEl.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.tab-close') || e.target.closest('.tab-rename-input')) return;
-    if (e.button === 1) { closeTab(tabId); return; }
-    setActive(tabId);
-  });
+  wireTabPointer(tabEl, tabId);
   closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
   titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
   tabEl.addEventListener('contextmenu', (e) => {
@@ -505,7 +552,7 @@ async function createTab(opts = {}) {
     showContextMenu(e.clientX, e.clientY, [
       { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
       { separator: true },
-      { swatches: TAB_COLORS, selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
       { separator: true },
       { label: 'Close tab', action: () => closeTab(tabId) }
     ]);
@@ -549,12 +596,10 @@ async function createEditorTab(filePath) {
     type: 'editor', filePath, editor: null, dirty: false
   };
   tabs.set(tabId, tab);
+  const autoColor = pickRandomUnusedColor();
+  if (autoColor) setTabColor(tab, autoColor);
 
-  tabEl.addEventListener('mousedown', (e) => {
-    if (e.target.closest('.tab-close')) return;
-    if (e.button === 1) { closeTab(tabId); return; }
-    setActive(tabId);
-  });
+  wireTabPointer(tabEl, tabId);
   closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -681,6 +726,20 @@ function setTabColor(tab, value) {
   tab.color = value;
   if (value) { tab.tabEl.style.setProperty('--tab-color', value); tab.tabEl.dataset.colored = '1'; }
   else { tab.tabEl.style.removeProperty('--tab-color'); delete tab.tabEl.dataset.colored; }
+}
+function colorsInUse(exceptTab = null) {
+  const used = new Set();
+  for (const [, t] of tabs) { if (t !== exceptTab && t.color) used.add(t.color); }
+  return used;
+}
+function pickRandomUnusedColor() {
+  const used = colorsInUse();
+  const free = TAB_COLORS.filter(c => c.value !== null && !used.has(c.value));
+  return free.length ? free[Math.floor(Math.random() * free.length)].value : null;
+}
+function availableColorsForTab(tab) {
+  const used = colorsInUse(tab);
+  return TAB_COLORS.filter(c => c.value === null || !used.has(c.value));
 }
 function startRename(tab) {
   const current = tab.customTitle || tab.titleEl.textContent || '';
