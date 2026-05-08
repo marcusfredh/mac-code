@@ -255,8 +255,12 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   };
   tab.panes.set(paneId, pane);
 
-  // Input
-  term.onData(data => window.term.input(ptyId, data));
+  // Input — extend suppressBusyUntil so PTY echo of keystrokes
+  // doesn't trigger the working indicator
+  term.onData(data => {
+    window.term.input(ptyId, data);
+    pane.suppressBusyUntil = Math.max(pane.suppressBusyUntil || 0, Date.now() + 200);
+  });
   term.onResize(({ cols, rows }) => window.term.resize(ptyId, cols, rows));
 
   // Ctrl+C: copy if selection, else send ^C to pty
@@ -433,6 +437,7 @@ function closePane(tab, paneId) {
   window.term.kill(pane.ptyId);
   ptyPaneMap.delete(pane.ptyId);
   pane.term.dispose();
+  paneWorkingState.delete(paneId);
   tab.panes.delete(paneId);
 
   // Collapse split: sibling expands to fill
@@ -916,7 +921,9 @@ function renderAgentPanel() {
       const ctx = pane.usage.contextTokens;
       const max = pane.usage.contextWindow || contextWindowFor(pane.usage.model);
       const pct = ctx != null ? Math.min(100, Math.round((ctx/max)*100)) : null;
-      const ul = document.createElement('div'); ul.className = 'agent-tab-usage';
+      const ul = document.createElement('div');
+      const usageCls = pct == null ? '' : pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '';
+      ul.className = 'agent-tab-usage' + usageCls;
       ul.textContent = pct != null ? `${formatTokens(ctx)} ctx · ${pct}% of ${max>=1e6?'1M':'200k'}` : `${formatTokens(ctx)} ctx`;
       main.appendChild(ul);
       if (pane.usage.model) {
@@ -942,8 +949,27 @@ async function refreshClaudeUsage() {
   await Promise.all(panes.map(async p => { try { p.usage = await window.claudeApi.usage(p.cwd); } catch (_) {} }));
   scheduleAgentRender();
 }
+// ---------- Claude finish notifications ----------
+const paneWorkingState = new Map();
+
+function checkClaudeNotifications() {
+  const now = Date.now();
+  for (const [, tab] of tabs) {
+    for (const [, pane] of tab.panes) {
+      if (!pane.claudeRunning) { paneWorkingState.delete(pane.paneId); continue; }
+      const working = now < pane.claudeBusyUntil;
+      const wasWorking = paneWorkingState.get(pane.paneId) ?? false;
+      if (wasWorking && !working && !document.hasFocus()) {
+        const name = tab.customTitle || tabAutoName(tab);
+        new Notification('Claude finished', { body: `${name} is ready`, silent: false });
+      }
+      paneWorkingState.set(pane.paneId, working);
+    }
+  }
+}
+
 setInterval(refreshClaudeUsage, 2000);
-setInterval(() => { if (getAllClaudePanes().length > 0) renderAgentPanel(); }, 400);
+setInterval(() => { if (getAllClaudePanes().length > 0) { renderAgentPanel(); checkClaudeNotifications(); } }, 400);
 renderAgentPanel();
 
 // ---------- window controls ----------

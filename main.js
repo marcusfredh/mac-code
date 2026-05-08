@@ -4,6 +4,8 @@ const os = require('os');
 const fs = require('fs');
 const pty = require('node-pty');
 
+app.setName('Mac Code');
+app.setAppUserModelId('Mac Code');
 let mainWindow = null;
 const ptys = new Map();
 
