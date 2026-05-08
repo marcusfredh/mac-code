@@ -380,6 +380,48 @@
       color: #666;
       font-style: italic;
     }
+    .agent-tab-save {
+      width: 18px; height: 18px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      color: #888;
+      border-radius: 3px;
+      flex-shrink: 0;
+      font-size: 13px;
+      line-height: 1;
+    }
+    .agent-tab-save:hover { color: #fff; background: rgba(255,255,255,0.08); }
+    .saved-session {
+      display: flex; flex-direction: column; gap: 1px;
+      padding: 6px 9px;
+      border-radius: 4px;
+      background: rgba(59, 120, 255, 0.06);
+      border: 1px solid rgba(59, 120, 255, 0.18);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .saved-session:hover { background: rgba(59, 120, 255, 0.16); }
+    .saved-session-name {
+      font-size: 12px;
+      color: #e0e0e0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .saved-session-cwd {
+      font-size: 10px;
+      color: #6e8aa8;
+      font-family: 'Cascadia Code', Consolas, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .saved-session-rename-input {
+      background: #1e1e1e;
+      color: #fff;
+      border: 1px solid var(--accent);
+      border-radius: 2px;
+      padding: 1px 5px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 12px;
+      outline: none;
+    }
     .agent-tab-model {
       font-size: 10px;
       color: #6e8aa8;
@@ -643,6 +685,13 @@
         </div>
         <div class="agent-list" id="agent-list"></div>
       </div>
+      <div class="agent claude-saved">
+        <div class="agent-hdr">
+          <span class="agent-hdr-dot" style="background:#3b78ff"></span>
+          Saved Sessions
+        </div>
+        <div class="agent-list" id="claude-sessions-list"></div>
+      </div>
     </aside>
     <div class="sidebar-resize" id="sidebar-resize" title="Drag to resize"></div>
     <div class="sidebar-handle" id="sidebar-handle" title="Show Explorer">›</div>
@@ -665,6 +714,7 @@
 
   <script src="node_modules/xterm/lib/xterm.js"></script>
   <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script src="node_modules/xterm-addon-serialize/lib/xterm-addon-serialize.js"></script>
   <script>
     self.MonacoEnvironment = {
       getWorker(_, label) {

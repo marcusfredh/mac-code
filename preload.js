@@ -43,3 +43,8 @@ contextBridge.exposeInMainWorld('fileApi', {
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),
   openExternal: (p)          => ipcRenderer.invoke('file:openExternal', p)
 });
+
+contextBridge.exposeInMainWorld('sessionApi', {
+  load: ()     => ipcRenderer.invoke('session:load'),
+  save: (data) => ipcRenderer.send('session:save', data)
+});

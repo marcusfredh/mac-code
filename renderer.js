@@ -1,6 +1,8 @@
 const { Terminal } = window;
 const FitAddonNs = window.FitAddon || {};
 const FitAddon = FitAddonNs.FitAddon || FitAddonNs.default || FitAddonNs;
+const SerializeAddonNs = window.SerializeAddon || {};
+const SerializeAddon = SerializeAddonNs.SerializeAddon || SerializeAddonNs.default || SerializeAddonNs;
 
 const WINDOWS_TERMINAL_THEME = {
   background: '#0c0c0c', foreground: '#cccccc', cursor: '#ffffff',
@@ -88,6 +90,7 @@ function reorderTabsMap() {
   tabs.clear();
   for (const [id, t] of newOrder) tabs.set(id, t);
   updateStatus();
+  scheduleSaveSession();
 }
 function wireTabPointer(tabEl, tabId) {
   tabEl.addEventListener('pointerdown', (e) => {
@@ -198,6 +201,7 @@ function setActive(tabId) {
   renderTree();
   updateStatus();
   scheduleAgentRender();
+  scheduleSaveSession();
 }
 
 // ---------- context menu ----------
@@ -287,8 +291,14 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  const serialize = new SerializeAddon();
+  term.loadAddon(serialize);
   term.open(paneEl);
   fit.fit();
+
+  if (opts.initialContent) {
+    try { term.write(opts.initialContent); } catch (_) {}
+  }
 
   const { id: ptyId, cwd } = await window.term.create({
     cols: term.cols, rows: term.rows, cwd: opts.cwd || undefined
@@ -297,8 +307,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   ptyPaneMap.set(ptyId, { tabId: tab.tabId, paneId });
 
   const pane = {
-    paneId, ptyId, term, fit, el: paneEl, ro: null,
-    cwd, claudeRunning: false, claudeBusyUntil: 0,
+    paneId, ptyId, term, fit, serialize, el: paneEl, ro: null,
+    cwd, claudeRunning: false, claudeBusyUntil: 0, claudeSessionId: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
     runOnReady: opts.runOnReady || null
   };
@@ -419,6 +429,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (!cwd) return false;
     if (pane.cwd !== cwd) {
       pane.cwd = cwd;
+      scheduleSaveSession();
       if (tab.activePaneId === paneId) {
         if (!tab.customTitle) tab.titleEl.textContent = basename(cwd) || 'PowerShell';
         if (tab.tabId === activeId) { renderTree(); updateStatus(); }
@@ -558,7 +569,7 @@ async function createTab(opts = {}) {
     ]);
   });
 
-  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady });
+  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent });
   tab.activePaneId = firstPane.paneId;
 
   setActive(tabId);
@@ -671,7 +682,7 @@ function closeTab(tabId) {
     try { tab.editor?.dispose(); } catch (_) {}
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
     if (activeId === tabId) { activeId = null; const n = tabs.keys().next().value; if (n) setActive(n); else window.win.close(); }
-    updateStatus(); scheduleAgentRender(); return;
+    updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   for (const [, pane] of tab.panes) {
     if (pane.ro) { try { pane.ro.disconnect(); } catch (_) {} }
@@ -690,6 +701,7 @@ function closeTab(tabId) {
   }
   updateStatus();
   scheduleAgentRender();
+  scheduleSaveSession();
 }
 
 // ---------- stream pty data ----------
@@ -726,6 +738,7 @@ function setTabColor(tab, value) {
   tab.color = value;
   if (value) { tab.tabEl.style.setProperty('--tab-color', value); tab.tabEl.dataset.colored = '1'; }
   else { tab.tabEl.style.removeProperty('--tab-color'); delete tab.tabEl.dataset.colored; }
+  scheduleSaveSession();
 }
 function colorsInUse(exceptTab = null) {
   const used = new Set();
@@ -756,6 +769,7 @@ function startRename(tab) {
     else { tab.customTitle = null; span.textContent = tabAutoName(tab); }
     input.replaceWith(span); tab.titleEl = span;
     span.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
+    scheduleSaveSession();
   };
   input.addEventListener('blur', () => finish(true));
   input.addEventListener('keydown', (e) => {
@@ -958,56 +972,188 @@ function getAllClaudePanes() {
   return result;
 }
 
+const agentRowCache = new Map();
 function renderAgentPanel() {
   if (!agentListEl) return;
   const running = getAllClaudePanes();
-  agentListEl.innerHTML = '';
   if (running.length === 0) {
-    const e = document.createElement('div'); e.className = 'agent-empty';
-    e.textContent = 'No Claude sessions running'; agentListEl.appendChild(e); return;
+    if (agentRowCache.size || !agentListEl.querySelector('.agent-empty')) {
+      agentListEl.innerHTML = '';
+      agentRowCache.clear();
+      const e = document.createElement('div'); e.className = 'agent-empty';
+      e.textContent = 'No Claude sessions running'; agentListEl.appendChild(e);
+    }
+    return;
   }
+  const placeholder = agentListEl.querySelector('.agent-empty');
+  if (placeholder) placeholder.remove();
+
+  const seen = new Set();
   const now = Date.now();
   for (const { tab, pane } of running) {
+    seen.add(pane.paneId);
+    let c = agentRowCache.get(pane.paneId);
+    if (!c) {
+      const row = document.createElement('div'); row.className = 'agent-tab idle';
+      const dot = document.createElement('span'); dot.className = 'agent-status-dot';
+      const main = document.createElement('div'); main.className = 'agent-tab-main';
+      const top = document.createElement('div'); top.className = 'agent-tab-top';
+      const nameEl = document.createElement('span'); nameEl.className = 'agent-tab-name';
+      const statEl = document.createElement('span'); statEl.className = 'agent-tab-status';
+      top.appendChild(nameEl); top.appendChild(statEl); main.appendChild(top);
+      const usageEl = document.createElement('div'); main.appendChild(usageEl);
+      const modelEl = document.createElement('div'); modelEl.className = 'agent-tab-model'; main.appendChild(modelEl);
+      const saveBtn = document.createElement('span');
+      saveBtn.className = 'agent-tab-save'; saveBtn.title = 'Save Claude session'; saveBtn.textContent = '＋';
+      saveBtn.addEventListener('click', (e) => { e.stopPropagation(); saveCurrentClaudeSession(pane, tab); });
+      row.appendChild(dot); row.appendChild(main); row.appendChild(saveBtn);
+      row.addEventListener('click', () => { setActive(tab.tabId); setActivePane(tab, pane.paneId); });
+      agentListEl.appendChild(row);
+      c = { row, nameEl, statEl, usageEl, modelEl, saveBtn };
+      agentRowCache.set(pane.paneId, c);
+    }
     const working = now < pane.claudeBusyUntil;
-    const row = document.createElement('div'); row.className = 'agent-tab '+(working?'working':'idle');
-    const dot  = document.createElement('span'); dot.className = 'agent-status-dot';
-    const main = document.createElement('div'); main.className = 'agent-tab-main';
-    const top  = document.createElement('div'); top.className = 'agent-tab-top';
-    const name = document.createElement('span'); name.className = 'agent-tab-name';
-    name.textContent = (tab.customTitle || tabAutoName(tab)) + (tab.panes.size > 1 ? ` [pane]` : '');
-    const stat = document.createElement('span'); stat.className = 'agent-tab-status';
-    stat.textContent = working ? 'working' : 'idle';
-    top.appendChild(name); top.appendChild(stat); main.appendChild(top);
+    const newCls = 'agent-tab ' + (working ? 'working' : 'idle');
+    if (c.row.className !== newCls) c.row.className = newCls;
+    const newName = (tab.customTitle || tabAutoName(tab)) + (tab.panes.size > 1 ? ' [pane]' : '');
+    if (c.nameEl.textContent !== newName) c.nameEl.textContent = newName;
+    const newStat = working ? 'working' : 'idle';
+    if (c.statEl.textContent !== newStat) c.statEl.textContent = newStat;
+
     if (pane.usage && !pane.usage.error) {
       const ctx = pane.usage.contextTokens;
       const max = pane.usage.contextWindow || contextWindowFor(pane.usage.model);
       const pct = ctx != null ? Math.min(100, Math.round((ctx/max)*100)) : null;
-      const ul = document.createElement('div');
-      const usageCls = pct == null ? '' : pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '';
-      ul.className = 'agent-tab-usage' + usageCls;
-      ul.textContent = pct != null ? `${formatTokens(ctx)} ctx · ${pct}% of ${max>=1e6?'1M':'200k'}` : `${formatTokens(ctx)} ctx`;
-      main.appendChild(ul);
+      const usageCls = 'agent-tab-usage' + (pct == null ? '' : pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '');
+      const usageText = pct != null ? `${formatTokens(ctx)} ctx · ${pct}% of ${max>=1e6?'1M':'200k'}` : `${formatTokens(ctx)} ctx`;
+      if (c.usageEl.className !== usageCls) c.usageEl.className = usageCls;
+      if (c.usageEl.textContent !== usageText) c.usageEl.textContent = usageText;
       if (pane.usage.model) {
-        const ml = document.createElement('div'); ml.className = 'agent-tab-model';
-        ml.textContent = shortModelLabel(pane.usage.model); main.appendChild(ml);
-      }
+        const lbl = shortModelLabel(pane.usage.model);
+        if (c.modelEl.textContent !== lbl) c.modelEl.textContent = lbl;
+        c.modelEl.style.display = '';
+      } else { c.modelEl.style.display = 'none'; }
     } else if (pane.usage?.error) {
-      const ul = document.createElement('div'); ul.className = 'agent-tab-usage muted';
-      ul.textContent = 'no session yet'; main.appendChild(ul);
+      if (c.usageEl.className !== 'agent-tab-usage muted') c.usageEl.className = 'agent-tab-usage muted';
+      if (c.usageEl.textContent !== 'no session yet') c.usageEl.textContent = 'no session yet';
+      c.modelEl.style.display = 'none';
+    } else {
+      if (c.usageEl.className !== 'agent-tab-usage') c.usageEl.className = 'agent-tab-usage';
+      if (c.usageEl.textContent !== '') c.usageEl.textContent = '';
+      c.modelEl.style.display = 'none';
     }
-    row.appendChild(dot); row.appendChild(main);
-    row.addEventListener('click', () => { setActive(tab.tabId); setActivePane(tab, pane.paneId); });
-    agentListEl.appendChild(row);
+    c.saveBtn.style.display = pane.claudeSessionId ? '' : 'none';
+  }
+  for (const [pid, c] of agentRowCache) {
+    if (!seen.has(pid)) { c.row.remove(); agentRowCache.delete(pid); }
   }
 }
 
+// ---------- Saved Claude sessions library ----------
+const claudeSessionLibrary = [];
+const claudeSessionsListEl = document.getElementById('claude-sessions-list');
+
+function renderClaudeSessions() {
+  if (!claudeSessionsListEl) return;
+  claudeSessionsListEl.innerHTML = '';
+  if (!claudeSessionLibrary.length) {
+    const e = document.createElement('div'); e.className = 'agent-empty';
+    e.textContent = 'No saved sessions'; claudeSessionsListEl.appendChild(e); return;
+  }
+  for (const s of claudeSessionLibrary) {
+    const row = document.createElement('div'); row.className = 'saved-session';
+    const nm = document.createElement('span'); nm.className = 'saved-session-name'; nm.textContent = s.name;
+    const cw = document.createElement('span'); cw.className = 'saved-session-cwd'; cw.textContent = basename(s.cwd);
+    row.appendChild(nm); row.appendChild(cw);
+    row.addEventListener('click', () => {
+      createTab({ cwd: s.cwd, runOnReady: `claude --resume ${s.id}` });
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      showContextMenu(e.clientX, e.clientY, [
+        { label: 'Rename', action: () => startRenameSavedSession(s, nm) },
+        { label: 'Resume', action: () => createTab({ cwd: s.cwd, runOnReady: `claude --resume ${s.id}` }) },
+        { separator: true },
+        { label: 'Remove', action: () => {
+          const i = claudeSessionLibrary.indexOf(s);
+          if (i >= 0) claudeSessionLibrary.splice(i, 1);
+          renderClaudeSessions(); scheduleSaveSession();
+        }}
+      ]);
+    });
+    claudeSessionsListEl.appendChild(row);
+  }
+}
+
+function startRenameSavedSession(s, nameEl) {
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'saved-session-rename-input'; input.value = s.name;
+  nameEl.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return; done = true;
+    const span = document.createElement('span'); span.className = 'saved-session-name';
+    const v = input.value.trim();
+    if (commit && v) s.name = v;
+    span.textContent = s.name;
+    input.replaceWith(span);
+    renderClaudeSessions();
+    scheduleSaveSession();
+  };
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('mousedown', (e) => e.stopPropagation());
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+function saveCurrentClaudeSession(pane, tab) {
+  if (!pane.claudeSessionId || !pane.cwd) return;
+  if (claudeSessionLibrary.some(s => s.id === pane.claudeSessionId)) return;
+  const defaultName = (tab.customTitle || tabAutoName(tab)) + ' · ' + new Date().toISOString().slice(0,10);
+  claudeSessionLibrary.push({ id: pane.claudeSessionId, cwd: pane.cwd, name: defaultName });
+  renderClaudeSessions();
+  scheduleSaveSession();
+  // Find row in list and start rename immediately
+  const last = claudeSessionsListEl.lastElementChild;
+  if (last) {
+    const nm = last.querySelector('.saved-session-name');
+    if (nm) startRenameSavedSession(claudeSessionLibrary[claudeSessionLibrary.length - 1], nm);
+  }
+}
+
+function maybeAutoSaveClaudeSession(tab, pane) {
+  if (!pane.claudeSessionId || !pane.cwd || !pane.usage || pane.usage.error) return;
+  const ctx = pane.usage.contextTokens;
+  const max = pane.usage.contextWindow || 200000;
+  if (!ctx || !max) return;
+  const pct = (ctx / max) * 100;
+  if (pct < 10) return;
+  if (claudeSessionLibrary.some(s => s.id === pane.claudeSessionId)) return;
+  const stamp = new Date().toISOString().slice(0,16).replace('T',' ');
+  const name = (tab.customTitle || tabAutoName(tab)) + ' · ' + stamp;
+  claudeSessionLibrary.push({ id: pane.claudeSessionId, cwd: pane.cwd, name });
+  renderClaudeSessions();
+  scheduleSaveSession();
+}
+
 async function refreshClaudeUsage() {
-  const panes = [];
+  const items = [];
   for (const [, tab] of tabs)
     for (const [, pane] of tab.panes)
-      if (pane.claudeRunning && pane.cwd) panes.push(pane);
-  if (!panes.length) return;
-  await Promise.all(panes.map(async p => { try { p.usage = await window.claudeApi.usage(p.cwd); } catch (_) {} }));
+      if (pane.claudeRunning && pane.cwd) items.push({ tab, pane });
+  if (!items.length) return;
+  await Promise.all(items.map(async ({ tab, pane }) => {
+    try {
+      pane.usage = await window.claudeApi.usage(pane.cwd);
+      if (pane.usage?.sessionId) pane.claudeSessionId = pane.usage.sessionId;
+      maybeAutoSaveClaudeSession(tab, pane);
+    } catch (_) {}
+  }));
   scheduleAgentRender();
 }
 // ---------- Claude finish notifications ----------
@@ -1032,6 +1178,7 @@ function checkClaudeNotifications() {
 setInterval(refreshClaudeUsage, 2000);
 setInterval(() => { if (getAllClaudePanes().length > 0) { renderAgentPanel(); checkClaudeNotifications(); } }, 400);
 renderAgentPanel();
+renderClaudeSessions();
 
 // ---------- window controls ----------
 document.getElementById('btn-min').addEventListener('click',   () => window.win.minimize());
@@ -1072,5 +1219,63 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------- session persistence ----------
+let _sessionReady = false;
+let saveTimer = null;
+function saveSession() {
+  const tabsData = [];
+  let activeIndex = -1;
+  let i = 0;
+  for (const [id, t] of tabs) {
+    const ap = t.type === 'editor' ? null : getActivePane(t);
+    let scrollback = null;
+    if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: 5000 }); } catch (_) {} }
+    tabsData.push({
+      type: t.type === 'editor' ? 'editor' : 'terminal',
+      cwd: ap?.cwd || null,
+      filePath: t.filePath || null,
+      customTitle: t.customTitle || null,
+      color: t.color || null,
+      scrollback
+    });
+    if (id === activeId) activeIndex = i;
+    i++;
+  }
+  window.sessionApi.save({ tabs: tabsData, activeIndex, claudeSessions: claudeSessionLibrary });
+}
+function scheduleSaveSession() {
+  if (!_sessionReady) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSession, 500);
+}
+window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSession(); });
+
 // ---------- boot ----------
-createTab();
+(async () => {
+  let restored = false;
+  try {
+    const sess = await window.sessionApi.load();
+    if (Array.isArray(sess?.claudeSessions)) {
+      claudeSessionLibrary.length = 0;
+      claudeSessionLibrary.push(...sess.claudeSessions);
+      renderClaudeSessions();
+    }
+    if (sess?.tabs?.length) {
+      const created = [];
+      for (const t of sess.tabs) {
+        let tab;
+        if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath);
+        else tab = await createTab({ cwd: t.cwd || undefined, initialContent: t.scrollback || null });
+        if (t.color) setTabColor(tab, t.color);
+        if (t.customTitle) { tab.customTitle = t.customTitle; tab.titleEl.textContent = t.customTitle; }
+        created.push(tab);
+      }
+      const idx = sess.activeIndex;
+      if (idx >= 0 && idx < created.length) setActive(created[idx].tabId);
+      restored = true;
+    }
+  } catch (_) {}
+  if (!restored) await createTab();
+  _sessionReady = true;
+  scheduleSaveSession();
+})();

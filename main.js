@@ -307,6 +307,7 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
       apiModel: model,
       contextWindow,
       sessionFile: path.basename(target.p),
+      sessionId: path.basename(target.p, '.jsonl'),
       mtime: target.mtime
     };
   } catch (err) {
@@ -326,4 +327,15 @@ ipcMain.handle('file:write', async (_, p, content) => {
 ipcMain.handle('file:openExternal', async (_, p) => {
   const err = await shell.openPath(p);
   return err ? { error: err } : { ok: true };
+});
+
+// ----- IPC: Session persistence -----
+function sessionFile() { return path.join(app.getPath('userData'), 'session.json'); }
+ipcMain.handle('session:load', async () => {
+  try { return JSON.parse(await fs.promises.readFile(sessionFile(), 'utf8')); }
+  catch (_) { return null; }
+});
+ipcMain.on('session:save', async (_, data) => {
+  try { await fs.promises.writeFile(sessionFile(), JSON.stringify(data), 'utf8'); }
+  catch (_) {}
 });
