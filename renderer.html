@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:;" />
+  <title>Mac Code</title>
+  <link rel="stylesheet" href="node_modules/@fontsource/cascadia-code/400.css" />
+  <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
+  <style>
+    :root {
+      --bg: #0c0c0c;
+      --titlebar-bg: #0c0c0c;
+      --tabbar-bg: #1f1f1f;
+      --tab-bg: #2d2d2d;
+      --tab-active-bg: #0c0c0c;
+      --sidebar-bg: #181818;
+      --sidebar-border: #252525;
+      --fg: #cccccc;
+      --fg-dim: #8a8a8a;
+      --fg-faint: #666;
+      --accent: #007acc;
+      --close-hover: #c42b1c;
+      --hover: #2a2d2e;
+      --tree-sel: #094771;
+      --border: #1a1a1a;
+      --agent-bg: #0d2b1e;
+      --agent-border: #1a4a30;
+      --agent-fg: #4ec994;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Cascadia Code', Consolas, monospace;
+      font-size: 13px;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Titlebar */
+    .titlebar {
+      height: 32px;
+      background: var(--titlebar-bg);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      -webkit-app-region: drag;
+      flex-shrink: 0;
+    }
+    .titlebar-title {
+      padding: 0 12px;
+      font-size: 12px;
+      color: var(--fg-dim);
+      letter-spacing: 0.3px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .titlebar-controls {
+      display: flex;
+      -webkit-app-region: no-drag;
+      height: 100%;
+    }
+    .titlebar-btn {
+      width: 46px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      background: transparent;
+      border: none;
+      color: var(--fg);
+      transition: background 0.15s;
+    }
+    .titlebar-btn:hover { background: var(--hover); }
+    .titlebar-btn.close:hover { background: var(--close-hover); color: #fff; }
+    .titlebar-btn svg { width: 10px; height: 10px; }
+
+    /* Tab bar */
+    .tabbar {
+      height: 36px;
+      background: var(--tabbar-bg);
+      display: flex;
+      align-items: flex-end;
+      padding: 0 4px;
+      -webkit-app-region: drag;
+      flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .tabs {
+      display: flex;
+      flex: 1;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: none;
+      -webkit-app-region: no-drag;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
+      padding: 0 10px 0 12px;
+      background: var(--tab-bg);
+      color: var(--fg-dim);
+      cursor: pointer;
+      min-width: 120px;
+      max-width: 220px;
+      border-right: 1px solid var(--border);
+      border-bottom: 2px solid transparent;
+      font-size: 12px;
+      flex-shrink: 0;
+      position: relative;
+    }
+    .tab.active {
+      background: var(--tab-active-bg);
+      color: var(--fg);
+      border-bottom: 2px solid var(--accent);
+    }
+    .tab[data-colored].active {
+      border-bottom-color: var(--tab-color);
+    }
+    .tab[data-colored]::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: var(--tab-color);
+      pointer-events: none;
+    }
+    .tab-rename-input {
+      flex: 1;
+      background: #1e1e1e;
+      color: #fff;
+      border: 1px solid var(--accent);
+      border-radius: 2px;
+      padding: 1px 5px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 12px;
+      outline: none;
+      min-width: 50px;
+      max-width: 160px;
+    }
+    .tab-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.85; }
+    .tab-title {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .tab-close {
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+      flex-shrink: 0;
+      opacity: 0.6;
+    }
+    .tab-close:hover { background: var(--hover); opacity: 1; }
+    .tab-close svg { width: 10px; height: 10px; }
+    .new-tab-btn {
+      -webkit-app-region: no-drag;
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--fg-dim);
+      flex-shrink: 0;
+    }
+    .new-tab-btn:hover { color: var(--fg); background: var(--hover); }
+
+    /* Body: sidebar + terminal */
+    .body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      background: var(--bg);
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 240px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--sidebar-border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.18s ease;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .sidebar.collapsed { width: 0 !important; border-right: 0; }
+    .sidebar.no-transition { transition: none; }
+    .sidebar-hdr {
+      padding: 8px 10px;
+      font-size: 10px;
+      color: var(--fg-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-bottom: 1px solid var(--sidebar-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .sb-actions { display: flex; gap: 6px; }
+    .sb-btn {
+      cursor: pointer;
+      color: #555;
+      font-size: 12px;
+      padding: 1px 4px;
+      border-radius: 2px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .sb-btn:hover { color: #aaa; background: var(--hover); }
+    .sb-btn svg { width: 11px; height: 11px; }
+
+    .tree {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
+    .tree::-webkit-scrollbar { width: 8px; }
+    .tree::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    .tree::-webkit-scrollbar-track { background: transparent; }
+
+    .wt-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 6px;
+      font-size: 12px;
+      cursor: pointer;
+      color: #b0b0b0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .wt-item:hover { background: #252526; color: #e6e6e6; }
+    .wt-item.sel { background: var(--tree-sel); color: #ffffff; }
+    .wt-arrow {
+      font-size: 8px;
+      color: #555;
+      flex-shrink: 0;
+      transition: transform 0.12s;
+      width: 10px;
+      text-align: center;
+      display: inline-block;
+    }
+    .wt-item.open > .wt-arrow { transform: rotate(90deg); }
+    .wt-name { overflow: hidden; text-overflow: ellipsis; }
+    .wt-icon { width: 14px; flex-shrink: 0; text-align: center; font-size: 12px; }
+    .wt-empty {
+      padding: 6px 12px;
+      font-size: 11px;
+      color: var(--fg-faint);
+      font-style: italic;
+    }
+    .wt-error {
+      padding: 6px 12px;
+      font-size: 11px;
+      color: #f44747;
+    }
+
+    /* Claude Agent panel */
+    .agent {
+      border-top: 1px solid var(--sidebar-border);
+      padding: 12px 12px 14px;
+      flex-shrink: 0;
+      max-height: 280px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
+    .agent::-webkit-scrollbar { width: 8px; }
+    .agent::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    .agent-hdr {
+      font-size: 11px;
+      color: var(--fg-faint);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .agent-hdr-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--agent-fg);
+      animation: agentpulse 2s infinite;
+    }
+    @keyframes agentpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+    .agent-list { display: flex; flex-direction: column; gap: 4px; }
+    .agent-empty {
+      font-size: 11px;
+      color: var(--fg-faint);
+      font-style: italic;
+      padding: 4px 2px;
+    }
+    .agent-tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 4px;
+      background: rgba(78, 201, 148, 0.06);
+      border: 1px solid rgba(78, 201, 148, 0.18);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .agent-tab:hover { background: rgba(78, 201, 148, 0.14); }
+    .agent-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .agent-tab.idle .agent-status-dot {
+      background: var(--agent-fg);
+      box-shadow: 0 0 4px rgba(78, 201, 148, 0.6);
+    }
+    .agent-tab.working .agent-status-dot {
+      background: #d7ba7d;
+      box-shadow: 0 0 4px rgba(215, 186, 125, 0.7);
+      animation: agentpulse 0.9s infinite;
+    }
+    .agent-tab-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .agent-tab-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .agent-tab-name {
+      flex: 1;
+      font-size: 12px;
+      color: #e0e0e0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .agent-tab-status {
+      font-size: 10px;
+      color: var(--fg-faint);
+      text-transform: lowercase;
+    }
+    .agent-tab.working .agent-tab-status { color: #d7ba7d; }
+    .agent-tab.idle .agent-tab-status { color: var(--agent-fg); }
+    .agent-tab-usage {
+      font-size: 10.5px;
+      color: #9aa0a6;
+      font-family: 'Cascadia Code', Consolas, monospace;
+    }
+    .agent-tab-usage.muted {
+      color: #666;
+      font-style: italic;
+    }
+    .agent-tab-model {
+      font-size: 10px;
+      color: #6e8aa8;
+      font-family: 'Cascadia Code', Consolas, monospace;
+      letter-spacing: 0.02em;
+    }
+
+    /* Sidebar collapsed reveal handle */
+    .sidebar-handle {
+      width: 14px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--sidebar-border);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--fg-faint);
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .sidebar-handle:hover { color: var(--fg); background: var(--hover); }
+    .sidebar.collapsed + .sidebar-resize { display: none; }
+    .sidebar.collapsed + .sidebar-resize + .sidebar-handle { display: flex; }
+
+    /* Sidebar drag-to-resize splitter */
+    .sidebar-resize {
+      width: 4px;
+      margin-left: -2px;
+      margin-right: -2px;
+      cursor: ew-resize;
+      flex-shrink: 0;
+      background: transparent;
+      z-index: 5;
+      position: relative;
+      transition: background 0.12s;
+    }
+    .sidebar-resize:hover,
+    .sidebar-resize.dragging { background: var(--accent); }
+    body.resizing-sidebar { cursor: ew-resize !important; user-select: none; }
+    body.resizing-sidebar * { cursor: ew-resize !important; pointer-events: none; }
+    body.resizing-sidebar .sidebar-resize { pointer-events: auto; }
+
+    /* Terminal area */
+    .terminal-area {
+      flex: 1;
+      position: relative;
+      background: var(--bg);
+      overflow: hidden;
+      min-width: 0;
+    }
+    .term-container {
+      position: absolute;
+      inset: 0;
+      padding: 6px 4px 4px 8px;
+      display: none;
+      overflow: hidden;
+    }
+    .term-container.active { display: block; }
+    .term-container .xterm { height: 100%; }
+    .term-container .xterm-viewport::-webkit-scrollbar { width: 10px; }
+    .term-container .xterm-viewport::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 5px; }
+    .term-container .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+
+    /* Status bar */
+    .statusbar {
+      height: 22px;
+      background: var(--accent);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      font-size: 11px;
+      flex-shrink: 0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .statusbar-left, .statusbar-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .status-cwd {
+      font-family: 'Cascadia Code', Consolas, monospace;
+      max-width: 60vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #2ecc71;
+      box-shadow: 0 0 4px #2ecc71;
+    }
+
+    /* Context menu */
+    .ctx-menu {
+      position: fixed;
+      display: none;
+      min-width: 200px;
+      background: #2d2d2d;
+      border: 1px solid #454545;
+      border-radius: 4px;
+      padding: 4px 0;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+      z-index: 1000;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 12px;
+      color: #e6e6e6;
+      user-select: none;
+    }
+    .ctx-item {
+      padding: 6px 14px;
+      cursor: pointer;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ctx-item:hover { background: #094771; color: #ffffff; }
+    .ctx-item.disabled { color: #666; cursor: default; }
+    .ctx-item.disabled:hover { background: transparent; color: #666; }
+    .ctx-sep { height: 1px; background: #454545; margin: 4px 0; }
+    .ctx-shortcut { margin-left: auto; color: #999; font-size: 11px; }
+    .ctx-swatches {
+      display: flex;
+      gap: 6px;
+      padding: 8px 12px;
+      align-items: center;
+    }
+    .ctx-swatch {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 1.5px solid #555;
+      transition: transform 0.1s, border-color 0.1s;
+      box-sizing: border-box;
+    }
+    .ctx-swatch:hover { transform: scale(1.18); border-color: #fff; }
+    .ctx-swatch.none {
+      background:
+        linear-gradient(45deg, transparent 46%, #f44747 46%, #f44747 54%, transparent 54%),
+        #2a2a2a;
+    }
+    .ctx-swatch.selected { border-color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <div class="titlebar-title">Mac Code</div>
+    <div class="titlebar-controls">
+      <button class="titlebar-btn" id="btn-min" title="Minimize">
+        <svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+      </button>
+      <button class="titlebar-btn" id="btn-max" title="Maximize">
+        <svg viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+      </button>
+      <button class="titlebar-btn close" id="btn-close" title="Close">
+        <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="tabbar">
+    <div class="tabs" id="tabs"></div>
+    <div class="new-tab-btn" id="new-tab" title="New tab">
+      <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+    </div>
+  </div>
+
+  <div class="body">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-hdr">
+        <span>Explorer</span>
+        <div class="sb-actions">
+          <span class="sb-btn" id="sb-up" title="Parent folder">
+            <svg viewBox="0 0 12 12"><path d="M3 7l3-3 3 3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="sb-btn" id="sb-refresh" title="Refresh">
+            <svg viewBox="0 0 12 12"><path d="M10 4a4 4 0 1 1-1-1.6M10 1.5V4H7.5" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="sb-btn" id="sb-collapse" title="Collapse">‹</span>
+        </div>
+      </div>
+      <div class="tree" id="tree"></div>
+      <div class="agent">
+        <div class="agent-hdr">
+          <span class="agent-hdr-dot"></span>
+          Claude Agent
+        </div>
+        <div class="agent-list" id="agent-list"></div>
+      </div>
+    </aside>
+    <div class="sidebar-resize" id="sidebar-resize" title="Drag to resize"></div>
+    <div class="sidebar-handle" id="sidebar-handle" title="Show Explorer">›</div>
+
+    <div class="terminal-area" id="terminal-area"></div>
+  </div>
+
+  <div class="statusbar">
+    <div class="statusbar-left">
+      <span class="status-cwd" id="status-cwd">~</span>
+      <span id="status-tabs">1 tab</span>
+    </div>
+    <div class="statusbar-right">
+      <span>Claude Code ready</span>
+      <span class="status-dot"></span>
+    </div>
+  </div>
+
+  <div class="ctx-menu" id="ctx-menu"></div>
+
+  <script src="node_modules/xterm/lib/xterm.js"></script>
+  <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
