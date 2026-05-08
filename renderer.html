@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:;" />
   <title>Mac Code</title>
   <link rel="stylesheet" href="node_modules/@fontsource/cascadia-code/400.css" />
   <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="node_modules/monaco-editor/min/vs/editor/editor.main.css" />
   <style>
     :root {
       --bg: #0c0c0c;
@@ -578,6 +578,18 @@
         #2a2a2a;
     }
     .ctx-swatch.selected { border-color: #fff; }
+
+    /* Editor tab */
+    .editor-pane {
+      position: absolute;
+      inset: 0;
+    }
+    .editor-error {
+      padding: 20px;
+      color: #f44747;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -647,6 +659,21 @@
 
   <script src="node_modules/xterm/lib/xterm.js"></script>
   <script src="node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script>
+    self.MonacoEnvironment = {
+      getWorker(_, label) {
+        const src = 'self.onmessage=function(){};';
+        return new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+      }
+    };
+  </script>
+  <script src="node_modules/monaco-editor/min/vs/loader.js"></script>
+  <script>
+    require.config({ paths: { vs: 'node_modules/monaco-editor/min/vs' } });
+    window._monacoReady = new Promise((resolve, reject) => {
+      require(['vs/editor/editor.main'], resolve, reject);
+    });
+  </script>
   <script src="renderer.js"></script>
 </body>
 </html>

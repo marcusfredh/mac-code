@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -310,4 +310,18 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
   } catch (err) {
     return { error: err.code || err.message };
   }
+});
+
+// ----- IPC: File API -----
+ipcMain.handle('file:read', async (_, p) => {
+  try { return { content: await fs.promises.readFile(p, 'utf8') }; }
+  catch (err) { return { error: err.message }; }
+});
+ipcMain.handle('file:write', async (_, p, content) => {
+  try { await fs.promises.writeFile(p, content, 'utf8'); return { ok: true }; }
+  catch (err) { return { error: err.message }; }
+});
+ipcMain.handle('file:openExternal', async (_, p) => {
+  const err = await shell.openPath(p);
+  return err ? { error: err } : { ok: true };
 });

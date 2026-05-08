@@ -41,6 +41,13 @@ function shellSvg() {
 function closeSvg() {
   return `<svg viewBox="0 0 10 10"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round"/></svg>`;
 }
+function editorSvg() {
+  return `<svg class="tab-icon" viewBox="0 0 16 16" fill="none">
+    <rect x="2" y="1" width="9" height="12" rx="1" stroke="currentColor" stroke-width="1"/>
+    <path d="M4 5h5M4 7.5h5M4 10h3" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+    <path d="M11 9.5l2.5-2.5-1-1L10 8.5V10h1.5z" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
 const FILE_ICONS = {
   '.ts':'🟦','.tsx':'🟦','.js':'🟨','.jsx':'🟨','.mjs':'🟨','.cjs':'🟨',
   '.json':'📦','.md':'📘','.html':'🌐','.css':'🎨','.scss':'🎨',
@@ -71,13 +78,17 @@ function escapeHtml(s) {
 
 // ---------- tab helpers ----------
 function getActivePane(tab) { return tab.panes.get(tab.activePaneId); }
-function tabAutoName(tab) { return basename(getActivePane(tab)?.cwd || '') || 'PowerShell'; }
+function tabAutoName(tab) {
+  if (tab.type === 'editor') return basename(tab.filePath || '') || 'Editor';
+  return basename(getActivePane(tab)?.cwd || '') || 'PowerShell';
+}
 
 // ---------- status ----------
 function updateStatus() {
   statusTabs.textContent = `${tabs.size} tab${tabs.size === 1 ? '' : 's'}`;
   if (activeId && tabs.has(activeId)) {
-    statusCwd.textContent = getActivePane(tabs.get(activeId))?.cwd || '~';
+    const tab = tabs.get(activeId);
+    statusCwd.textContent = tab.type === 'editor' ? tab.filePath : (getActivePane(tab)?.cwd || '~');
   } else {
     statusCwd.textContent = '~';
   }
@@ -132,6 +143,8 @@ function setActive(tabId) {
       pane.term.focus();
       window.term.resize(pane.ptyId, pane.term.cols, pane.term.rows);
     });
+  } else if (tab.type === 'editor' && tab.editor) {
+    requestAnimationFrame(() => { try { tab.editor.focus(); } catch (_) {} });
   }
   renderTree();
   updateStatus();
@@ -260,11 +273,41 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     return true;
   });
 
-  // Right-click: copy/paste + split
+  // File path links: left-click → external editor
+  const FILE_LINK_RE = /(?:[A-Za-z]:[\\/]|\.\.?[\\/])[\w\\/.\-]+(\.[\w]{1,6})\b/g;
+  let hoveredFilePath = null;
+  term.registerLinkProvider({
+    provideLinks(lineNum, callback) {
+      const line = term.buffer.active.getLine(lineNum - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      FILE_LINK_RE.lastIndex = 0;
+      const links = [];
+      let m;
+      while ((m = FILE_LINK_RE.exec(text)) !== null) {
+        const fp = m[0];
+        links.push({
+          range: { start: { x: m.index + 1, y: lineNum }, end: { x: m.index + fp.length, y: lineNum } },
+          text: fp,
+          activate(_, linkText) { window.fileApi.openExternal(linkText); },
+          hover(_, linkText) { hoveredFilePath = linkText; },
+          leave() { hoveredFilePath = null; }
+        });
+      }
+      callback(links.length ? links : undefined);
+    }
+  });
+
+  // Right-click: copy/paste + split + file options
   paneEl.addEventListener('contextmenu', async (e) => {
     e.preventDefault(); e.stopPropagation();
     hideContextMenu();
     setActivePane(tab, paneId);
+    const fileItems = hoveredFilePath ? [
+      { separator: true },
+      { label: 'Open in Editor',          action: () => openInEditor(hoveredFilePath) },
+      { label: 'Open in External Editor', action: () => window.fileApi.openExternal(hoveredFilePath) }
+    ] : [];
     showContextMenu(e.clientX, e.clientY, [
       {
         label: 'Copy',
@@ -282,7 +325,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       {
         label: tab.panes.size > 1 ? 'Close Pane' : 'Close Tab',
         action: () => tab.panes.size > 1 ? closePane(tab, paneId) : closeTab(tab.tabId)
-      }
+      },
+      ...fileItems
     ]);
   });
 
@@ -468,10 +512,115 @@ async function createTab(opts = {}) {
   return tab;
 }
 
+// ---------- open in editor ----------
+function openInEditor(filePath) {
+  for (const [id, tab] of tabs) {
+    if (tab.type === 'editor' && tab.filePath === filePath) { setActive(id); return; }
+  }
+  createEditorTab(filePath);
+}
+
+async function createEditorTab(filePath) {
+  const tabId = newTabId();
+  const container = document.createElement('div');
+  container.className = 'term-container';
+  areaEl.appendChild(container);
+
+  const name = basename(filePath);
+  const tabEl = document.createElement('div');
+  tabEl.className = 'tab';
+  tabEl.innerHTML = `${editorSvg()}<span class="tab-title">${escapeHtml(name)}</span><span class="tab-close" title="Close tab">${closeSvg()}</span>`;
+  tabsEl.appendChild(tabEl);
+  const titleEl = tabEl.querySelector('.tab-title');
+  const closeEl  = tabEl.querySelector('.tab-close');
+
+  const tab = {
+    tabId, container, tabEl, titleEl,
+    title: name, customTitle: null, color: null,
+    panes: new Map(), activePaneId: null,
+    expandedPaths: new Set(), selectedPath: null,
+    type: 'editor', filePath, editor: null, dirty: false
+  };
+  tabs.set(tabId, tab);
+
+  tabEl.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.tab-close')) return;
+    if (e.button === 1) { closeTab(tabId); return; }
+    setActive(tabId);
+  });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, [{ label: 'Close Tab', action: () => closeTab(tabId) }]);
+  });
+
+  const editorEl = document.createElement('div');
+  editorEl.className = 'editor-pane';
+  container.appendChild(editorEl);
+  setActive(tabId);
+  updateStatus();
+
+  const result = await window.fileApi.read(filePath);
+  if (result.error) {
+    editorEl.innerHTML = `<div class="editor-error">Cannot open: ${escapeHtml(result.error)}</div>`;
+    return tab;
+  }
+
+  const ext = (filePath.split('.').pop() || '').toLowerCase();
+  const LANG = {
+    js:'javascript', mjs:'javascript', cjs:'javascript', jsx:'javascript',
+    ts:'typescript', tsx:'typescript',
+    json:'json', md:'markdown', html:'html', css:'css', scss:'scss',
+    py:'python', rs:'rust', go:'go', java:'java', cs:'csharp',
+    cpp:'cpp', c:'c', h:'c', sh:'shell', ps1:'powershell', bat:'bat', cmd:'bat',
+    yml:'yaml', yaml:'yaml', toml:'ini', xml:'xml', sql:'sql'
+  };
+  const language = LANG[ext] || 'plaintext';
+
+  editorEl.innerHTML = '<div style="padding:16px;color:#666;font-family:Segoe UI,sans-serif;font-size:12px">Loading editor…</div>';
+  window._monacoReady.then(() => {
+    if (!tabs.has(tabId)) return;
+    editorEl.innerHTML = '';
+    tab.editor = monaco.editor.create(editorEl, {
+      value: result.content, language,
+      theme: 'vs-dark', fontSize: 13,
+      fontFamily: '"Cascadia Code", Consolas, monospace',
+      minimap: { enabled: false }, scrollBeyondLastLine: false,
+      automaticLayout: true, tabSize: 2,
+      renderWhitespace: 'selection', wordWrap: 'off',
+      lineNumbers: 'on', glyphMargin: false, folding: true,
+      lineDecorationsWidth: 4, renderLineHighlight: 'all'
+    });
+    tab.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
+      const res = await window.fileApi.write(filePath, tab.editor.getValue());
+      if (res.ok) { tab.dirty = false; tab.titleEl.textContent = tab.customTitle || name; }
+    });
+    tab.editor.onDidChangeModelContent(() => {
+      if (!tab.dirty) { tab.dirty = true; tab.titleEl.textContent = '● ' + (tab.customTitle || name); }
+    });
+    requestAnimationFrame(() => {
+      try {
+        const { width, height } = editorEl.getBoundingClientRect();
+        tab.editor.layout({ width: width || editorEl.offsetWidth, height: height || editorEl.offsetHeight });
+        if (activeId === tabId) tab.editor.focus();
+      } catch (_) {}
+    });
+  }).catch(err => {
+    editorEl.innerHTML = `<div class="editor-error">Monaco failed to load: ${escapeHtml(String(err))}</div>`;
+  });
+  return tab;
+}
+
 // ---------- close tab ----------
 function closeTab(tabId) {
   const tab = tabs.get(tabId);
   if (!tab) return;
+  if (tab.type === 'editor') {
+    try { tab.editor?.dispose(); } catch (_) {}
+    tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
+    if (activeId === tabId) { activeId = null; const n = tabs.keys().next().value; if (n) setActive(n); else window.win.close(); }
+    updateStatus(); scheduleAgentRender(); return;
+  }
   for (const [, pane] of tab.panes) {
     if (pane.ro) { try { pane.ro.disconnect(); } catch (_) {} }
     window.term.kill(pane.ptyId);
@@ -646,6 +795,14 @@ async function populateChildren(tab, slotEl, dirPath, depth) {
     } else {
       row.innerHTML = `<span class="wt-arrow" style="visibility:hidden">▶</span><span class="wt-icon">${fileIcon(entry.name,false)}</span><span class="wt-name">${escapeHtml(entry.name)}</span>`;
       row.addEventListener('click', (e) => { e.stopPropagation(); selectRow(tab, row, entry.path); });
+      row.addEventListener('dblclick', (e) => { e.stopPropagation(); openInEditor(entry.path); });
+      row.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation(); selectRow(tab, row, entry.path);
+        showContextMenu(e.clientX, e.clientY, [
+          { label: 'Open in Editor',          action: () => openInEditor(entry.path) },
+          { label: 'Open in External Editor', action: () => window.fileApi.openExternal(entry.path) }
+        ]);
+      });
       slotEl.appendChild(row);
     }
   }
