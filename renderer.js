@@ -785,7 +785,7 @@ function cdToPath(targetPath) {
   if (!activeId) return;
   const pane = getActivePane(tabs.get(activeId));
   if (!pane) return;
-  window.term.input(pane.ptyId, `cd '${String(targetPath).replace(/'/g, "''")}'\r`);
+  window.term.input(pane.ptyId, `cd '${String(targetPath).replace(/'/g, "''")}'; Clear-Host\r`);
   pane.term.focus();
 }
 function folderContextItems(fp) {
@@ -793,7 +793,9 @@ function folderContextItems(fp) {
     { label: 'Go here in shell',      action: () => cdToPath(fp) },
     { label: 'Go here in a new shell',action: () => createTab({ cwd: fp }) },
     { separator: true },
-    { label: 'Open Claude here',       action: () => createTab({ cwd: fp, runOnReady: 'claude' }) }
+    { label: 'Open Claude here',       action: () => createTab({ cwd: fp, runOnReady: 'claude' }) },
+    { separator: true },
+    { label: 'Open in Explorer',       action: () => window.fileApi.openExternal(fp) }
   ];
 }
 async function renderTree() {

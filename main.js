@@ -269,15 +269,17 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
     // This is authoritative for both display and context window size.
     let selectedModelLabel = null;
     let oneMFromCommand = false;
-    const setModelLines = content.match(/Set model to[^\n]*/g);
-    if (setModelLines && setModelLines.length > 0) {
-      const last = setModelLines[setModelLines.length - 1];
+    // Only match Set model to lines that are real /model command output
+    // (wrapped in <local-command-stdout>), not source-code references in file reads.
+    const setModelMatches = content.match(/<local-command-stdout>Set model to[^<]*<\/local-command-stdout>/g);
+    if (setModelMatches && setModelMatches.length > 0) {
+      const last = setModelMatches[setModelMatches.length - 1];
       selectedModelLabel = last
-        .replace(/^Set model to\s*/i, '')
+        .replace(/^<local-command-stdout>Set model to\s*/i, '')
+        .replace(/<\/local-command-stdout>$/i, '')
         .replace(/\\u001b\[[0-9;]*m/g, '')
         .replace(/\x1b\[[0-9;]*m/g, '')
-        .replace(/<\/?[a-z-]+>/g, '')
-        .replace(/["{\\<].*$/, '')
+        .replace(/\s*·.*$/, '')
         .trim();
       oneMFromCommand = /\(1M context\)|\[1m\]/i.test(selectedModelLabel);
     }
