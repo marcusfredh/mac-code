@@ -246,7 +246,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   term.onData(data => window.term.input(ptyId, data));
   term.onResize(({ cols, rows }) => window.term.resize(ptyId, cols, rows));
 
-  // Ctrl+C (copy if selection, else ^C) / Ctrl+V (paste)
+  // Ctrl+C: copy if selection, else send ^C to pty
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown' || !e.ctrlKey || e.shiftKey || e.altKey) return true;
     if (e.key === 'c' || e.key === 'C') {
@@ -256,10 +256,6 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
         return false;
       }
       return true;
-    }
-    if (e.key === 'v' || e.key === 'V') {
-      navigator.clipboard.readText().then(t => { if (t) window.term.input(ptyId, t); }).catch(() => {});
-      return false;
     }
     return true;
   });

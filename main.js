@@ -277,20 +277,21 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
         .replace(/<\/?[a-z-]+>/g, '')
         .replace(/["{\\<].*$/, '')
         .trim();
-      oneMFromCommand = /\(1M context\)/i.test(selectedModelLabel);
+      oneMFromCommand = /\(1M context\)|\[1m\]/i.test(selectedModelLabel);
     }
 
     const oneMFromBeta = /context-1m/.test(content);
     const oneMFromModel = /\b1m\b|\[1m\]/i.test(model || '');
 
-    let contextWindow;
-    if (selectedModelLabel) {
-      contextWindow = oneMFromCommand ? 1000000 : 200000;
-    } else if (oneMFromBeta || oneMFromModel || contextTokens > 200000) {
-      contextWindow = 1000000;
-    } else {
-      contextWindow = 200000;
-    }
+    let oneMFromSettings = false;
+    try {
+      const settingsRaw = await fs.promises.readFile(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8');
+      const settingsModel = JSON.parse(settingsRaw)?.model || '';
+      oneMFromSettings = /\[1m\]|\(1M context\)/i.test(settingsModel);
+    } catch (_) {}
+
+    const contextWindow = (oneMFromCommand || oneMFromBeta || oneMFromModel || oneMFromSettings || contextTokens > 200000)
+      ? 1000000 : 200000;
 
     const displayModel = selectedModelLabel || model;
 
