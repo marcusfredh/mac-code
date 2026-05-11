@@ -331,6 +331,111 @@ ipcMain.handle('file:openExternal', async (_, p) => {
   return err ? { error: err } : { ok: true };
 });
 
+// ----- IPC: Copilot CLI usage -----
+function copilotSessionsDir() {
+  return path.join(os.homedir(), '.copilot', 'session-state');
+}
+
+// Minimal flat-YAML parser: top-level "key: value" pairs only.
+// workspace.yaml is small + flat in practice; full YAML lib overkill.
+function parseWorkspaceYaml(raw) {
+  const out = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const m = line.match(/^([a-zA-Z_][\w-]*):\s*(.+?)\s*$/);
+    if (!m) continue;
+    let v = m[2];
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    out[m[1].toLowerCase()] = v;
+  }
+  return out;
+}
+
+function normalizeCwd(p) {
+  if (!p) return '';
+  try { return path.resolve(p).toLowerCase(); } catch (_) { return String(p).toLowerCase(); }
+}
+
+ipcMain.handle('copilot:usage', async (event, cwd) => {
+  if (!cwd) return null;
+  const dir = copilotSessionsDir();
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
+  catch (err) { return { error: err.code || err.message }; }
+
+  const target = normalizeCwd(cwd);
+  const candidates = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const sdir = path.join(dir, e.name);
+    try {
+      const efPath = path.join(sdir, 'events.jsonl');
+      const wfPath = path.join(sdir, 'workspace.yaml');
+      const [wsRaw, eStat] = await Promise.all([
+        fs.promises.readFile(wfPath, 'utf8').catch(() => ''),
+        fs.promises.stat(efPath)
+      ]);
+      const ws = wsRaw ? parseWorkspaceYaml(wsRaw) : {};
+      const sessionCwd = ws.cwd || ws.working_directory || ws.workspace || ws.path || '';
+      const match = sessionCwd && normalizeCwd(sessionCwd) === target;
+      candidates.push({ id: e.name, dir: sdir, mtime: eStat.mtimeMs, match, sessionCwd });
+    } catch (_) {}
+  }
+  if (!candidates.length) return null;
+
+  const matched = candidates.filter(c => c.match);
+  const pool = matched.length ? matched : candidates;
+  pool.sort((a, b) => b.mtime - a.mtime);
+  const t = pool[0];
+
+  let content;
+  try { content = await fs.promises.readFile(path.join(t.dir, 'events.jsonl'), 'utf8'); }
+  catch { return null; }
+
+  const lines = content.split('\n');
+  let model = null;
+  let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreateTokens = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]; if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      const metrics = obj?.data?.modelMetrics;
+      if (metrics && typeof metrics === 'object') {
+        const keys = Object.keys(metrics);
+        if (keys.length) {
+          model = keys[keys.length - 1];
+          const u = metrics[model]?.usage || {};
+          inputTokens     = u.inputTokens             ?? u.input_tokens             ?? 0;
+          outputTokens    = u.outputTokens            ?? u.output_tokens            ?? 0;
+          cacheReadTokens = u.cacheReadInputTokens    ?? u.cache_read_input_tokens  ?? 0;
+          cacheCreateTokens = u.cacheCreationInputTokens ?? u.cache_creation_input_tokens ?? 0;
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+
+  const contextTokens = inputTokens + cacheReadTokens + cacheCreateTokens;
+  // Copilot models: GPT-4.1 = 1M, GPT-5 family large too. Default conservative.
+  const contextWindow = /gpt-5|gpt-4\.1|claude-sonnet-4|claude-opus/i.test(model || '') ? 1000000 : 128000;
+
+  return {
+    contextTokens,
+    input: inputTokens,
+    cacheRead: cacheReadTokens,
+    cacheCreate: cacheCreateTokens,
+    output: outputTokens,
+    model,
+    apiModel: model,
+    contextWindow,
+    sessionFile: 'events.jsonl',
+    sessionId: t.id,
+    mtime: t.mtime,
+    cwd: t.sessionCwd
+  };
+});
+
 // ----- IPC: Session persistence -----
 function sessionFile() { return path.join(app.getPath('userData'), 'session.json'); }
 ipcMain.handle('session:load', async () => {

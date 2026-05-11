@@ -428,6 +428,54 @@
       font-family: 'Cascadia Code', Consolas, monospace;
       letter-spacing: 0.02em;
     }
+    .agent-tab-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: rgba(78, 201, 148, 0.18);
+      color: var(--agent-fg);
+      flex-shrink: 0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .agent-tab.agent-copilot {
+      background: rgba(168, 130, 255, 0.06);
+      border-color: rgba(168, 130, 255, 0.22);
+    }
+    .agent-tab.agent-copilot:hover { background: rgba(168, 130, 255, 0.14); }
+    .agent-tab.agent-copilot.idle .agent-status-dot {
+      background: #b393ff;
+      box-shadow: 0 0 4px rgba(179, 147, 255, 0.6);
+    }
+    .agent-tab.agent-copilot.idle .agent-tab-status { color: #b393ff; }
+    .agent-tab.agent-copilot .agent-tab-badge {
+      background: rgba(168, 130, 255, 0.22);
+      color: #b393ff;
+    }
+    .saved-session-top {
+      display: flex; align-items: center; gap: 6px;
+    }
+    .saved-session-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: rgba(59, 120, 255, 0.22);
+      color: #6e8aa8;
+      flex-shrink: 0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .saved-session.saved-copilot {
+      background: rgba(168, 130, 255, 0.06);
+      border-color: rgba(168, 130, 255, 0.22);
+    }
+    .saved-session.saved-copilot:hover { background: rgba(168, 130, 255, 0.16); }
+    .saved-session.saved-copilot .saved-session-badge {
+      background: rgba(168, 130, 255, 0.22);
+      color: #b393ff;
+    }
 
     /* Sidebar collapsed reveal handle */
     .sidebar-handle {
@@ -681,7 +729,7 @@
       <div class="agent">
         <div class="agent-hdr">
           <span class="agent-hdr-dot"></span>
-          Claude Agents
+          Coding Agents
         </div>
         <div class="agent-list" id="agent-list"></div>
       </div>

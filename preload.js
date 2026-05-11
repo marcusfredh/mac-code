@@ -38,6 +38,10 @@ contextBridge.exposeInMainWorld('claudeApi', {
   usage: (cwd) => ipcRenderer.invoke('claude:usage', cwd)
 });
 
+contextBridge.exposeInMainWorld('copilotApi', {
+  usage: (cwd) => ipcRenderer.invoke('copilot:usage', cwd)
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

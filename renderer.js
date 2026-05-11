@@ -309,6 +309,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   const pane = {
     paneId, ptyId, term, fit, serialize, el: paneEl, ro: null,
     cwd, claudeRunning: false, claudeBusyUntil: 0, claudeSessionId: null,
+    copilotRunning: false, copilotBusyUntil: 0, copilotSessionId: null,
+    copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
     runOnReady: opts.runOnReady || null
   };
@@ -410,13 +412,17 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   });
   paneEl.appendChild(closeBtn);
 
-  // OSC 6633: command line capture (claude detection)
+  // OSC 6633: command line capture (claude / copilot detection)
   term.parser.registerOscHandler(6633, (data) => {
     if (typeof data !== 'string') return false;
     const first = data.trim().split(/\s+/)[0]?.toLowerCase();
     if (first === 'claude' || first === 'claude.exe' || first === 'claude.cmd') {
       pane.claudeRunning = true;
       pane.claudeBusyUntil = Date.now() + 600;
+      scheduleAgentRender();
+    } else if (first === 'copilot' || first === 'copilot.exe' || first === 'copilot.cmd') {
+      pane.copilotRunning = true;
+      pane.copilotBusyUntil = Date.now() + 600;
       scheduleAgentRender();
     }
     return false;
@@ -436,6 +442,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       }
     }
     if (pane.claudeRunning) { pane.claudeRunning = false; scheduleAgentRender(); }
+    if (pane.copilotRunning) { pane.copilotRunning = false; scheduleAgentRender(); }
     if (pane.runOnReady) {
       const cmd = pane.runOnReady; pane.runOnReady = null;
       setTimeout(() => window.term.input(ptyId, cmd + '\r'), 30);
@@ -497,7 +504,8 @@ function closePane(tab, paneId) {
   window.term.kill(pane.ptyId);
   ptyPaneMap.delete(pane.ptyId);
   pane.term.dispose();
-  paneWorkingState.delete(paneId);
+  paneWorkingState.delete(paneId + ':claude');
+  paneWorkingState.delete(paneId + ':copilot');
   tab.panes.delete(paneId);
 
   // Collapse split: sibling expands to fill
@@ -712,9 +720,15 @@ window.term.onData((ptyId, data) => {
   if (!pane) return;
   pane.term.write(data);
   pane.lastDataAt = Date.now();
-  if (pane.claudeRunning && pane.lastDataAt > (pane.suppressBusyUntil || 0)) {
-    pane.claudeBusyUntil = pane.lastDataAt + 500;
-    scheduleAgentRender();
+  if (pane.lastDataAt > (pane.suppressBusyUntil || 0)) {
+    if (pane.claudeRunning) {
+      pane.claudeBusyUntil = pane.lastDataAt + 500;
+      scheduleAgentRender();
+    }
+    if (pane.copilotRunning) {
+      pane.copilotBusyUntil = pane.lastDataAt + 500;
+      scheduleAgentRender();
+    }
   }
 });
 window.term.onExit((ptyId) => {
@@ -794,6 +808,7 @@ function folderContextItems(fp) {
     { label: 'Go here in a new shell',action: () => createTab({ cwd: fp }) },
     { separator: true },
     { label: 'Open Claude here',       action: () => createTab({ cwd: fp, runOnReady: 'claude' }) },
+    { label: 'Open Copilot here',      action: () => createTab({ cwd: fp, runOnReady: 'copilot' }) },
     { separator: true },
     { label: 'Open in Explorer',       action: () => window.fileApi.openExternal(fp) }
   ];
@@ -966,24 +981,54 @@ function shortModelLabel(model) {
   return model;
 }
 
-function getAllClaudePanes() {
+function getAllAgentPanes() {
   const result = [];
   for (const [, tab] of tabs)
-    for (const [, pane] of tab.panes)
-      if (pane.claudeRunning) result.push({ tab, pane });
+    for (const [, pane] of tab.panes) {
+      if (pane.claudeRunning) result.push({ tab, pane, type: 'claude' });
+      if (pane.copilotRunning) result.push({ tab, pane, type: 'copilot' });
+    }
   return result;
+}
+function getAllClaudePanes() {
+  return getAllAgentPanes().filter(x => x.type === 'claude');
+}
+function getAllCopilotPanes() {
+  return getAllAgentPanes().filter(x => x.type === 'copilot');
+}
+
+function shortCopilotModelLabel(model) {
+  if (!model) return '';
+  // Copilot keys look like "gpt-5.4", "gpt-4.1-mini", "claude-sonnet-4-5". Pass through.
+  return model;
+}
+
+function paneAgentState(pane, type) {
+  if (type === 'claude') {
+    return {
+      busyUntil: pane.claudeBusyUntil, usage: pane.usage,
+      sessionId: pane.claudeSessionId, modelFn: shortModelLabel,
+      saveTitle: 'Save Claude session', emptyMsg: 'no session yet'
+    };
+  }
+  return {
+    busyUntil: pane.copilotBusyUntil, usage: pane.copilotUsage,
+    sessionId: pane.copilotSessionId, modelFn: shortCopilotModelLabel,
+    saveTitle: 'Save Copilot session', emptyMsg: 'no session yet'
+  };
 }
 
 const agentRowCache = new Map();
+function agentRowKey(paneId, type) { return paneId + ':' + type; }
 function renderAgentPanel() {
   if (!agentListEl) return;
-  const running = getAllClaudePanes();
+  const running = getAllAgentPanes();
   if (running.length === 0) {
     if (agentRowCache.size || !agentListEl.querySelector('.agent-empty')) {
       agentListEl.innerHTML = '';
       agentRowCache.clear();
       const e = document.createElement('div'); e.className = 'agent-empty';
-      e.textContent = 'No Claude sessions running'; agentListEl.appendChild(e);
+      e.textContent = 'No agents running'; agentListEl.appendChild(e);
     }
     return;
   }
@@ -992,93 +1037,116 @@ function renderAgentPanel() {
 
   const seen = new Set();
   const now = Date.now();
-  for (const { tab, pane } of running) {
-    seen.add(pane.paneId);
-    let c = agentRowCache.get(pane.paneId);
+  for (const { tab, pane, type } of running) {
+    const key = agentRowKey(pane.paneId, type);
+    seen.add(key);
+    let c = agentRowCache.get(key);
     if (!c) {
-      const row = document.createElement('div'); row.className = 'agent-tab idle';
+      const row = document.createElement('div'); row.className = 'agent-tab idle agent-' + type;
       const dot = document.createElement('span'); dot.className = 'agent-status-dot';
       const main = document.createElement('div'); main.className = 'agent-tab-main';
       const top = document.createElement('div'); top.className = 'agent-tab-top';
+      const badgeEl = document.createElement('span'); badgeEl.className = 'agent-tab-badge'; badgeEl.textContent = type === 'claude' ? 'C' : 'GH';
       const nameEl = document.createElement('span'); nameEl.className = 'agent-tab-name';
       const statEl = document.createElement('span'); statEl.className = 'agent-tab-status';
-      top.appendChild(nameEl); top.appendChild(statEl); main.appendChild(top);
+      top.appendChild(badgeEl); top.appendChild(nameEl); top.appendChild(statEl); main.appendChild(top);
       const usageEl = document.createElement('div'); main.appendChild(usageEl);
       const modelEl = document.createElement('div'); modelEl.className = 'agent-tab-model'; main.appendChild(modelEl);
       const saveBtn = document.createElement('span');
-      saveBtn.className = 'agent-tab-save'; saveBtn.title = 'Save Claude session'; saveBtn.textContent = '＋';
-      saveBtn.addEventListener('click', (e) => { e.stopPropagation(); saveCurrentClaudeSession(pane, tab); });
+      saveBtn.className = 'agent-tab-save'; saveBtn.textContent = '＋';
+      saveBtn.addEventListener('click', (e) => { e.stopPropagation(); saveCurrentAgentSession(pane, tab, type); });
       row.appendChild(dot); row.appendChild(main); row.appendChild(saveBtn);
       row.addEventListener('click', () => { setActive(tab.tabId); setActivePane(tab, pane.paneId); });
       agentListEl.appendChild(row);
       c = { row, nameEl, statEl, usageEl, modelEl, saveBtn };
-      agentRowCache.set(pane.paneId, c);
+      agentRowCache.set(key, c);
     }
-    const working = now < pane.claudeBusyUntil;
-    const newCls = 'agent-tab ' + (working ? 'working' : 'idle');
+    const s = paneAgentState(pane, type);
+    c.saveBtn.title = s.saveTitle;
+    const working = now < s.busyUntil;
+    const newCls = 'agent-tab agent-' + type + ' ' + (working ? 'working' : 'idle');
     if (c.row.className !== newCls) c.row.className = newCls;
     const newName = (tab.customTitle || tabAutoName(tab)) + (tab.panes.size > 1 ? ' [pane]' : '');
     if (c.nameEl.textContent !== newName) c.nameEl.textContent = newName;
     const newStat = working ? 'working' : 'idle';
     if (c.statEl.textContent !== newStat) c.statEl.textContent = newStat;
 
-    if (pane.usage && !pane.usage.error) {
-      const ctx = pane.usage.contextTokens;
-      const max = pane.usage.contextWindow || contextWindowFor(pane.usage.model);
+    if (s.usage && !s.usage.error) {
+      const ctx = s.usage.contextTokens;
+      const max = s.usage.contextWindow || (type === 'claude' ? contextWindowFor(s.usage.model) : 128000);
       const pct = ctx != null ? Math.min(100, Math.round((ctx/max)*100)) : null;
       const usageCls = 'agent-tab-usage' + (pct == null ? '' : pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '');
-      const usageText = pct != null ? `${formatTokens(ctx)} ctx · ${pct}% of ${max>=1e6?'1M':'200k'}` : `${formatTokens(ctx)} ctx`;
+      const maxLabel = max >= 1e6 ? '1M' : max >= 1e3 ? (Math.round(max/1e3) + 'k') : String(max);
+      const usageText = pct != null ? `${formatTokens(ctx)} ctx · ${pct}% of ${maxLabel}` : `${formatTokens(ctx)} ctx`;
       if (c.usageEl.className !== usageCls) c.usageEl.className = usageCls;
       if (c.usageEl.textContent !== usageText) c.usageEl.textContent = usageText;
-      if (pane.usage.model) {
-        const lbl = shortModelLabel(pane.usage.model);
+      if (s.usage.model) {
+        const lbl = s.modelFn(s.usage.model);
         if (c.modelEl.textContent !== lbl) c.modelEl.textContent = lbl;
         c.modelEl.style.display = '';
       } else { c.modelEl.style.display = 'none'; }
-    } else if (pane.usage?.error) {
+    } else if (s.usage?.error) {
       if (c.usageEl.className !== 'agent-tab-usage muted') c.usageEl.className = 'agent-tab-usage muted';
-      if (c.usageEl.textContent !== 'no session yet') c.usageEl.textContent = 'no session yet';
+      if (c.usageEl.textContent !== s.emptyMsg) c.usageEl.textContent = s.emptyMsg;
       c.modelEl.style.display = 'none';
     } else {
       if (c.usageEl.className !== 'agent-tab-usage') c.usageEl.className = 'agent-tab-usage';
       if (c.usageEl.textContent !== '') c.usageEl.textContent = '';
       c.modelEl.style.display = 'none';
     }
-    c.saveBtn.style.display = pane.claudeSessionId ? '' : 'none';
+    c.saveBtn.style.display = s.sessionId ? '' : 'none';
   }
-  for (const [pid, c] of agentRowCache) {
-    if (!seen.has(pid)) { c.row.remove(); agentRowCache.delete(pid); }
+  for (const [k, c] of agentRowCache) {
+    if (!seen.has(k)) { c.row.remove(); agentRowCache.delete(k); }
   }
 }
 
-// ---------- Saved Claude sessions library ----------
+// ---------- Saved agent sessions library ----------
+// Entries: { id, cwd, name, type: 'claude'|'copilot' }
+// Legacy entries without type are treated as 'claude' for backward compat.
 const claudeSessionLibrary = [];
+const copilotSessionLibrary = [];
 const claudeSessionsListEl = document.getElementById('claude-sessions-list');
+
+function resumeCommandFor(type, id) {
+  return type === 'copilot' ? `copilot --resume=${id}` : `claude --resume ${id}`;
+}
+
+function librariesInOrder() {
+  return [
+    ...claudeSessionLibrary.map(s => ({ s, lib: claudeSessionLibrary, type: 'claude' })),
+    ...copilotSessionLibrary.map(s => ({ s, lib: copilotSessionLibrary, type: 'copilot' }))
+  ];
+}
 
 function renderClaudeSessions() {
   if (!claudeSessionsListEl) return;
   claudeSessionsListEl.innerHTML = '';
-  if (!claudeSessionLibrary.length) {
+  const all = librariesInOrder();
+  if (!all.length) {
     const e = document.createElement('div'); e.className = 'agent-empty';
     e.textContent = 'No saved sessions'; claudeSessionsListEl.appendChild(e); return;
   }
-  for (const s of claudeSessionLibrary) {
-    const row = document.createElement('div'); row.className = 'saved-session';
+  for (const { s, lib, type } of all) {
+    const row = document.createElement('div'); row.className = 'saved-session saved-' + type;
+    const top = document.createElement('div'); top.className = 'saved-session-top';
+    const badge = document.createElement('span'); badge.className = 'saved-session-badge'; badge.textContent = type === 'claude' ? 'C' : 'GH';
     const nm = document.createElement('span'); nm.className = 'saved-session-name'; nm.textContent = s.name;
+    top.appendChild(badge); top.appendChild(nm);
     const cw = document.createElement('span'); cw.className = 'saved-session-cwd'; cw.textContent = basename(s.cwd);
-    row.appendChild(nm); row.appendChild(cw);
+    row.appendChild(top); row.appendChild(cw);
     row.addEventListener('click', () => {
-      createTab({ cwd: s.cwd, runOnReady: `claude --resume ${s.id}` });
+      createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) });
     });
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault(); e.stopPropagation();
       showContextMenu(e.clientX, e.clientY, [
         { label: 'Rename', action: () => startRenameSavedSession(s, nm) },
-        { label: 'Resume', action: () => createTab({ cwd: s.cwd, runOnReady: `claude --resume ${s.id}` }) },
+        { label: 'Resume', action: () => createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) }) },
         { separator: true },
         { label: 'Remove', action: () => {
-          const i = claudeSessionLibrary.indexOf(s);
-          if (i >= 0) claudeSessionLibrary.splice(i, 1);
+          const i = lib.indexOf(s);
+          if (i >= 0) lib.splice(i, 1);
           renderClaudeSessions(); scheduleSaveSession();
         }}
       ]);
@@ -1113,32 +1181,38 @@ function startRenameSavedSession(s, nameEl) {
   input.addEventListener('click', (e) => e.stopPropagation());
 }
 
-function saveCurrentClaudeSession(pane, tab) {
-  if (!pane.claudeSessionId || !pane.cwd) return;
-  if (claudeSessionLibrary.some(s => s.id === pane.claudeSessionId)) return;
+function libraryFor(type) { return type === 'copilot' ? copilotSessionLibrary : claudeSessionLibrary; }
+
+function saveCurrentAgentSession(pane, tab, type) {
+  const sid = type === 'copilot' ? pane.copilotSessionId : pane.claudeSessionId;
+  if (!sid || !pane.cwd) return;
+  const lib = libraryFor(type);
+  if (lib.some(s => s.id === sid)) return;
   const defaultName = (tab.customTitle || tabAutoName(tab)) + ' · ' + new Date().toISOString().slice(0,10);
-  claudeSessionLibrary.push({ id: pane.claudeSessionId, cwd: pane.cwd, name: defaultName });
+  lib.push({ id: sid, cwd: pane.cwd, name: defaultName });
   renderClaudeSessions();
   scheduleSaveSession();
-  // Find row in list and start rename immediately
   const last = claudeSessionsListEl.lastElementChild;
   if (last) {
     const nm = last.querySelector('.saved-session-name');
-    if (nm) startRenameSavedSession(claudeSessionLibrary[claudeSessionLibrary.length - 1], nm);
+    if (nm) startRenameSavedSession(lib[lib.length - 1], nm);
   }
 }
 
-function maybeAutoSaveClaudeSession(tab, pane) {
-  if (!pane.claudeSessionId || !pane.cwd || !pane.usage || pane.usage.error) return;
-  const ctx = pane.usage.contextTokens;
-  const max = pane.usage.contextWindow || 200000;
+function maybeAutoSaveAgentSession(tab, pane, type) {
+  const sid = type === 'copilot' ? pane.copilotSessionId : pane.claudeSessionId;
+  const usage = type === 'copilot' ? pane.copilotUsage : pane.usage;
+  if (!sid || !pane.cwd || !usage || usage.error) return;
+  const ctx = usage.contextTokens;
+  const max = usage.contextWindow || 200000;
   if (!ctx || !max) return;
   const pct = (ctx / max) * 100;
   if (pct < 10) return;
-  if (claudeSessionLibrary.some(s => s.id === pane.claudeSessionId)) return;
+  const lib = libraryFor(type);
+  if (lib.some(s => s.id === sid)) return;
   const stamp = new Date().toISOString().slice(0,16).replace('T',' ');
   const name = (tab.customTitle || tabAutoName(tab)) + ' · ' + stamp;
-  claudeSessionLibrary.push({ id: pane.claudeSessionId, cwd: pane.cwd, name });
+  lib.push({ id: sid, cwd: pane.cwd, name });
   renderClaudeSessions();
   scheduleSaveSession();
 }
@@ -1153,32 +1227,56 @@ async function refreshClaudeUsage() {
     try {
       pane.usage = await window.claudeApi.usage(pane.cwd);
       if (pane.usage?.sessionId) pane.claudeSessionId = pane.usage.sessionId;
-      maybeAutoSaveClaudeSession(tab, pane);
+      maybeAutoSaveAgentSession(tab, pane, 'claude');
     } catch (_) {}
   }));
   scheduleAgentRender();
 }
-// ---------- Claude finish notifications ----------
-const paneWorkingState = new Map();
 
-function checkClaudeNotifications() {
+async function refreshCopilotUsage() {
+  const items = [];
+  for (const [, tab] of tabs)
+    for (const [, pane] of tab.panes)
+      if (pane.copilotRunning && pane.cwd) items.push({ tab, pane });
+  if (!items.length) return;
+  await Promise.all(items.map(async ({ tab, pane }) => {
+    try {
+      pane.copilotUsage = await window.copilotApi.usage(pane.cwd);
+      if (pane.copilotUsage?.sessionId) pane.copilotSessionId = pane.copilotUsage.sessionId;
+      maybeAutoSaveAgentSession(tab, pane, 'copilot');
+    } catch (_) {}
+  }));
+  scheduleAgentRender();
+}
+
+// ---------- Agent finish notifications ----------
+const paneWorkingState = new Map();  // key: paneId:type -> bool
+
+function checkAgentNotifications() {
   const now = Date.now();
   for (const [, tab] of tabs) {
     for (const [, pane] of tab.panes) {
-      if (!pane.claudeRunning) { paneWorkingState.delete(pane.paneId); continue; }
-      const working = now < pane.claudeBusyUntil;
-      const wasWorking = paneWorkingState.get(pane.paneId) ?? false;
-      if (wasWorking && !working && !document.hasFocus()) {
-        const name = tab.customTitle || tabAutoName(tab);
-        new Notification('Claude finished', { body: `${name} is ready`, silent: false });
+      for (const type of ['claude', 'copilot']) {
+        const running = type === 'claude' ? pane.claudeRunning : pane.copilotRunning;
+        const key = pane.paneId + ':' + type;
+        if (!running) { paneWorkingState.delete(key); continue; }
+        const busyUntil = type === 'claude' ? pane.claudeBusyUntil : pane.copilotBusyUntil;
+        const working = now < busyUntil;
+        const wasWorking = paneWorkingState.get(key) ?? false;
+        if (wasWorking && !working && !document.hasFocus()) {
+          const name = tab.customTitle || tabAutoName(tab);
+          const label = type === 'claude' ? 'Claude' : 'Copilot';
+          new Notification(`${label} finished`, { body: `${name} is ready`, silent: false });
+        }
+        paneWorkingState.set(key, working);
       }
-      paneWorkingState.set(pane.paneId, working);
     }
   }
 }
 
 setInterval(refreshClaudeUsage, 2000);
-setInterval(() => { if (getAllClaudePanes().length > 0) { renderAgentPanel(); checkClaudeNotifications(); } }, 400);
+setInterval(refreshCopilotUsage, 2000);
+setInterval(() => { if (getAllAgentPanes().length > 0) { renderAgentPanel(); checkAgentNotifications(); } }, 400);
 renderAgentPanel();
 renderClaudeSessions();
 
@@ -1243,7 +1341,11 @@ function saveSession() {
     if (id === activeId) activeIndex = i;
     i++;
   }
-  window.sessionApi.save({ tabs: tabsData, activeIndex, claudeSessions: claudeSessionLibrary });
+  window.sessionApi.save({
+    tabs: tabsData, activeIndex,
+    claudeSessions: claudeSessionLibrary,
+    copilotSessions: copilotSessionLibrary
+  });
 }
 function scheduleSaveSession() {
   if (!_sessionReady) return;
@@ -1260,8 +1362,12 @@ window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSes
     if (Array.isArray(sess?.claudeSessions)) {
       claudeSessionLibrary.length = 0;
       claudeSessionLibrary.push(...sess.claudeSessions);
-      renderClaudeSessions();
     }
+    if (Array.isArray(sess?.copilotSessions)) {
+      copilotSessionLibrary.length = 0;
+      copilotSessionLibrary.push(...sess.copilotSessions);
+    }
+    renderClaudeSessions();
     if (sess?.tabs?.length) {
       const created = [];
       for (const t of sess.tabs) {
