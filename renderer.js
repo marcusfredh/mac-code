@@ -415,12 +415,17 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   // OSC 6633: command line capture (claude / copilot detection)
   term.parser.registerOscHandler(6633, (data) => {
     if (typeof data !== 'string') return false;
-    const first = data.trim().split(/\s+/)[0]?.toLowerCase();
+    const parts = data.trim().split(/\s+/);
+    const first = parts[0]?.toLowerCase();
+    const second = parts[1]?.toLowerCase();
     if (first === 'claude' || first === 'claude.exe' || first === 'claude.cmd') {
       pane.claudeRunning = true;
       pane.claudeBusyUntil = Date.now() + 600;
       scheduleAgentRender();
-    } else if (first === 'copilot' || first === 'copilot.exe' || first === 'copilot.cmd') {
+    } else if (
+      first === 'copilot' || first === 'copilot.exe' || first === 'copilot.cmd' ||
+      ((first === 'gh' || first === 'gh.exe') && second === 'copilot')
+    ) {
       pane.copilotRunning = true;
       pane.copilotBusyUntil = Date.now() + 600;
       scheduleAgentRender();
@@ -445,6 +450,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (pane.copilotRunning) { pane.copilotRunning = false; scheduleAgentRender(); }
     if (pane.runOnReady) {
       const cmd = pane.runOnReady; pane.runOnReady = null;
+      markAgentRunningFromCmd(pane, cmd);
       setTimeout(() => window.term.input(ptyId, cmd + '\r'), 30);
     }
     return false;
@@ -461,7 +467,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   // Fallback runOnReady
   if (pane.runOnReady) {
     setTimeout(() => {
-      if (pane.runOnReady) { const cmd = pane.runOnReady; pane.runOnReady = null; window.term.input(ptyId, cmd + '\r'); }
+      if (pane.runOnReady) {
+        const cmd = pane.runOnReady; pane.runOnReady = null;
+        markAgentRunningFromCmd(pane, cmd);
+        window.term.input(ptyId, cmd + '\r');
+      }
     }, 1500);
   }
 
@@ -808,7 +818,7 @@ function folderContextItems(fp) {
     { label: 'Go here in a new shell',action: () => createTab({ cwd: fp }) },
     { separator: true },
     { label: 'Open Claude here',       action: () => createTab({ cwd: fp, runOnReady: 'claude' }) },
-    { label: 'Open Copilot here',      action: () => createTab({ cwd: fp, runOnReady: 'copilot' }) },
+    { label: 'Open Copilot here',      action: () => createTab({ cwd: fp, runOnReady: 'gh copilot' }) },
     { separator: true },
     { label: 'Open in Explorer',       action: () => window.fileApi.openExternal(fp) }
   ];
@@ -981,6 +991,21 @@ function shortModelLabel(model) {
   return model;
 }
 
+function markAgentRunningFromCmd(pane, cmd) {
+  if (!cmd) return;
+  const lo = cmd.trim().toLowerCase();
+  if (lo === 'claude' || lo.startsWith('claude ') || lo.startsWith('claude.')) {
+    pane.claudeRunning = true;
+    pane.claudeBusyUntil = Date.now() + 600;
+    scheduleAgentRender();
+  } else if (lo === 'copilot' || lo.startsWith('copilot ') || lo.startsWith('copilot.') ||
+             lo === 'gh copilot' || lo.startsWith('gh copilot ') || lo.startsWith('gh.exe copilot')) {
+    pane.copilotRunning = true;
+    pane.copilotBusyUntil = Date.now() + 600;
+    scheduleAgentRender();
+  }
+}
+
 function getAllAgentPanes() {
   const result = [];
   for (const [, tab] of tabs)
@@ -1109,7 +1134,7 @@ const copilotSessionLibrary = [];
 const claudeSessionsListEl = document.getElementById('claude-sessions-list');
 
 function resumeCommandFor(type, id) {
-  return type === 'copilot' ? `copilot --resume=${id}` : `claude --resume ${id}`;
+  return type === 'copilot' ? `gh copilot --resume=${id}` : `claude --resume ${id}`;
 }
 
 function librariesInOrder() {
