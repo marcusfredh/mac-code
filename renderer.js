@@ -1080,10 +1080,20 @@ function renderAgentPanel() {
       const saveBtn = document.createElement('span');
       saveBtn.className = 'agent-tab-save'; saveBtn.textContent = '＋';
       saveBtn.addEventListener('click', (e) => { e.stopPropagation(); saveCurrentAgentSession(pane, tab, type); });
-      row.appendChild(dot); row.appendChild(main); row.appendChild(saveBtn);
+      const handoffBtn = document.createElement('span');
+      handoffBtn.className = 'agent-tab-handoff'; handoffBtn.textContent = '↗';
+      handoffBtn.title = 'Hand off to Copilot (right-click for length)';
+      handoffBtn.addEventListener('click', (e) => { e.stopPropagation(); handoffClaudeToCopilot(pane.cwd); });
+      handoffBtn.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        showHandoffLengthMenu(e.clientX, e.clientY, pane.cwd);
+      });
+      row.appendChild(dot); row.appendChild(main);
+      if (type === 'claude') row.appendChild(handoffBtn);
+      row.appendChild(saveBtn);
       row.addEventListener('click', () => { setActive(tab.tabId); setActivePane(tab, pane.paneId); });
       agentListEl.appendChild(row);
-      c = { row, nameEl, statEl, usageEl, modelEl, saveBtn };
+      c = { row, nameEl, statEl, usageEl, modelEl, saveBtn, handoffBtn };
       agentRowCache.set(key, c);
     }
     const s = paneAgentState(pane, type);
@@ -1126,6 +1136,50 @@ function renderAgentPanel() {
   }
 }
 
+// ---------- Claude → Copilot handoff ----------
+const HANDOFF_LENGTH_OPTIONS = [
+  { label: 'Compact',  tokens: 2000 },
+  { label: 'Medium',   tokens: 6000 },
+  { label: 'Large',    tokens: 12000 }
+];
+function getDefaultHandoffTokens() {
+  const v = parseInt(localStorage.getItem('handoffTargetTokens') || '', 10);
+  return Number.isFinite(v) && v > 0 ? v : 6000;
+}
+function showHandoffLengthMenu(x, y, cwd) {
+  showContextMenu(x, y, HANDOFF_LENGTH_OPTIONS.map(o => ({
+    label: `Hand off — ${o.label} (~${o.tokens} tok)`,
+    action: () => {
+      localStorage.setItem('handoffTargetTokens', String(o.tokens));
+      handoffClaudeToCopilot(cwd, o.tokens);
+    }
+  })));
+}
+async function handoffClaudeToCopilot(cwd, targetTokens) {
+  if (!cwd) return;
+  const tokens = targetTokens || getDefaultHandoffTokens();
+  const res = await window.claudeApi.handoff({ cwd, targetTokens: tokens });
+  if (res?.error) {
+    alert('Handoff failed: ' + res.error);
+    return;
+  }
+  const rel = res.relPath || '.mac-code/handoff.md';
+  // Copy a ready prompt to clipboard so user can paste if auto-inject misses.
+  const prompt = `Read ${rel} — it's a handoff brief from a Claude Code session that ran out of tokens. After reading, ask me what to continue with.`;
+  try { await navigator.clipboard.writeText(prompt); } catch (_) {}
+  // Open a new copilot tab in the same cwd. After copilot launches, try to
+  // inject the read prompt. Delay is heuristic — paste fallback in clipboard.
+  const tab = await createTab({ cwd, runOnReady: 'gh copilot' });
+  setTimeout(() => {
+    try {
+      const pane = tab && getActivePane(tab);
+      if (pane && pane.copilotRunning) {
+        window.term.input(pane.ptyId, prompt + '\r');
+      }
+    } catch (_) {}
+  }, 6500);
+}
+
 // ---------- Saved agent sessions library ----------
 // Entries: { id, cwd, name, type: 'claude'|'copilot' }
 // Legacy entries without type are treated as 'claude' for backward compat.
@@ -1165,16 +1219,21 @@ function renderClaudeSessions() {
     });
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault(); e.stopPropagation();
-      showContextMenu(e.clientX, e.clientY, [
+      const items = [
         { label: 'Rename', action: () => startRenameSavedSession(s, nm) },
-        { label: 'Resume', action: () => createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) }) },
-        { separator: true },
-        { label: 'Remove', action: () => {
-          const i = lib.indexOf(s);
-          if (i >= 0) lib.splice(i, 1);
-          renderClaudeSessions(); scheduleSaveSession();
-        }}
-      ]);
+        { label: 'Resume', action: () => createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) }) }
+      ];
+      if (type === 'claude') {
+        items.push({ separator: true });
+        items.push({ label: 'Hand off to Copilot', action: () => handoffClaudeToCopilot(s.cwd) });
+      }
+      items.push({ separator: true });
+      items.push({ label: 'Remove', action: () => {
+        const i = lib.indexOf(s);
+        if (i >= 0) lib.splice(i, 1);
+        renderClaudeSessions(); scheduleSaveSession();
+      }});
+      showContextMenu(e.clientX, e.clientY, items);
     });
     claudeSessionsListEl.appendChild(row);
   }

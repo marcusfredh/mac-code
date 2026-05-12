@@ -317,6 +317,168 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
   }
 });
 
+// ----- IPC: Claude → Copilot session handoff -----
+// Extracts a compact brief from the latest Claude jsonl session for the
+// given cwd and writes it to <cwd>/.mac-code/handoff.md so the Copilot
+// CLI can ingest it via `Read .mac-code/handoff.md`.
+ipcMain.handle('claude:handoff', async (event, args) => {
+  const cwd = args?.cwd;
+  const targetTokens = Math.max(500, Math.min(40000, args?.targetTokens || 6000));
+  if (!cwd) return { error: 'no cwd' };
+
+  const encoded = encodeCwdForClaude(cwd);
+  const dir = path.join(os.homedir(), '.claude', 'projects', encoded);
+  let files;
+  try { files = await fs.promises.readdir(dir); }
+  catch (err) { return { error: err.code || err.message }; }
+  const jsonls = files.filter(f => f.endsWith('.jsonl'));
+  if (!jsonls.length) return { error: 'no session found' };
+  const stats = await Promise.all(jsonls.map(async f => {
+    const p = path.join(dir, f);
+    const st = await fs.promises.stat(p);
+    return { p, mtime: st.mtimeMs };
+  }));
+  stats.sort((a, b) => b.mtime - a.mtime);
+  const sessionPath = stats[0].p;
+  const content = await fs.promises.readFile(sessionPath, 'utf8');
+  const lines = content.split('\n');
+
+  const userPrompts = [];
+  const assistantTexts = [];
+  const fileEdits = new Map();
+  let latestTodos = null;
+  let firstTimestamp = null, lastTimestamp = null;
+  let model = null;
+
+  for (const line of lines) {
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (obj.timestamp) {
+      if (!firstTimestamp) firstTimestamp = obj.timestamp;
+      lastTimestamp = obj.timestamp;
+    }
+    if (obj.message?.model) model = obj.message.model;
+
+    if (obj.type === 'user' && obj.message?.role === 'user') {
+      const c = obj.message.content;
+      if (typeof c === 'string') {
+        const stripped = c.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+        if (stripped && !stripped.startsWith('<local-command-stdout>') && !stripped.startsWith('<command-')) {
+          userPrompts.push({ ts: obj.timestamp, text: stripped });
+        }
+      }
+    }
+
+    if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
+      for (const item of obj.message.content) {
+        if (item.type === 'text' && item.text) {
+          assistantTexts.push({ ts: obj.timestamp, text: item.text });
+        }
+        if (item.type === 'tool_use') {
+          const name = item.name;
+          const input = item.input || {};
+          if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
+            const fp = input.file_path;
+            if (fp) fileEdits.set(fp, (fileEdits.get(fp) || 0) + 1);
+          }
+          if (name === 'TodoWrite' && Array.isArray(input.todos)) {
+            latestTodos = input.todos;
+          }
+        }
+      }
+    }
+  }
+
+  const out = [];
+  out.push('# Claude → Copilot session handoff');
+  out.push('');
+  out.push(`**Project:** ${cwd}`);
+  if (model) out.push(`**Source model:** ${model}`);
+  if (firstTimestamp) out.push(`**Session started:** ${firstTimestamp}`);
+  if (lastTimestamp) out.push(`**Last activity:** ${lastTimestamp}`);
+  out.push(`**Source file:** ${sessionPath}`);
+  out.push(`**Generated:** ${new Date().toISOString()}`);
+  out.push('');
+  out.push('You (Copilot) are picking up a session that was running in Claude Code. The user ran out of Claude tokens and is continuing here. Below is the relevant context — read it, then ask the user where they want to continue.');
+  out.push('');
+
+  const lastUserPrompts = userPrompts.slice(-10);
+  if (lastUserPrompts.length) {
+    out.push('## Recent user prompts (oldest → newest)');
+    for (const p of lastUserPrompts) {
+      const t = (p.text.length > 600 ? p.text.slice(0, 600) + '…' : p.text).replace(/\r?\n/g, ' ');
+      out.push(`- ${t}`);
+    }
+    out.push('');
+  }
+
+  if (fileEdits.size) {
+    out.push('## Files modified this session');
+    const entries = Array.from(fileEdits.entries()).sort((a, b) => b[1] - a[1]);
+    for (const [fp, count] of entries.slice(0, 30)) {
+      out.push(`- \`${fp}\` — ${count} edit${count === 1 ? '' : 's'}`);
+    }
+    out.push('');
+  }
+
+  if (latestTodos && latestTodos.length) {
+    out.push('## Latest TODO state');
+    for (const t of latestTodos) {
+      const status = t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]';
+      out.push(`- ${status} ${t.content || t.activeForm || ''}`);
+    }
+    out.push('');
+  }
+
+  const lastAssistant = assistantTexts.length ? assistantTexts[assistantTexts.length - 1].text : '';
+  const earlierAssistant = assistantTexts.slice(0, -1).slice(-8);
+
+  if (lastAssistant) {
+    out.push('## Last Claude reply (most recent — likely where work stopped)');
+    out.push('');
+    out.push(lastAssistant.length > 4000 ? lastAssistant.slice(0, 4000) + '\n\n[truncated]' : lastAssistant);
+    out.push('');
+  }
+
+  if (earlierAssistant.length) {
+    out.push('## Earlier Claude replies (chronological, condensed)');
+    for (const a of earlierAssistant) {
+      const t = a.text.length > 700 ? a.text.slice(0, 700) + '…' : a.text;
+      out.push('---');
+      out.push(t);
+    }
+    out.push('');
+  }
+
+  out.push('---');
+  out.push('When you reply, confirm with the user what they want next before making changes. Don\'t redo work that\'s already done above.');
+
+  let md = out.join('\n');
+  const charBudget = targetTokens * 4;
+  if (md.length > charBudget) md = md.slice(0, charBudget) + '\n\n[truncated to fit handoff budget]\n';
+
+  const outDir = path.join(cwd, '.mac-code');
+  const outPath = path.join(outDir, 'handoff.md');
+  try {
+    await fs.promises.mkdir(outDir, { recursive: true });
+    await fs.promises.writeFile(outPath, md, 'utf8');
+  } catch (err) {
+    return { error: err.message };
+  }
+
+  return {
+    path: outPath,
+    relPath: path.relative(cwd, outPath).replace(/\\/g, '/'),
+    bytes: md.length,
+    approxTokens: Math.round(md.length / 4),
+    sessionId: path.basename(sessionPath, '.jsonl'),
+    userPromptCount: userPrompts.length,
+    assistantReplyCount: assistantTexts.length,
+    fileEditCount: fileEdits.size
+  };
+});
+
 // ----- IPC: File API -----
 ipcMain.handle('file:read', async (_, p) => {
   try { return { content: await fs.promises.readFile(p, 'utf8') }; }

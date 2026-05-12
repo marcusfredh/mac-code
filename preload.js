@@ -35,7 +35,8 @@ contextBridge.exposeInMainWorld('fs', {
 });
 
 contextBridge.exposeInMainWorld('claudeApi', {
-  usage: (cwd) => ipcRenderer.invoke('claude:usage', cwd)
+  usage: (cwd) => ipcRenderer.invoke('claude:usage', cwd),
+  handoff: (args) => ipcRenderer.invoke('claude:handoff', args)
 });
 
 contextBridge.exposeInMainWorld('copilotApi', {
