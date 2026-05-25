@@ -19,6 +19,7 @@ const WINDOWS_TERMINAL_THEME = {
 const tabs = new Map();
 const ptyPaneMap = new Map();
 let activeId = null;
+const tabHistory = []; // MRU order: index 0 = most recent
 let tabSeq = 0;
 let paneSeq = 0;
 const newTabId  = () => 'tab-'  + (++tabSeq);
@@ -181,6 +182,9 @@ function setActivePane(tab, paneId) {
 function setActive(tabId) {
   if (!tabs.has(tabId)) return;
   activeId = tabId;
+  const idx = tabHistory.indexOf(tabId);
+  if (idx !== -1) tabHistory.splice(idx, 1);
+  tabHistory.unshift(tabId);
   const suppressUntil = Date.now() + 350;
   for (const [tid, tab] of tabs) {
     tab.tabEl.classList.toggle('active', tid === tabId);
@@ -325,9 +329,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   term.onResize(({ cols, rows }) => window.term.resize(ptyId, cols, rows));
 
   // Ctrl+C: copy if selection, else send ^C to pty
+  // Ctrl+V: explicit paste (works even if xterm textarea lost focus, e.g. during TUI redraws)
+  // Ctrl+Backspace: delete word backward (send ^W / 0x17)
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type !== 'keydown' || !e.ctrlKey || e.shiftKey || e.altKey) return true;
-    if (e.key === 'c' || e.key === 'C') {
+    if (e.type !== 'keydown') return true;
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
       if (term.hasSelection()) {
         navigator.clipboard.writeText(term.getSelection()).catch(() => {});
         term.clearSelection();
@@ -335,8 +341,39 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       }
       return true;
     }
+    if (e.ctrlKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      navigator.clipboard.readText().then(t => {
+        if (t) term.paste(t);
+        term.focus();
+      }).catch(() => {});
+      return false;
+    }
+    if (e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Insert') {
+      e.preventDefault();
+      navigator.clipboard.readText().then(t => {
+        if (t) term.paste(t);
+        term.focus();
+      }).catch(() => {});
+      return false;
+    }
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'Backspace') {
+      e.preventDefault();
+      window.term.input(ptyId, '\x17');
+      return false;
+    }
     return true;
   });
+
+  // Intercept native paste event in capture phase to prevent double-paste
+  // (xterm textarea also fires paste; we drive paste explicitly via term.paste above)
+  paneEl.addEventListener('paste', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.clipboardData && e.clipboardData.getData('text/plain');
+    if (t) term.paste(t);
+    term.focus();
+  }, true);
 
   // File path links: left-click → external editor
   const FILE_LINK_RE = /(?:[A-Za-z]:[\\/]|\.\.?[\\/])[\w\\/.\-]+(\.[\w]{1,6})\b/g;
@@ -377,11 +414,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       {
         label: 'Copy',
         disabled: !term.hasSelection(),
-        action: () => { if (term.hasSelection()) { navigator.clipboard.writeText(term.getSelection()).catch(() => {}); term.clearSelection(); } }
+        action: () => { if (term.hasSelection()) { navigator.clipboard.writeText(term.getSelection()).catch(() => {}); term.clearSelection(); } term.focus(); }
       },
       {
         label: 'Paste',
-        action: async () => { try { const t = await navigator.clipboard.readText(); if (t) window.term.input(ptyId, t); } catch (_) {} }
+        action: async () => { try { const t = await navigator.clipboard.readText(); if (t) term.paste(t); } catch (_) {} term.focus(); }
       },
       { separator: true },
       { label: 'Split Right', action: () => splitPane(tab, paneId, 'h') },
@@ -696,10 +733,13 @@ async function createEditorTab(filePath) {
 function closeTab(tabId) {
   const tab = tabs.get(tabId);
   if (!tab) return;
+  const wasActive = activeId === tabId;
+  const histIdx = tabHistory.indexOf(tabId);
+  if (histIdx !== -1) tabHistory.splice(histIdx, 1);
   if (tab.type === 'editor') {
     try { tab.editor?.dispose(); } catch (_) {}
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
-    if (activeId === tabId) { activeId = null; const n = tabs.keys().next().value; if (n) setActive(n); else window.win.close(); }
+    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   for (const [, pane] of tab.panes) {
@@ -711,15 +751,20 @@ function closeTab(tabId) {
   tab.container.remove();
   tab.tabEl.remove();
   tabs.delete(tabId);
-  if (activeId === tabId) {
+  if (wasActive) {
     activeId = null;
-    const next = tabs.keys().next().value;
+    const next = pickNextActive();
     if (next) setActive(next);
     else window.win.close();
   }
   updateStatus();
   scheduleAgentRender();
   scheduleSaveSession();
+}
+
+function pickNextActive() {
+  for (const id of tabHistory) if (tabs.has(id)) return id;
+  return tabs.keys().next().value;
 }
 
 // ---------- stream pty data ----------
@@ -923,6 +968,16 @@ function selectRow(tab, rowEl, p) {
 // ---------- sidebar controls ----------
 document.getElementById('sb-collapse').addEventListener('click', () => sidebarEl.classList.add('collapsed'));
 sidebarHandleEl.addEventListener('click', () => sidebarEl.classList.remove('collapsed'));
+
+// Saved Sessions collapse toggle (persisted)
+const SAVED_COLLAPSED_KEY = 'savedSessionsCollapsed';
+const claudeSavedEl = document.getElementById('claude-saved-section');
+const claudeSavedToggleEl = document.getElementById('claude-saved-toggle');
+if (localStorage.getItem(SAVED_COLLAPSED_KEY) === '1') claudeSavedEl.classList.add('collapsed');
+claudeSavedToggleEl.addEventListener('click', () => {
+  const collapsed = claudeSavedEl.classList.toggle('collapsed');
+  localStorage.setItem(SAVED_COLLAPSED_KEY, collapsed ? '1' : '0');
+});
 document.getElementById('sb-refresh').addEventListener('click', () => { if (activeId) renderTree(); });
 document.getElementById('sb-up').addEventListener('click', async () => {
   if (!activeId) return;

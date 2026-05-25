@@ -308,6 +308,18 @@
       animation: agentpulse 2s infinite;
     }
     @keyframes agentpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+    .agent-hdr-toggle { cursor: pointer; user-select: none; }
+    .agent-hdr-toggle:hover { color: var(--fg); }
+    .agent-hdr-chevron {
+      margin-left: auto;
+      font-size: 10px;
+      transition: transform 0.15s ease;
+      color: var(--fg-faint);
+    }
+    .agent.collapsed .agent-hdr-chevron { transform: rotate(-90deg); }
+    .agent.collapsed { padding-bottom: 10px; max-height: none; }
+    .agent.collapsed .agent-hdr { margin-bottom: 0; }
+    .agent.collapsed .agent-list { display: none; }
     .agent-list { display: flex; flex-direction: column; gap: 4px; }
     .agent-empty {
       font-size: 11px;
@@ -744,10 +756,11 @@
         </div>
         <div class="agent-list" id="agent-list"></div>
       </div>
-      <div class="agent claude-saved">
-        <div class="agent-hdr">
+      <div class="agent claude-saved" id="claude-saved-section">
+        <div class="agent-hdr agent-hdr-toggle" id="claude-saved-toggle">
           <span class="agent-hdr-dot" style="background:#3b78ff"></span>
-          Saved Sessions
+          <span>Saved Sessions</span>
+          <span class="agent-hdr-chevron">▾</span>
         </div>
         <div class="agent-list" id="claude-sessions-list"></div>
       </div>
