@@ -284,6 +284,56 @@ function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
   resizerEl.addEventListener('pointercancel', end);
 }
 
+// ---------- Ctrl+Z undo tracking ----------
+// Per-pane stack of input chunks (typed runs + pastes). Ctrl+Z (delivered via IPC
+// from main process — only path that survives menu accelerators and xterm's textarea)
+// pops the last chunk and sends backspaces matching its printable length. Enter/Esc/
+// Ctrl+C clear the stack since the input was submitted or cancelled.
+function visibleLength(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0x20 && c < 0x7f) n++;
+  }
+  return n;
+}
+function flushUndoCurrent(pane) {
+  const u = pane.undoState;
+  if (u.current) { u.stack.push(u.current); u.current = ''; }
+}
+function clearUndoAll(pane) {
+  pane.undoState.current = '';
+  pane.undoState.stack.length = 0;
+}
+function trackUndoInput(pane, data) {
+  if (!data) return;
+  const u = pane.undoState;
+  if (data.length > 1) {
+    flushUndoCurrent(pane);
+    if (visibleLength(data) > 0) u.stack.push(data);
+    return;
+  }
+  const c = data.charCodeAt(0);
+  if (c === 0x0d || c === 0x0a || c === 0x1b || c === 0x03) { clearUndoAll(pane); return; }
+  if (c === 0x7f || c === 0x08) {
+    if (u.current.length > 0) u.current = u.current.slice(0, -1);
+    else if (u.stack.length > 0) {
+      const last = u.stack.pop();
+      if (last.length > 1) u.stack.push(last.slice(0, -1));
+    }
+    return;
+  }
+  if (c === 0x09 || c === 0x17) { flushUndoCurrent(pane); return; }
+  if (c >= 0x20 && c < 0x7f) { u.current += data; return; }
+  flushUndoCurrent(pane);
+}
+function popUndoChunk(pane) {
+  const u = pane.undoState;
+  if (u.current.length > 0) { const t = u.current; u.current = ''; return t; }
+  if (u.stack.length > 0) return u.stack.pop();
+  return '';
+}
+
 // ---------- create pane (pty + xterm) ----------
 async function createPaneProcess(tab, paneEl, opts = {}) {
   const paneId = newPaneId();
@@ -316,7 +366,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     copilotRunning: false, copilotBusyUntil: 0, copilotSessionId: null,
     copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
-    runOnReady: opts.runOnReady || null
+    runOnReady: opts.runOnReady || null,
+    undoState: { current: '', stack: [] }
   };
   tab.panes.set(paneId, pane);
 
@@ -325,6 +376,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   term.onData(data => {
     window.term.input(ptyId, data);
     pane.suppressBusyUntil = Math.max(pane.suppressBusyUntil || 0, Date.now() + 200);
+    trackUndoInput(pane, data);
   });
   term.onResize(({ cols, rows }) => window.term.resize(ptyId, cols, rows));
 
@@ -360,6 +412,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'Backspace') {
       e.preventDefault();
       window.term.input(ptyId, '\x17');
+      flushUndoCurrent(pane);
       return false;
     }
     return true;
@@ -1427,6 +1480,20 @@ document.getElementById('new-tab').addEventListener('click',   () => createTab()
 
 let resizeTimer = null;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitAll, 50); });
+
+// Ctrl+Z arrives via IPC from the main process (before-input-event), bypassing menu
+// accelerators and xterm's textarea. Apply chunk-level undo to the active pane.
+window.shortcuts?.onCtrlZ?.(() => {
+  if (!activeId) return;
+  const tab = tabs.get(activeId);
+  if (!tab || tab.type === 'editor') return;
+  const pane = getActivePane(tab);
+  if (!pane) return;
+  const chunk = popUndoChunk(pane);
+  if (!chunk) return;
+  const n = visibleLength(chunk);
+  if (n > 0) window.term.input(pane.ptyId, '\x7f'.repeat(n));
+});
 
 // ---------- keyboard shortcuts ----------
 window.addEventListener('keydown', (e) => {

@@ -53,3 +53,11 @@ contextBridge.exposeInMainWorld('sessionApi', {
   load: ()     => ipcRenderer.invoke('session:load'),
   save: (data) => ipcRenderer.send('session:save', data)
 });
+
+contextBridge.exposeInMainWorld('shortcuts', {
+  onCtrlZ: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('app:ctrl-z', listener);
+    return () => ipcRenderer.removeListener('app:ctrl-z', listener);
+  }
+});

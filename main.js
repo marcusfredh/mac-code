@@ -97,6 +97,19 @@ function createWindow() {
   mainWindow.setBounds({ x, y, width, height });
 
   mainWindow.loadFile('renderer.html');
+
+  // Ctrl+Z is intercepted in main process so menu accelerators, browser textarea
+  // undo, and xterm's textarea handlers can't swallow it first. Renderer applies
+  // chunk-level undo on the active pane.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.control && !input.shift && !input.alt && !input.meta &&
+        (input.key || '').toLowerCase() === 'z') {
+      event.preventDefault();
+      mainWindow.webContents.send('app:ctrl-z');
+    }
+  });
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.setBounds({ x, y, width, height });
     if (fillsScreen) mainWindow.maximize();
