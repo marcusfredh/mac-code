@@ -2,6 +2,9 @@ const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const http = require('http');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
 const pty = require('node-pty');
 
 app.setName('Mac Code');
@@ -124,6 +127,8 @@ function createWindow() {
       try { p.kill(); } catch (_) {}
     }
     ptys.clear();
+    killAllChats();
+    stopGateServer();
     mainWindow = null;
   });
 }
@@ -327,6 +332,214 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
     };
   } catch (err) {
     return { error: err.code || err.message };
+  }
+});
+
+// ============================================================================
+// MCP management
+//
+// Everything goes through `claude mcp …` rather than editing ~/.claude.json
+// directly: that file is the CLI's own live state (startup counters, project
+// history, ~100KB of it), so a concurrent write from here could lose data.
+// Interactive flows (login) are run in a chat pane's terminal drawer instead,
+// where there is a real pty for the OAuth prompt.
+// ============================================================================
+
+function runClaude(args, opts = {}) {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(resolveClaudeBin(), args, {
+        cwd: opts.cwd || defaultCwd(),
+        windowsHide: true,
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (err) {
+      resolve({ error: err.message, code: -1 });
+      return;
+    }
+    let out = '', err = '';
+    let settled = false;
+    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch (_) {}
+      done({ error: 'timed out', stdout: out, stderr: err, code: -1 });
+    }, opts.timeout || 60000);
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (d) => { err += d; });
+    proc.on('error', (e) => { clearTimeout(timer); done({ error: e.message, code: -1 }); });
+    proc.on('exit', (code) => {
+      clearTimeout(timer);
+      done({ ok: code === 0, code, stdout: out, stderr: err });
+    });
+  });
+}
+
+// `claude mcp list` prints "<name>: <target> - <marker> <status>" per server, where
+// the marker is one of ✔ ! ✘ ⏸. Anchoring the split on the marker keeps names and
+// URLs (both of which contain colons and dashes) intact.
+function parseMcpList(stdout) {
+  const servers = [];
+  for (const raw of String(stdout || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || /^Checking MCP server health/i.test(line)) continue;
+    const at = line.search(/\s-\s[✔✓!✘⏸]/);
+    if (at < 0) continue;
+    const left = line.slice(0, at);
+    const rest = line.slice(at + 3);
+    const marker = rest[0];
+    const statusText = rest.slice(1).trim();
+    const colon = left.indexOf(': ');
+    const name = colon >= 0 ? left.slice(0, colon) : left;
+    let target = colon >= 0 ? left.slice(colon + 2) : '';
+    // HTTP/SSE entries carry a trailing transport marker; stdio ones don't.
+    let transport = 'stdio';
+    const tm = target.match(/\s\((HTTP|SSE|SSE-IDE|WS)\)$/i);
+    if (tm) { transport = tm[1].toLowerCase(); target = target.slice(0, tm.index); }
+    const state =
+      marker === '✔' || marker === '✓' ? 'connected' :
+      marker === '!' ? 'needs-auth' :
+      marker === '⏸' ? 'pending' : 'failed';
+    servers.push({ name, target, transport, state, statusText });
+  }
+  return servers;
+}
+
+// Where every configured server lives, read straight from the CLI's config files.
+// Read-only: writes still go through `claude mcp add-json` so the CLI owns the file.
+//
+// This exists because `claude mcp add` defaults to *local* scope, which is keyed to
+// the exact folder — servers added in C:\dev are invisible from C:\dev\project. The
+// panel needs to be able to say so, and offer to copy them across.
+function normalizeProjectPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+ipcMain.handle('mcp:configured', async (_event, args = {}) => {
+  const out = { user: [], projects: [], projectFile: [], errors: [] };
+  const cwdKey = normalizeProjectPath(args.cwd || defaultCwd());
+
+  try {
+    const raw = await fs.promises.readFile(path.join(os.homedir(), '.claude.json'), 'utf8');
+    const cfg = JSON.parse(raw);
+    for (const [name, config] of Object.entries(cfg.mcpServers || {})) {
+      out.user.push({ name, config });
+    }
+    for (const [projectPath, project] of Object.entries(cfg.projects || {})) {
+      const servers = Object.entries((project && project.mcpServers) || {})
+        .map(([name, config]) => ({ name, config }));
+      if (!servers.length) continue;
+      out.projects.push({
+        path: projectPath,
+        isCurrent: normalizeProjectPath(projectPath) === cwdKey,
+        servers
+      });
+    }
+  } catch (err) {
+    out.errors.push('~/.claude.json: ' + (err.code || err.message));
+  }
+
+  // A project-scoped .mcp.json is checked in with the repo.
+  if (args.cwd) {
+    try {
+      const raw = await fs.promises.readFile(path.join(args.cwd, '.mcp.json'), 'utf8');
+      const cfg = JSON.parse(raw);
+      for (const [name, config] of Object.entries(cfg.mcpServers || {})) {
+        out.projectFile.push({ name, config });
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') out.errors.push('.mcp.json: ' + (err.code || err.message));
+    }
+  }
+  return out;
+});
+
+ipcMain.handle('mcp:addJson', async (_event, args = {}) => {
+  const name = String(args.name || '').trim();
+  if (!name || !args.config) return { error: 'name and config are required' };
+  const scope = ['local', 'user', 'project'].includes(args.scope) ? args.scope : 'local';
+  const res = await runClaude(
+    ['mcp', 'add-json', '--scope', scope, name, JSON.stringify(args.config)],
+    { cwd: args.cwd, timeout: 60000 }
+  );
+  if (res.error) return { error: res.error };
+  return { ok: res.ok, text: (res.stdout || '') + (res.stderr || '') };
+});
+
+ipcMain.handle('mcp:list', async (_event, args = {}) => {
+  const res = await runClaude(['mcp', 'list'], { cwd: args.cwd, timeout: 90000 });
+  if (res.error) return { error: res.error, stderr: res.stderr };
+  return { servers: parseMcpList(res.stdout), raw: res.stdout, stderr: res.stderr };
+});
+
+ipcMain.handle('mcp:get', async (_event, args = {}) => {
+  if (!args.name) return { error: 'no name' };
+  const res = await runClaude(['mcp', 'get', args.name], { cwd: args.cwd, timeout: 60000 });
+  if (res.error) return { error: res.error };
+  return { ok: res.ok, text: (res.stdout || '') + (res.stderr || '') };
+});
+
+ipcMain.handle('mcp:remove', async (_event, args = {}) => {
+  if (!args.name) return { error: 'no name' };
+  const argv = ['mcp', 'remove', args.name];
+  if (args.scope) argv.push('--scope', args.scope);
+  const res = await runClaude(argv, { cwd: args.cwd, timeout: 30000 });
+  if (res.error) return { error: res.error };
+  return { ok: res.ok, text: (res.stdout || '') + (res.stderr || '') };
+});
+
+ipcMain.handle('mcp:logout', async (_event, args = {}) => {
+  if (!args.name) return { error: 'no name' };
+  const res = await runClaude(['mcp', 'logout', args.name], { cwd: args.cwd, timeout: 30000 });
+  if (res.error) return { error: res.error };
+  return { ok: res.ok, text: (res.stdout || '') + (res.stderr || '') };
+});
+
+ipcMain.handle('mcp:add', async (_event, args = {}) => {
+  const name = String(args.name || '').trim();
+  const target = String(args.target || '').trim();
+  if (!name || !target) return { error: 'name and command/URL are required' };
+
+  const scope = ['local', 'user', 'project'].includes(args.scope) ? args.scope : 'local';
+  const argv = ['mcp', 'add', '--scope', scope];
+  if (args.transport === 'http' || args.transport === 'sse') {
+    argv.push('--transport', args.transport);
+  }
+  for (const h of (args.headers || [])) {
+    if (String(h).trim()) argv.push('--header', String(h).trim());
+  }
+  for (const e of (args.env || [])) {
+    if (String(e).trim()) argv.push('--env', String(e).trim());
+  }
+  argv.push(name);
+  if (args.transport === 'stdio') {
+    // Everything after `--` is the subprocess command, so its own flags survive.
+    argv.push('--', ...target.split(/\s+/));
+  } else {
+    argv.push(target);
+  }
+  const res = await runClaude(argv, { cwd: args.cwd, timeout: 60000 });
+  if (res.error) return { error: res.error };
+  return { ok: res.ok, text: (res.stdout || '') + (res.stderr || '') };
+});
+
+// ----- IPC: the CLI's own default permission mode -----
+// Seeds a new chat pane from ~/.claude/settings.json so Mac Code starts where the
+// user's CLI does. Modes the gate has no equivalent for fall back to asking.
+ipcMain.handle('claude:defaultPermissionMode', async () => {
+  try {
+    const raw = await fs.promises.readFile(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8');
+    const mode = JSON.parse(raw)?.permissions?.defaultMode;
+    if (mode === 'auto' || mode === 'acceptEdits' || mode === 'bypassPermissions') {
+      return { mode };
+    }
+    return { mode: 'default', cliMode: mode || null };
+  } catch (err) {
+    return { mode: 'default', error: err.code || err.message };
   }
 });
 
@@ -609,6 +822,473 @@ ipcMain.handle('copilot:usage', async (event, cwd) => {
     mtime: t.mtime,
     cwd: t.sessionCwd
   };
+});
+
+// ============================================================================
+// Claude chat panes
+//
+// A chat pane drives `claude -p --input-format stream-json --output-format
+// stream-json`, which keeps one long-lived process per pane: we write user
+// messages as JSON lines on stdin and parse agent events off stdout.
+//
+// Permission prompts don't exist in print mode — a tool that needs approval is
+// auto-denied. To get the UI's Allow/Deny card we install a PreToolUse hook
+// (hooks/permission-gate.js) that calls back into the loopback gate server
+// below and blocks until the renderer answers.
+// ============================================================================
+
+const chats = new Map(); // chatId -> { proc, cwd, sessionId, model, permissionMode, rules, buf, pending:Set<permId> }
+
+// Tools that cannot change anything, so they never need a prompt. The hook fires
+// for every tool call, not only the ones the CLI would have asked about, so
+// without this list a plain Read would pop a card.
+const READ_ONLY_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'NotebookRead', 'WebSearch', 'TodoWrite',
+  'Skill', 'ToolSearch', 'BashOutput', 'ListMcpResourcesTool',
+  'ReadMcpResourceTool', 'ReadMcpResourceDirTool'
+]);
+
+// Auto-allowed on top of the read-only set when the pane is in acceptEdits mode.
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+// ----- Auto mode -----
+// Auto mode = accept edits, plus shell commands that only inspect state or run the
+// project's own checks. Everything else still asks. The allowlist is on the command
+// head (plus a second word for subcommand-scoped tools like git), and any command
+// containing a risky token is asked about regardless of its head, so an allowlisted
+// head can't smuggle something through a pipe or a chained `&&`.
+const AUTO_SAFE_COMMANDS = new Set([
+  'ls', 'dir', 'pwd', 'cd', 'echo', 'cat', 'type', 'head', 'tail', 'wc',
+  'find', 'findstr', 'grep', 'rg', 'where', 'which', 'tree', 'stat',
+  'date', 'whoami', 'hostname', 'env', 'printenv', 'set',
+  'node', 'python', 'python3', 'py', 'dotnet', 'go', 'cargo', 'tsc',
+  'eslint', 'prettier', 'pytest', 'jest', 'vitest'
+]);
+
+// Command heads whose safety depends on the subcommand.
+const AUTO_SAFE_SUBCOMMANDS = {
+  git: new Set(['status', 'diff', 'log', 'show', 'branch', 'remote', 'blame',
+                'describe', 'rev-parse', 'ls-files', 'shortlog', 'stash']),
+  npm: new Set(['test', 'run', 'ls', 'list', 'view', 'outdated', 'why', 'audit']),
+  pnpm: new Set(['test', 'run', 'ls', 'list', 'why', 'outdated']),
+  yarn: new Set(['test', 'run', 'list', 'why', 'outdated']),
+  gh: new Set(['pr', 'issue', 'repo', 'run', 'api'])
+};
+
+// Substrings that force a prompt wherever they appear in the command line.
+const AUTO_RISKY = [
+  /\brm\b/i, /\brmdir\b/i, /\bdel\b/i, /\berase\b/i, /remove-item/i,
+  /\bmv\b/i, /\bmove\b/i, /\bformat\b/i, /\bdd\b/i, /\bmkfs/i,
+  /\bsudo\b/i, /\brunas\b/i, /\bicacls\b/i, /\bchmod\b/i, /\bchown\b/i,
+  /\bcurl\b/i, /\bwget\b/i, /invoke-webrequest/i, /invoke-restmethod/i,
+  /\bssh\b/i, /\bscp\b/i, /\bftp\b/i, /\bnc\b/i,
+  /\bshutdown\b/i, /\brestart-computer\b/i, /\breg\b\s/i, /\bschtasks\b/i,
+  /\bsc\b\s/i, /\btaskkill\b/i, /stop-process/i, /\bkill\b/i,
+  /\bnpm\s+(i|install|publish|link|unpublish)\b/i,
+  /\bgit\s+(push|reset|clean|rebase|checkout|switch|restore|filter-branch)\b/i,
+  />\s*\S/, />>/,               // output redirection writes files
+  /\biex\b/i, /invoke-expression/i, /\beval\b/i,
+  /\|\s*(sh|bash|pwsh|powershell|cmd)\b/i
+];
+
+function autoAllowsCommand(command) {
+  const cmd = String(command || '').trim();
+  if (!cmd) return false;
+  if (AUTO_RISKY.some((re) => re.test(cmd))) return false;
+
+  // Every segment of a chained command has to clear the bar on its own.
+  const segments = cmd.split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
+  if (!segments.length) return false;
+
+  return segments.every((seg) => {
+    const words = seg.split(/\s+/);
+    const head = (words[0] || '').replace(/^["']|["']$/g, '').split(/[\\/]/).pop()
+      .replace(/\.(exe|cmd|bat|ps1)$/i, '').toLowerCase();
+    const subs = AUTO_SAFE_SUBCOMMANDS[head];
+    if (subs) {
+      const sub = (words[1] || '').toLowerCase();
+      return subs.has(sub);
+    }
+    return AUTO_SAFE_COMMANDS.has(head);
+  });
+}
+
+function resolveClaudeBin() {
+  const candidates = [
+    path.join(os.homedir(), '.local', 'bin', 'claude.exe'),
+    path.join(os.homedir(), '.local', 'bin', 'claude.cmd'),
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd')
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+  }
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    for (const name of ['claude.exe', 'claude.cmd', 'claude.bat']) {
+      const candidate = path.join(dir, name);
+      try { if (fs.existsSync(candidate)) return candidate; } catch (_) {}
+    }
+  }
+  return 'claude';
+}
+
+// ----- Permission gate server (loopback only, token-checked) -----
+let gateServer = null;
+let gatePort = 0;
+let gateToken = null;
+let permSeq = 0;
+const pendingPerms = new Map(); // permId -> { res, chatId }
+
+function bashRuleKey(command) {
+  // "npm test -- --runInBand" -> "npm". Good enough for an "always allow npm"
+  // rule; anything more clever would imply a guarantee we can't make.
+  const first = String(command || '').trim().split(/\s+/)[0] || '';
+  return first.replace(/^["']|["']$/g, '').split(/[\\/]/).pop() || '';
+}
+
+function ruleMatches(rule, toolName, input) {
+  if (rule.tool !== toolName) return false;
+  if (!rule.prefix) return true;
+  if (toolName === 'Bash' || toolName === 'PowerShell') {
+    return bashRuleKey(input && input.command) === rule.prefix;
+  }
+  return false;
+}
+
+function autoDecision(chat, toolName, input) {
+  if (chat.permissionMode === 'bypassPermissions') {
+    return { decision: 'allow', reason: 'Mac Code: permissions bypassed for this pane' };
+  }
+  if (READ_ONLY_TOOLS.has(toolName)) {
+    return { decision: 'allow', reason: 'Mac Code: read-only tool' };
+  }
+  const acceptsEdits = chat.permissionMode === 'acceptEdits' || chat.permissionMode === 'auto';
+  if (acceptsEdits && EDIT_TOOLS.has(toolName)) {
+    return { decision: 'allow', reason: 'Mac Code: edits accepted for this pane' };
+  }
+  if (chat.permissionMode === 'auto' &&
+      (toolName === 'Bash' || toolName === 'PowerShell') &&
+      autoAllowsCommand(input && input.command)) {
+    return { decision: 'allow', reason: 'Mac Code: auto mode allows this command' };
+  }
+  for (const rule of chat.rules) {
+    if (ruleMatches(rule, toolName, input)) {
+      return { decision: 'allow', reason: 'Mac Code: matched an always-allow rule' };
+    }
+  }
+  return null;
+}
+
+function startGateServer() {
+  if (gateServer) return Promise.resolve();
+  gateToken = crypto.randomBytes(24).toString('hex');
+  return new Promise((resolve, reject) => {
+    gateServer = http.createServer((req, res) => {
+      if (req.method !== 'POST' || req.url !== '/permission') {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.headers['x-mac-code-token'] !== gateToken) {
+        res.writeHead(403).end();
+        return;
+      }
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (d) => {
+        body += d;
+        if (body.length > 4 * 1024 * 1024) { req.destroy(); }
+      });
+      req.on('end', () => {
+        let payload;
+        try { payload = JSON.parse(body); } catch { res.writeHead(400).end(); return; }
+        handlePermissionRequest(payload, res);
+      });
+    });
+    gateServer.on('error', reject);
+    // 127.0.0.1 only — never reachable from another machine.
+    gateServer.listen(0, '127.0.0.1', () => {
+      gatePort = gateServer.address().port;
+      resolve();
+    });
+  });
+}
+
+function stopGateServer() {
+  for (const [, p] of pendingPerms) {
+    try { respondPerm(p.res, 'deny', 'Mac Code closed'); } catch (_) {}
+  }
+  pendingPerms.clear();
+  if (gateServer) {
+    try { gateServer.close(); } catch (_) {}
+    gateServer = null;
+  }
+}
+
+function respondPerm(res, decision, reason) {
+  if (res.writableEnded) return;
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ decision, reason }));
+}
+
+function handlePermissionRequest(payload, res) {
+  const chat = chats.get(payload.chatId);
+  const event = payload.event || {};
+  const toolName = event.tool_name || 'unknown';
+  const input = event.tool_input || {};
+
+  if (!chat) { respondPerm(res, 'deny', 'Mac Code: chat pane is gone'); return; }
+
+  const auto = autoDecision(chat, toolName, input);
+  if (auto) { respondPerm(res, auto.decision, auto.reason); return; }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    respondPerm(res, 'deny', 'Mac Code: no window to ask in');
+    return;
+  }
+
+  const permId = 'perm-' + (++permSeq);
+  pendingPerms.set(permId, { res, chatId: payload.chatId });
+  chat.pending.add(permId);
+
+  mainWindow.webContents.send('chat:permission-request', {
+    chatId: payload.chatId,
+    permId,
+    toolName,
+    toolUseId: event.tool_use_id || null,
+    cwd: event.cwd || chat.cwd,
+    input,
+    ruleKey: (toolName === 'Bash' || toolName === 'PowerShell')
+      ? bashRuleKey(input.command)
+      : null
+  });
+}
+
+ipcMain.on('chat:permission-response', (_event, args = {}) => {
+  const entry = pendingPerms.get(args.permId);
+  if (!entry) return;
+  pendingPerms.delete(args.permId);
+  const chat = chats.get(entry.chatId);
+  if (chat) chat.pending.delete(args.permId);
+
+  const decision = args.decision === 'allow' ? 'allow' : 'deny';
+  if (decision === 'allow' && chat && args.alwaysRule && args.alwaysRule.tool) {
+    chat.rules.push({ tool: args.alwaysRule.tool, prefix: args.alwaysRule.prefix || null });
+  }
+  respondPerm(entry.res, decision, args.reason || (decision === 'allow'
+    ? 'Approved in Mac Code'
+    : 'Denied in Mac Code'));
+});
+
+// ----- Chat process lifecycle -----
+function hookSettings() {
+  return {
+    hooks: {
+      PreToolUse: [{
+        matcher: '*',
+        hooks: [{
+          type: 'command',
+          command: `node "${path.join(__dirname, 'hooks', 'permission-gate.js')}"`,
+          // Generous: the ceiling is how long a human may take to answer the card.
+          timeout: 3600
+        }]
+      }]
+    }
+  };
+}
+
+function killChat(chatId) {
+  const chat = chats.get(chatId);
+  if (!chat) return;
+  for (const permId of chat.pending) {
+    const entry = pendingPerms.get(permId);
+    if (entry) {
+      pendingPerms.delete(permId);
+      respondPerm(entry.res, 'deny', 'Mac Code: chat pane closed');
+    }
+  }
+  chat.pending.clear();
+  chats.delete(chatId);
+  try { chat.proc.stdin.end(); } catch (_) {}
+  try { chat.proc.kill(); } catch (_) {}
+}
+
+function killAllChats() {
+  for (const id of Array.from(chats.keys())) killChat(id);
+}
+
+ipcMain.handle('chat:start', async (_event, opts = {}) => {
+  const cwd = opts.cwd || defaultCwd();
+  const chatId = opts.chatId;
+  if (!chatId) return { error: 'no chatId' };
+  if (chats.has(chatId)) return { error: 'chat already running' };
+
+  try { await startGateServer(); }
+  catch (err) { return { error: 'permission gate failed to start: ' + err.message }; }
+
+  const bin = resolveClaudeBin();
+  const args = [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    // --verbose is required alongside -p with stream-json output.
+    '--verbose',
+    '--include-partial-messages',
+    '--settings', JSON.stringify(hookSettings())
+  ];
+  if (opts.model) args.push('--model', opts.model);
+  if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
+
+  let proc;
+  try {
+    proc = spawn(bin, args, {
+      cwd,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        MAC_CODE_GATE_URL: `http://127.0.0.1:${gatePort}/permission`,
+        MAC_CODE_GATE_TOKEN: gateToken,
+        MAC_CODE_CHAT_ID: chatId
+      },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    return { error: 'could not launch claude: ' + err.message };
+  }
+
+  const chat = {
+    proc, cwd, chatId,
+    sessionId: opts.resumeSessionId || null,
+    model: opts.model || null,
+    permissionMode: opts.permissionMode || 'default',
+    rules: [],
+    buf: '',
+    pending: new Set()
+  };
+  chats.set(chatId, chat);
+
+  const send = (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  };
+
+  proc.stdout.setEncoding('utf8');
+  proc.stdout.on('data', (data) => {
+    chat.buf += data;
+    // stream-json is newline-delimited; a chunk can split mid-line.
+    let idx;
+    while ((idx = chat.buf.indexOf('\n')) >= 0) {
+      const line = chat.buf.slice(0, idx).trim();
+      chat.buf = chat.buf.slice(idx + 1);
+      if (!line) continue;
+      let obj;
+      try { obj = JSON.parse(line); }
+      catch { send('chat:stderr', { chatId, text: line }); continue; }
+      if (obj.session_id) chat.sessionId = obj.session_id;
+      send('chat:event', { chatId, event: obj });
+    }
+  });
+
+  proc.stderr.setEncoding('utf8');
+  proc.stderr.on('data', (text) => send('chat:stderr', { chatId, text }));
+
+  proc.on('error', (err) => {
+    send('chat:stderr', { chatId, text: 'spawn error: ' + err.message });
+    send('chat:exit', { chatId, code: -1 });
+    killChat(chatId);
+  });
+
+  proc.on('exit', (code) => {
+    send('chat:exit', { chatId, code, sessionId: chat.sessionId });
+    killChat(chatId);
+  });
+
+  return { ok: true, chatId, cwd, bin, pid: proc.pid };
+});
+
+ipcMain.handle('chat:send', (_event, args = {}) => {
+  const chat = chats.get(args.chatId);
+  if (!chat) return { error: 'chat not running' };
+  const content = Array.isArray(args.content) ? args.content : [];
+  if (!content.length) return { error: 'empty message' };
+  const line = JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
+  try { chat.proc.stdin.write(line); }
+  catch (err) { return { error: err.message }; }
+  return { ok: true };
+});
+
+ipcMain.handle('chat:setPermissionMode', (_event, args = {}) => {
+  const chat = chats.get(args.chatId);
+  if (!chat) return { error: 'chat not running' };
+  chat.permissionMode = args.mode || 'default';
+  return { ok: true, mode: chat.permissionMode };
+});
+
+ipcMain.handle('chat:interrupt', (_event, args = {}) => {
+  const chat = chats.get(args.chatId);
+  if (!chat) return { error: 'chat not running' };
+
+  // Deny anything waiting on a card first, or the CLI stays blocked on the hook.
+  for (const permId of Array.from(chat.pending)) {
+    const entry = pendingPerms.get(permId);
+    if (entry) {
+      pendingPerms.delete(permId);
+      chat.pending.delete(permId);
+      respondPerm(entry.res, 'deny', 'Interrupted in Mac Code');
+    }
+  }
+
+  // An interrupt control request aborts the turn in flight. The process stays up
+  // and the session keeps its history, so the pane is usable straight after.
+  try {
+    chat.proc.stdin.write(JSON.stringify({
+      type: 'control_request',
+      request_id: 'interrupt-' + Date.now(),
+      request: { subtype: 'interrupt' }
+    }) + '\n');
+  } catch (err) {
+    return { error: err.message };
+  }
+  return { ok: true, sessionId: chat.sessionId };
+});
+
+ipcMain.on('chat:stop', (_event, chatId) => killChat(chatId));
+
+// Pasted screenshots land here so the composer has a real path to show and the
+// agent has a file it can re-read later in the session.
+ipcMain.handle('chat:saveAttachment', async (_event, args = {}) => {
+  const dir = path.join(app.getPath('userData'), 'attachments');
+  const ext = (args.ext || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+  const name = `paste-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+  const target = path.join(dir, name);
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(target, Buffer.from(args.base64 || '', 'base64'));
+  } catch (err) {
+    return { error: err.message };
+  }
+  return { path: target, name };
+});
+
+// ----- IPC: age of a saved session -----
+// The saved-session library only started recording savedAt recently, so "how old is
+// this session" comes from the CLI's own transcript on disk. Returns null when the
+// transcript is gone, which the caller treats as "age unknown" rather than "old".
+ipcMain.handle('session:ages', async (_event, entries = []) => {
+  const out = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    let file = null;
+    if (entry && entry.id && entry.type === 'copilot') {
+      file = path.join(os.homedir(), '.copilot', 'session-state', entry.id, 'events.jsonl');
+    } else if (entry && entry.id && entry.cwd) {
+      file = path.join(os.homedir(), '.claude', 'projects', encodeCwdForClaude(entry.cwd), entry.id + '.jsonl');
+    }
+    if (!file) { out.push({ id: entry && entry.id, mtime: null, exists: false }); continue; }
+    try {
+      const st = await fs.promises.stat(file);
+      out.push({ id: entry.id, mtime: st.mtimeMs, exists: true });
+    } catch (_) {
+      out.push({ id: entry.id, mtime: null, exists: false });
+    }
+  }
+  return out;
 });
 
 // ----- IPC: Session persistence -----

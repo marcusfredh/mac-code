@@ -36,11 +36,52 @@ contextBridge.exposeInMainWorld('fs', {
 
 contextBridge.exposeInMainWorld('claudeApi', {
   usage: (cwd) => ipcRenderer.invoke('claude:usage', cwd),
-  handoff: (args) => ipcRenderer.invoke('claude:handoff', args)
+  handoff: (args) => ipcRenderer.invoke('claude:handoff', args),
+  defaultPermissionMode: () => ipcRenderer.invoke('claude:defaultPermissionMode')
 });
 
 contextBridge.exposeInMainWorld('copilotApi', {
   usage: (cwd) => ipcRenderer.invoke('copilot:usage', cwd)
+});
+
+contextBridge.exposeInMainWorld('chatApi', {
+  start:             (opts)  => ipcRenderer.invoke('chat:start', opts),
+  send:              (args)  => ipcRenderer.invoke('chat:send', args),
+  interrupt:         (args)  => ipcRenderer.invoke('chat:interrupt', args),
+  setPermissionMode: (args)  => ipcRenderer.invoke('chat:setPermissionMode', args),
+  saveAttachment:    (args)  => ipcRenderer.invoke('chat:saveAttachment', args),
+  stop:              (id)    => ipcRenderer.send('chat:stop', id),
+  respondPermission: (args)  => ipcRenderer.send('chat:permission-response', args),
+  onEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('chat:event', listener);
+    return () => ipcRenderer.removeListener('chat:event', listener);
+  },
+  onStderr: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('chat:stderr', listener);
+    return () => ipcRenderer.removeListener('chat:stderr', listener);
+  },
+  onExit: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('chat:exit', listener);
+    return () => ipcRenderer.removeListener('chat:exit', listener);
+  },
+  onPermissionRequest: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('chat:permission-request', listener);
+    return () => ipcRenderer.removeListener('chat:permission-request', listener);
+  }
+});
+
+contextBridge.exposeInMainWorld('mcpApi', {
+  list:       (args) => ipcRenderer.invoke('mcp:list', args),
+  get:        (args) => ipcRenderer.invoke('mcp:get', args),
+  add:        (args) => ipcRenderer.invoke('mcp:add', args),
+  addJson:    (args) => ipcRenderer.invoke('mcp:addJson', args),
+  configured: (args) => ipcRenderer.invoke('mcp:configured', args),
+  remove:     (args) => ipcRenderer.invoke('mcp:remove', args),
+  logout:     (args) => ipcRenderer.invoke('mcp:logout', args)
 });
 
 contextBridge.exposeInMainWorld('fileApi', {
@@ -50,8 +91,9 @@ contextBridge.exposeInMainWorld('fileApi', {
 });
 
 contextBridge.exposeInMainWorld('sessionApi', {
-  load: ()     => ipcRenderer.invoke('session:load'),
-  save: (data) => ipcRenderer.send('session:save', data)
+  load: ()        => ipcRenderer.invoke('session:load'),
+  save: (data)    => ipcRenderer.send('session:save', data),
+  ages: (entries) => ipcRenderer.invoke('session:ages', entries)
 });
 
 contextBridge.exposeInMainWorld('shortcuts', {
