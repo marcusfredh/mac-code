@@ -514,7 +514,10 @@
        below that pane's terminal, so the terminal shrinks and the PTY is resized to
        match — one composer per pane. The wrapper is the positioning context for the
        command palette, which opens above the bar. */
-    .hybrid-wrap { position: relative; flex-shrink: 0; margin-top: 8px; }
+    /* Own stacking context above the terminal, so the command palette (which opens
+       upward, overlapping the terminal region) sits in front of xterm's own layers
+       instead of behind them. */
+    .hybrid-wrap { position: relative; flex-shrink: 0; margin-top: 8px; z-index: 40; }
     .hybrid-bar {
       display: flex;
       flex-direction: column;
@@ -535,8 +538,8 @@
     .hybrid-input {
       flex: 1;
       min-height: 20px;
-      max-height: 160px;
-      resize: none;
+      max-height: 60vh;
+      resize: vertical;
       border: 0;
       outline: 0;
       background: transparent;

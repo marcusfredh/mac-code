@@ -473,9 +473,15 @@ function bufLine(buf, y) {
 // above and below the prompt line. Older builds draw a rounded box instead, so the
 // corner glyphs count as a frame too.
 const RULE_RE = /^[─━═_]{12,}$/;
-const BOX_TOP_RE = /^[╭┌╔][─━═]{4,}/;
-const BOX_BOTTOM_RE = /^[╰└╚][─━═]{4,}/;
-function isFrameTop(t) { return RULE_RE.test(t) || BOX_TOP_RE.test(t); }
+// Once a session is named, the CLI tacks the name onto the right end of the top rule:
+// `────────────────────  my-session`. So a frame top is a rule that may carry a trailing
+// label, not only a bare rule.
+const RULE_LABELLED_RE = /^[─━═_]{12,}\s+\S/;
+// Corner glyph followed by at least one horizontal. Loose enough that a session name
+// drawn into the top border — `╭─ my-session ──────╮` — is still read as a frame.
+const BOX_TOP_RE = /^[╭┌╔][─━═]/;
+const BOX_BOTTOM_RE = /^[╰└╚][─━═]/;
+function isFrameTop(t) { return RULE_RE.test(t) || RULE_LABELLED_RE.test(t) || BOX_TOP_RE.test(t); }
 function isFrameBottom(t) { return RULE_RE.test(t) || BOX_BOTTOM_RE.test(t); }
 
 // The prompt line inside the frame: a bare ❯ or >, optionally carrying typed text, and
@@ -501,11 +507,20 @@ function claudeComposerRows(term) {
   const cursorText = bufLine(buf, cursorAbs).trim();
   if (!PROMPT_RE.test(cursorText) || CHOICE_RE.test(cursorText)) return null;
 
+  // Once Claude names the session it prints that name on a line just above its input
+  // box. Tolerate a single such label between the prompt and the frame top so the band
+  // still recognises the composer — a question or a numbered choice is never a label,
+  // and the cursor-is-on-a-prompt guard above already keeps us clear of dialogs.
   let top = -1;
+  let skipped = false;
   for (let y = cursorAbs - 1; y >= Math.max(0, cursorAbs - 12); y--) {
     const t = bufLine(buf, y).trim();
     if (!t) continue;
     if (isFrameTop(t)) { top = y; break; }
+    if (!skipped && !CHOICE_RE.test(t) && !ASKING_RE.test(t) && !PROMPT_RE.test(t)) {
+      skipped = true; // the session-name label; the frame top should be right above it
+      continue;
+    }
     break; // something else is directly above the prompt: not a frame we know
   }
   if (top < 0) return null;
@@ -852,10 +867,24 @@ function ensureHybridBar(tab, pane) {
   // the ↶ button drives that same native stack.
   function doUndo() { input.focus(); document.execCommand('undo'); }
 
+  // Auto-grow the composer with its content, up to 160px — but once the user drags the
+  // textarea's own resize grip we stop fighting them and leave the height they chose.
+  let userResized = false;
+  let lastAutoH = 0;
   function autoGrow() {
+    if (userResized) return;
     input.style.height = 'auto';
-    input.style.height = Math.min(160, Math.max(20, input.scrollHeight)) + 'px';
+    const h = Math.min(160, Math.max(20, input.scrollHeight));
+    input.style.height = h + 'px';
+    lastAutoH = h;
   }
+  // A height change we did not produce (offsetHeight diverging from the last value
+  // autoGrow set) means the user dragged the grip — a width-only reflow leaves the
+  // explicit height untouched, so it won't trip this.
+  new ResizeObserver(() => {
+    if (userResized || !lastAutoH) return;
+    if (Math.abs(input.offsetHeight - lastAutoH) > 1) userResized = true;
+  }).observe(input);
 
   // ---------- command palette ----------
   let paletteItems = [];
@@ -1452,8 +1481,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   });
 
   // Intercept native paste event in capture phase to prevent double-paste
-  // (xterm textarea also fires paste; we drive paste explicitly via term.paste above)
+  // (xterm textarea also fires paste; we drive paste explicitly via term.paste above).
+  // The per-pane Claude composer lives inside this same paneEl, so let its own
+  // textarea keep the native paste instead of hijacking it into the terminal.
   paneEl.addEventListener('paste', (e) => {
+    if (e.target && e.target.closest && e.target.closest('.hybrid-wrap')) return;
     e.preventDefault();
     e.stopPropagation();
     const t = e.clipboardData && e.clipboardData.getData('text/plain');
@@ -2905,11 +2937,11 @@ function librariesInOrder() {
   ];
 }
 
-// A saved Claude session opens as a chat pane (resumed in place); Copilot has no
-// chat surface, so it still resumes inside a terminal.
+// Terminal is the default resume surface now — it's what's used most. Both types
+// resume by relaunching the CLI with --resume in a fresh shell. The native chat view
+// stays available for Claude as a secondary choice in the row's context menu.
 function resumeSavedSession(s, type) {
-  if (type === 'claude') createChatTab({ cwd: s.cwd, resumeSessionId: s.id });
-  else createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) });
+  createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) });
 }
 
 function renderClaudeSessions() {
@@ -2937,12 +2969,12 @@ function renderClaudeSessions() {
       e.preventDefault(); e.stopPropagation();
       const items = [
         { label: 'Rename', action: () => startRenameSavedSession(s, nm) },
-        { label: 'Resume', hint: type === 'claude' ? 'chat' : 'terminal', badge: type === 'claude' ? 'C' : 'GH',
+        { label: 'Resume', hint: 'terminal', badge: type === 'claude' ? 'C' : 'GH',
           action: () => resumeSavedSession(s, type) }
       ];
       if (type === 'claude') {
-        items.push({ label: 'Resume in terminal', hint: 'terminal',
-          action: () => createTab({ cwd: s.cwd, runOnReady: resumeCommandFor(type, s.id) }) });
+        items.push({ label: 'Resume in chat', hint: 'chat', badge: 'C',
+          action: () => createChatTab({ cwd: s.cwd, resumeSessionId: s.id }) });
         items.push({ separator: true });
         items.push({ label: 'Hand off to Copilot', action: () => handoffClaudeToCopilot(s.cwd) });
       }
