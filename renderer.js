@@ -253,6 +253,694 @@ function fitAll() {
   for (const [, tab] of tabs) for (const [, pane] of tab.panes) fitPane(pane);
 }
 
+// ---------- Hybrid Claude input ----------
+// A terminal pane running `claude` is the fastest surface we have: it is Claude's own
+// TUI drawn straight into xterm, with no markdown pass and no pacing in front of it.
+// What it does not give us is an input box we can style. Hybrid mode keeps that output
+// and replaces only the input — Claude's own composer box at the bottom of the pane is
+// covered by an opaque band, xterm's keyboard is switched off, and text goes into the
+// PTY from our own composer instead.
+//
+// The band is driven by a *positive* match on the composer box, so anything we do not
+// recognise — a permission prompt, a /-menu, a plan review — unmasks and hands the
+// keyboard back to the terminal rather than trapping the user behind paint.
+const HYBRID_KEY = 'termHybridInput';
+let hybridEnabled = localStorage.getItem(HYBRID_KEY) === '1';
+const hybridToggleEl = document.getElementById('hybrid-toggle');
+
+function bufLine(buf, y) {
+  const line = buf.getLine(y);
+  return line ? line.translateToString(true) : '';
+}
+
+// A row that is nothing but a horizontal rule — how the current CLI frames its input,
+// above and below the prompt line. Older builds draw a rounded box instead, so the
+// corner glyphs count as a frame too.
+const RULE_RE = /^[─━═_]{12,}$/;
+const BOX_TOP_RE = /^[╭┌╔][─━═]{4,}/;
+const BOX_BOTTOM_RE = /^[╰└╚][─━═]{4,}/;
+function isFrameTop(t) { return RULE_RE.test(t) || BOX_TOP_RE.test(t); }
+function isFrameBottom(t) { return RULE_RE.test(t) || BOX_BOTTOM_RE.test(t); }
+
+// The prompt line inside the frame: a bare ❯ or >, optionally carrying typed text, and
+// optionally inside a box border. A numbered choice is NOT a prompt — that is a dialog
+// asking something, and hiding it would leave the user answering a box they cannot see.
+const PROMPT_RE = /^(?:[│┃|]\s*)?[❯>](?:\s|$)/;
+const CHOICE_RE = /^(?:[│┃|]\s*)?[❯>]?\s*\d+[.)]\s/;
+const ASKING_RE = /do you want|would you like|\(y\/n\)|press enter to|esc to (?:cancel|reject|go back)/i;
+
+// The rows Claude's composer occupies right now, as { top, bottom } viewport rows, or
+// null when there is nothing we are confident enough to cover. Everything about this is
+// a positive match: an unrecognised screen unmasks rather than guessing.
+function claudeComposerRows(term) {
+  const buf = term.buffer.active;
+  // Scrolled back through the transcript: what is on screen is history, not the live
+  // composer, so there is nothing to hide.
+  if (buf.viewportY !== buf.baseY) return null;
+  const cursorAbs = buf.baseY + buf.cursorY;
+  const lastAbs = buf.baseY + term.rows - 1;
+
+  // The cursor sits on whichever line currently takes input. If that is not a prompt,
+  // the CLI is asking something and the screen stays as it is.
+  const cursorText = bufLine(buf, cursorAbs).trim();
+  if (!PROMPT_RE.test(cursorText) || CHOICE_RE.test(cursorText)) return null;
+
+  let top = -1;
+  for (let y = cursorAbs - 1; y >= Math.max(0, cursorAbs - 12); y--) {
+    const t = bufLine(buf, y).trim();
+    if (!t) continue;
+    if (isFrameTop(t)) { top = y; break; }
+    break; // something else is directly above the prompt: not a frame we know
+  }
+  if (top < 0) return null;
+
+  let bottom = -1;
+  for (let y = cursorAbs + 1; y <= Math.min(lastAbs, cursorAbs + 12); y++) {
+    const t = bufLine(buf, y).trim();
+    if (isFrameBottom(t)) { bottom = y; break; }
+    // A multi-line paste grows the prompt; anything else means we lost the frame.
+    if (t && !PROMPT_RE.test(t) && !/^[│┃|]/.test(t)) return null;
+  }
+  if (bottom < 0) return null;
+
+  // Last guard: never cover a frame that is putting a question in it.
+  for (let y = top; y <= bottom; y++) {
+    const t = bufLine(buf, y);
+    if (ASKING_RE.test(t) || CHOICE_RE.test(t.trim())) return null;
+  }
+  return { top: top - buf.baseY, bottom: bottom - buf.baseY };
+}
+
+// Where row 0 starts inside the pane, and how tall a row is. Measured rather than
+// derived from the CSS padding, so it stays right if the pane's box model changes.
+function paneRowMetrics(pane) {
+  const screen = pane.el.querySelector('.xterm-screen');
+  if (!screen || !pane.term.rows) return null;
+  const sr = screen.getBoundingClientRect();
+  if (sr.height <= 0) return null;
+  const pr = pane.el.getBoundingClientRect();
+  return { offset: sr.top - pr.top, cell: sr.height / pane.term.rows };
+}
+
+function setPaneStdin(pane, on) {
+  const off = !on;
+  if (pane.stdinOff === off) return;
+  pane.stdinOff = off;
+  try { pane.term.options.disableStdin = off; } catch (_) {}
+}
+
+// Band geometry and keyboard state for one pane. Cheap enough for every render.
+function updatePaneMask(pane) {
+  if (!pane.mask) return;
+  // Mid-scrape the menu is open over the pane and about to be closed again. Leave the
+  // band where it is rather than reacting to a screen that is not settled.
+  if (pane.hybridScraping && pane.masked) return;
+  const active = hybridEnabled && pane.claudeRunning && !pane.hybridRaw;
+  const rows = active ? claudeComposerRows(pane.term) : null;
+  const m = rows ? paneRowMetrics(pane) : null;
+
+  if (!rows || !m) {
+    pane.masked = false;
+    pane.mask.classList.remove('on');
+    pane.mask.style.height = '0px';
+    setPaneStdin(pane, true);
+    return;
+  }
+  // One extra pixel of height so rounding never leaves a sliver of the frame showing.
+  pane.mask.style.top = Math.floor(m.offset + rows.top * m.cell) + 'px';
+  pane.mask.style.height = (Math.ceil((rows.bottom - rows.top + 1) * m.cell) + 1) + 'px';
+  pane.mask.classList.add('on');
+  pane.masked = true;
+  pane.everMasked = true;
+  setPaneStdin(pane, false);
+}
+
+// Bracketed paste rather than raw keystrokes: Claude's input treats a paste as one
+// block, so a multi-line message arrives intact instead of every newline submitting it.
+// The submitting Enter goes in a later tick — Ink applies a paste asynchronously and can
+// otherwise see the carriage return first.
+function sendToClaudePty(ptyId, text) {
+  const body = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  // A single-line slash command goes in as typing, which is the path the CLI's own
+  // command handling is built around. Everything else goes in as one paste so that
+  // newlines land in the message instead of submitting it line by line.
+  if (!body.includes('\n') && body.startsWith('/')) window.term.input(ptyId, body);
+  else window.term.input(ptyId, '\x1b[200~' + body + '\x1b[201~');
+  setTimeout(() => window.term.input(ptyId, '\r'), 30);
+}
+
+// What the CLI's own /-menu is showing right now, as { cmd, desc } rows. Entries are a
+// name column and a description that wraps onto indented continuation lines.
+const SLASH_HEAD_RE = /^\/([A-Za-z0-9][\w:.-]*)\s{2,}(\S.*)$/;
+
+// The menu is drawn below the composer, and ordinary transcript text can look just like
+// an entry — `/claude-api    23%` in /usage output, for one. So the scan starts under the
+// composer frame rather than at the top of the screen.
+function scrapeSlashPage(term, minRow) {
+  const buf = term.buffer.active;
+  const rows = [];
+  let last = null;
+  for (let y = Math.max(0, minRow || 0); y < term.rows; y++) {
+    const raw = bufLine(buf, buf.baseY + y).replace(/\s+$/, '');
+    if (!raw) { last = null; continue; }
+    const head = SLASH_HEAD_RE.exec(raw.replace(/^\s*[❯>]?\s*/, ''));
+    if (head) { last = { cmd: '/' + head[1], desc: head[2].trim() }; rows.push(last); continue; }
+    if (last && /^\s{16,}\S/.test(raw)) { last.desc += ' ' + raw.trim(); continue; }
+    last = null;
+  }
+  return rows;
+}
+
+// Whatever is typed into Claude's composer right now, with the prompt marker stripped.
+// Empty means the CLI's input is clear and safe to drive.
+function promptRest(term) {
+  const buf = term.buffer.active;
+  const t = bufLine(buf, buf.baseY + buf.cursorY);
+  return t.replace(/^\s*(?:[│┃|]\s*)?[❯>]\s?/, '').trim();
+}
+
+// Read the CLI's slash commands out of its own menu.
+//
+// This is a mirror of the menu, not of the CLI: a command the menu does not list (2.1.234
+// leaves out /cost, /vim, /todos and /review, for instance) will not appear here either.
+// Typing it and sending still works — nothing validates against this list.
+//
+// There is no cheap way to ask for this list: `claude -p` only reports it in the init
+// event of a session that has been given a message, and the files on disk miss every
+// command that comes from a plugin or an MCP server. The menu in the pane has all of
+// them, so the list is read the way a user would read it — open the menu, page down
+// until nothing new appears, close it. All of that happens behind the mask, and the
+// only key that changes the composer is the slash, which is backspaced away again.
+async function hybridLoadCommands(pane) {
+  if (!pane || !pane.claudeRunning || pane.hybridScraping) return null;
+  // Never drive a composer that already has something in it.
+  if (promptRest(pane.term) !== '') return null;
+  const write = (b) => window.term.input(pane.ptyId, b);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Where the composer sits right now. The frame does not move while the menu is open,
+  // so this is the boundary for every page of the walk.
+  const frame = claudeComposerRows(pane.term);
+  const menuFrom = frame ? frame.bottom + 1 : 0;
+  pane.hybridScraping = true;
+  const seen = new Map();
+  try {
+    write('/');
+    await wait(500);
+    let dry = 0;
+    for (let step = 0; step < 40 && dry < 4; step++) {
+      const page = scrapeSlashPage(pane.term, menuFrom);
+      let fresh = 0;
+      for (const row of page) {
+        if (!seen.has(row.cmd)) { seen.set(row.cmd, row); fresh++; }
+      }
+      if (fresh) dry = 0; else dry++;
+      // The menu only scrolls once the selection passes the last visible entry, so a
+      // step has to move by a whole screenful. Moving four rows at a time made every
+      // step after the first look empty, which ended the walk inside the first page.
+      const stride = Math.max(8, page.length);
+      write('\x1b[B'.repeat(stride));
+      await wait(180);
+    }
+  } finally {
+    // Put the composer back exactly as it was. Only the slash was typed, but a dropped
+    // keystroke would leave a character behind that corrupts the next message, so this
+    // keeps deleting until the line reads clean again.
+    write('\x7f');
+    for (let i = 0; i < 20; i++) {
+      await wait(100);
+      if (promptRest(pane.term) === '') break;
+      write('\x7f');
+    }
+    pane.hybridScraping = false;
+    updatePaneMask(pane);
+  }
+  return Array.from(seen.values()).sort((a, b) => a.cmd.localeCompare(b.cmd));
+}
+
+// ---------- the composer itself ----------
+function hybridSend(tab) {
+  if (tab.hybridBar) tab.hybridBar.submit();
+}
+
+function ensureHybridBar(tab) {
+  if (tab.hybridBar) return tab.hybridBar;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'hybrid-wrap';
+
+  const palette = document.createElement('div');
+  palette.className = 'palette';
+  wrap.appendChild(palette);
+
+  const bar = document.createElement('div');
+  bar.className = 'hybrid-bar';
+  wrap.appendChild(bar);
+
+  const attachRow = document.createElement('div');
+  attachRow.className = 'attach-row';
+  bar.appendChild(attachRow);
+
+  const row = document.createElement('div');
+  row.className = 'hybrid-row';
+  bar.appendChild(row);
+
+  const input = document.createElement('textarea');
+  input.className = 'hybrid-input';
+  input.rows = 1;
+  input.placeholder = 'Message Claude — Enter to send, Shift+Enter for a new line, / for commands';
+  row.appendChild(input);
+
+  const mkBtn = (label, title, cls) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'hybrid-btn' + (cls ? ' ' + cls : '');
+    b.textContent = label;
+    if (title) b.title = title;
+    return b;
+  };
+
+  const sendBtn = mkBtn('Send', 'Send to Claude — Enter', 'send');
+  row.appendChild(sendBtn);
+
+  const foot = document.createElement('div');
+  foot.className = 'hybrid-foot';
+  bar.appendChild(foot);
+
+  const filePicker = document.createElement('input');
+  filePicker.type = 'file';
+  filePicker.accept = 'image/*';
+  filePicker.multiple = true;
+  filePicker.style.display = 'none';
+  foot.appendChild(filePicker);
+
+  const imageBtn = mkBtn('🖼 Image', 'Attach an image — or paste or drop one', null);
+  foot.appendChild(imageBtn);
+  const cmdBtn = mkBtn('/ Commands', "Claude's slash commands", null);
+  foot.appendChild(cmdBtn);
+  const undoBtn = mkBtn('↶', 'Undo last input — Ctrl+Z', null);
+  foot.appendChild(undoBtn);
+  const escBtn = mkBtn('Esc', 'Send Escape — interrupts Claude', null);
+  foot.appendChild(escBtn);
+  const stopBtn = mkBtn('Ctrl+C', 'Send Ctrl+C', null);
+  foot.appendChild(stopBtn);
+  // Escape hatch. Detection fails safe, but if it ever masks something it should not,
+  // this puts the real terminal back without turning hybrid mode off everywhere.
+  const rawBtn = mkBtn('Raw', "Show and use Claude's own input in the pane", null);
+  foot.appendChild(rawBtn);
+
+  const hint = document.createElement('span');
+  hint.className = 'hybrid-hint';
+  hint.textContent = 'Claude is asking in the pane — answer up there';
+  foot.appendChild(hint);
+
+  const status = document.createElement('span');
+  status.className = 'hybrid-status';
+  foot.appendChild(status);
+  const setStatus = (t) => { status.textContent = t || ''; };
+
+  const keyTo = (bytes) => {
+    const pane = getActivePane(tab);
+    if (pane) window.term.input(pane.ptyId, bytes);
+  };
+
+  // ---------- attachments ----------
+  // A PTY carries text, not image bytes. So an attachment is written to disk and the
+  // message carries its path, which is what Claude needs in order to read it anyway.
+  const attachments = [];
+
+  function renderAttachments() {
+    attachRow.classList.toggle('show', attachments.length > 0);
+    attachRow.innerHTML = '';
+    attachments.forEach((att, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'chip' + (att.thumb ? '' : ' file');
+      if (att.thumb) {
+        const img = document.createElement('img');
+        img.className = 'chip-thumb';
+        img.src = att.thumb;
+        chip.appendChild(img);
+      } else {
+        const glyph = document.createElement('span');
+        glyph.textContent = '📄';
+        chip.appendChild(glyph);
+      }
+      const label = document.createElement('span');
+      label.className = 'chip-label mono';
+      label.textContent = att.label;
+      chip.appendChild(label);
+      const x = document.createElement('span');
+      x.className = 'chip-x';
+      x.textContent = '✕';
+      x.addEventListener('click', () => { attachments.splice(i, 1); renderAttachments(); });
+      chip.appendChild(x);
+      attachRow.appendChild(chip);
+    });
+  }
+
+  async function addImageFile(file) {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const base64 = btoa(bin);
+    const mediaType = file.type || 'image/png';
+    const ext = (mediaType.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const saved = await window.chatApi.saveAttachment({ base64, ext });
+    if (!saved || saved.error || !saved.path) {
+      setStatus('could not save attachment');
+      return;
+    }
+    attachments.push({
+      path: saved.path,
+      label: file.name || saved.name,
+      thumb: 'data:' + mediaType + ';base64,' + base64
+    });
+    renderAttachments();
+  }
+
+  function addPathAttachment(p, label) {
+    attachments.push({ path: p, label: label || p });
+    renderAttachments();
+  }
+
+  input.addEventListener('paste', (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) { e.preventDefault(); addImageFile(file); }
+      }
+    }
+  });
+  imageBtn.addEventListener('click', () => filePicker.click());
+  filePicker.addEventListener('change', async () => {
+    for (const file of filePicker.files) await addImageFile(file);
+    filePicker.value = '';
+  });
+  wrap.addEventListener('dragover', (e) => { e.preventDefault(); });
+  wrap.addEventListener('drop', async (e) => {
+    if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    for (const file of e.dataTransfer.files) {
+      if (file.type.startsWith('image/')) await addImageFile(file);
+      else if (file.path) addPathAttachment(file.path, file.name);
+    }
+  });
+
+  // ---------- undo ----------
+  // Chunk-level, matching the chat composer and the terminal's own Ctrl+Z: a burst of
+  // typing collapses into one chunk, so one undo removes a word or a paste.
+  const undoStack = [];
+  let undoPending = '';
+  let undoTimer = null;
+  let lastValue = '';
+
+  function flushUndo() {
+    if (undoPending) { undoStack.push(undoPending); undoPending = ''; }
+    if (undoStack.length > 200) undoStack.shift();
+  }
+  function trackUndo(prev) {
+    if (undoPending === '') undoPending = prev;
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(flushUndo, 400);
+  }
+  function doUndo() {
+    flushUndo();
+    const prev = undoStack.pop();
+    if (prev == null) return;
+    input.value = prev;
+    lastValue = prev;
+    autoGrow();
+    syncPalette();
+  }
+
+  function autoGrow() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(160, Math.max(20, input.scrollHeight)) + 'px';
+  }
+
+  // ---------- command palette ----------
+  let paletteItems = [];
+  let paletteIndex = 0;
+  let loading = false;
+
+  function paletteRows(filter) {
+    const cmds = tab.hybridCommands || [];
+    const rows = cmds.map((c) => ({ cmd: c.cmd, desc: c.desc }));
+    if (!rows.length) {
+      rows.push({
+        cmd: loading ? '(reading…)' : '(no commands loaded)',
+        desc: loading ? "Paging through Claude's own menu" : 'Click ↻ to read the list from Claude',
+        noInsert: true
+      });
+    }
+    const f = (filter || '').toLowerCase();
+    if (!f || f === '/') return rows;
+    // Prefix matches first, then anything that merely contains the text: /rev should still
+    // find /security-review without making it outrank /review itself.
+    const term = f.replace(/^\//, '');
+    const starts = rows.filter((r) => r.cmd.toLowerCase().startsWith(f));
+    const contains = rows.filter((r) => !starts.includes(r) && r.cmd.toLowerCase().includes(term));
+    return starts.concat(contains);
+  }
+
+  function showPalette(filter) {
+    paletteItems = paletteRows(filter);
+    if (!paletteItems.length) { hidePalette(); return; }
+    paletteIndex = 0;
+    palette.innerHTML = '';
+    const hdr = document.createElement('div');
+    hdr.className = 'palette-hdr hybrid';
+    const hdrText = document.createElement('span');
+    const total = (tab.hybridCommands || []).length;
+    hdrText.textContent = 'Claude commands' + (total ? ' · ' + total : '');
+    hdr.appendChild(hdrText);
+    const refresh = document.createElement('span');
+    refresh.className = 'palette-refresh';
+    refresh.textContent = '↻';
+    refresh.title = 'Re-read the list from Claude';
+    // mousedown, not click: the input must not lose focus first.
+    refresh.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      loadCommands(true);
+    });
+    hdr.appendChild(refresh);
+    palette.appendChild(hdr);
+    paletteItems.forEach((r, i) => {
+      const item = document.createElement('div');
+      item.className = 'palette-item' + (i === 0 ? ' sel' : '');
+      const cmd = document.createElement('span');
+      cmd.className = 'palette-cmd';
+      cmd.textContent = r.cmd;
+      item.appendChild(cmd);
+      const desc = document.createElement('span');
+      desc.className = 'palette-desc';
+      desc.textContent = r.desc;
+      item.appendChild(desc);
+      item.addEventListener('mouseenter', () => setPaletteIndex(i));
+      item.addEventListener('mousedown', (e) => { e.preventDefault(); runPalette(i); });
+      palette.appendChild(item);
+    });
+    palette.classList.add('show');
+  }
+
+  function hidePalette() { palette.classList.remove('show'); paletteItems = []; }
+
+  function setPaletteIndex(i) {
+    paletteIndex = i;
+    Array.from(palette.querySelectorAll('.palette-item'))
+      .forEach((node, n) => node.classList.toggle('sel', n === i));
+  }
+
+  function syncPalette() {
+    const v = input.value;
+    if (v.startsWith('/') && !v.includes('\n')) showPalette(v.trim());
+    else hidePalette();
+  }
+
+  function runPalette(i) {
+    const r = paletteItems[i];
+    if (!r || r.noInsert) return;
+    hidePalette();
+    input.value = r.cmd + ' ';
+    lastValue = input.value;
+    autoGrow();
+    input.focus();
+  }
+
+  async function loadCommands(force) {
+    const pane = getActivePane(tab);
+    if (!pane || loading) return;
+    if (tab.hybridCommands && !force) return;
+    loading = true;
+    setStatus('reading commands…');
+    if (palette.classList.contains('show')) showPalette(input.value.trim());
+    let list = null;
+    try { list = await hybridLoadCommands(pane); }
+    catch (_) { list = null; }
+    loading = false;
+    if (list && list.length) {
+      tab.hybridCommands = list;
+      setStatus(list.length + ' commands');
+    } else {
+      setStatus('could not read commands — try ↻');
+    }
+    if (palette.classList.contains('show')) showPalette(input.value.trim());
+  }
+
+  // ---------- submit ----------
+  function submit() {
+    const pane = getActivePane(tab);
+    if (!pane) return;
+    // The band is down, so the pane is showing something that owns the keyboard itself —
+    // a permission prompt, a menu, /usage. Text sent now would land in that, not in a
+    // message, so it stays here until the pane is back to its composer.
+    if (!pane.masked && !pane.hybridRaw) {
+      setStatus('answer in the pane first — Claude is showing something there');
+      return;
+    }
+    // Attachment paths go in ahead of the message, one per line.
+    const paths = attachments.map((a) => a.path);
+    const body = (paths.length ? paths.join('\n') + '\n' : '') + input.value;
+    if (!body.trim()) return;
+    input.value = '';
+    lastValue = '';
+    undoStack.length = 0;
+    undoPending = '';
+    attachments.length = 0;
+    renderAttachments();
+    autoGrow();
+    hidePalette();
+    sendToClaudePty(pane.ptyId, body);
+  }
+
+  // ---------- wiring ----------
+  sendBtn.addEventListener('click', () => { submit(); input.focus(); });
+  escBtn.addEventListener('click', () => { keyTo('\x1b'); input.focus(); });
+  stopBtn.addEventListener('click', () => { keyTo('\x03'); input.focus(); });
+  undoBtn.addEventListener('click', () => { doUndo(); input.focus(); });
+  rawBtn.addEventListener('click', () => {
+    const pane = getActivePane(tab);
+    if (!pane) return;
+    pane.hybridRaw = !pane.hybridRaw;
+    rawBtn.classList.toggle('send', pane.hybridRaw);
+    updatePaneMask(pane);
+    refreshHybridBar(tab);
+    if (pane.hybridRaw) pane.term.focus();
+    else input.focus();
+  });
+  cmdBtn.addEventListener('click', () => {
+    if (palette.classList.contains('show')) { hidePalette(); input.focus(); return; }
+    if (!input.value.startsWith('/')) {
+      input.value = '/';
+      lastValue = '/';
+      autoGrow();
+    }
+    input.focus();
+    showPalette(input.value.trim());
+    loadCommands(false);
+  });
+
+  input.addEventListener('input', () => {
+    trackUndo(lastValue);
+    lastValue = input.value;
+    autoGrow();
+    syncPalette();
+  });
+  input.addEventListener('focus', () => bar.classList.add('focused'));
+  input.addEventListener('blur', () => bar.classList.remove('focused'));
+
+  input.addEventListener('keydown', (e) => {
+    if (palette.classList.contains('show')) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIndex((paletteIndex + 1) % paletteItems.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteIndex((paletteIndex - 1 + paletteItems.length) % paletteItems.length); return; }
+      if (e.key === 'Tab') { e.preventDefault(); runPalette(paletteIndex); return; }
+      if (e.key === 'Escape') { e.preventDefault(); hidePalette(); return; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runPalette(paletteIndex); return; }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); submit(); return; }
+    // Escape belongs to Claude: it is how a running turn is interrupted.
+    if (e.key === 'Escape') { e.preventDefault(); keyTo('\x1b'); return; }
+    // Everything else is ordinary text editing, which the textarea already does. Keep it
+    // away from the window-level shortcuts so Ctrl+T and friends don't fire while typing.
+    e.stopPropagation();
+  });
+
+  tab.container.appendChild(wrap);
+  tab.hybridBar = {
+    el: wrap, input, submit, undo: doUndo, loadCommands,
+    focus: () => input.focus()
+  };
+  renderAttachments();
+  autoGrow();
+  // The pane just lost height to the bar; the PTY has to be told.
+  requestAnimationFrame(() => { for (const [, pane] of tab.panes) fitPane(pane); });
+  return tab.hybridBar;
+}
+function removeHybridBar(tab) {
+  if (!tab.hybridBar) return;
+  tab.hybridBar.el.remove();
+  tab.hybridBar = null;
+  for (const [, pane] of tab.panes) {
+    if (pane.mask) { pane.mask.classList.remove('on'); pane.mask.style.height = '0px'; }
+    pane.masked = false;
+    pane.everMasked = false;
+    pane.hybridRaw = false;
+    pane.hybridScraping = false;
+    setPaneStdin(pane, true);
+  }
+  requestAnimationFrame(() => { for (const [, pane] of tab.panes) fitPane(pane); });
+}
+
+// Amber border + hint whenever the pane is showing something we deliberately did not
+// mask, so it's clear the keyboard is back in the terminal for that moment.
+function refreshHybridBar(tab) {
+  if (!tab.hybridBar) return;
+  const pane = getActivePane(tab);
+  const dialog = !!(pane && pane.claudeRunning && pane.everMasked && !pane.masked && !pane.hybridRaw);
+  tab.hybridBar.el.classList.toggle('dialog', dialog);
+}
+
+function updateHybrid() {
+  for (const [, tab] of tabs) {
+    if (tab.type === 'chat' || tab.type === 'editor') continue;
+    let anyClaude = false;
+    for (const [, pane] of tab.panes) if (pane.claudeRunning) anyClaude = true;
+    if (hybridEnabled && anyClaude) ensureHybridBar(tab);
+    else removeHybridBar(tab);
+    for (const [, pane] of tab.panes) updatePaneMask(pane);
+    refreshHybridBar(tab);
+    maybeLoadHybridCommands(tab);
+  }
+}
+
+// Reading the list drives the pane's keyboard, so it waits for a moment where that is
+// safe: the band is up, Claude is not mid-turn, and its composer is empty.
+function maybeLoadHybridCommands(tab) {
+  if (!tab.hybridBar || tab.hybridCommands || tab.hybridAutoTried) return;
+  const pane = getActivePane(tab);
+  if (!pane || !pane.masked || pane.hybridScraping) return;
+  if (Date.now() < (pane.claudeBusyUntil || 0)) return;
+  if (promptRest(pane.term) !== '') return;
+  tab.hybridAutoTried = true;
+  tab.hybridBar.loadCommands(false);
+}
+
+if (hybridToggleEl) {
+  hybridToggleEl.checked = hybridEnabled;
+  hybridToggleEl.addEventListener('change', () => {
+    hybridEnabled = !!hybridToggleEl.checked;
+    localStorage.setItem(HYBRID_KEY, hybridEnabled ? '1' : '0');
+    updateHybrid();
+    const tab = tabs.get(activeId);
+    if (!tab) return;
+    if (tab.hybridBar) tab.hybridBar.input.focus();
+    else { const pane = getActivePane(tab); if (pane) pane.term.focus(); }
+  });
+}
+
 // ---------- active tab/pane ----------
 function setActivePane(tab, paneId) {
   // A chat tab's only pane is the terminal drawer. Focus it, but leave activePaneId
@@ -269,6 +957,9 @@ function setActivePane(tab, paneId) {
   if (!pane) return;
   pane.el.classList.add('pane-active');
   pane.term.focus();
+  // Hybrid mode switched the terminal's keyboard off, so focus belongs in our own
+  // composer instead.
+  if (pane.masked && tab.hybridBar) tab.hybridBar.input.focus();
   if (tab.tabId === activeId) {
     if (!tab.customTitle) setTabTitle(tab, basename(pane.cwd || '') || 'PowerShell');
     updateStatus();
@@ -289,6 +980,7 @@ function setActive(tabId) {
     for (const [, pane] of tab.panes) pane.suppressBusyUntil = suppressUntil;
   }
   for (const [tid, view] of chatTabs) view.setActive(tid === tabId);
+  updateHybrid();
   const tab = tabs.get(tabId);
   const pane = getActivePane(tab);
   if (pane) {
@@ -483,6 +1175,9 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   const pane = {
     paneId, ptyId, term, fit, serialize, el: paneEl, ro: null,
     cwd, claudeRunning: false, claudeBusyUntil: 0, claudeSessionId: null,
+    // Hybrid input: the band over Claude's own composer box, whether it is currently
+    // drawn, and whether xterm's keyboard is switched off behind it.
+    mask: null, masked: false, everMasked: false, stdinOff: false, hybridRaw: false,
     copilotRunning: false, copilotBusyUntil: 0, copilotSessionId: null,
     copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
@@ -548,8 +1243,10 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     term.focus();
   }, true);
 
-  // File path links: left-click → external editor
-  const FILE_LINK_RE = /(?:[A-Za-z]:[\\/]|\.\.?[\\/])[\w\\/.\-]+(\.[\w]{1,6})\b/g;
+  // File path links: left-click → external editor. The leading lookbehind keeps the
+  // drive-letter alternative from matching a URL scheme's tail (the "s:/" in
+  // "https://…"), which the URL provider below owns instead.
+  const FILE_LINK_RE = /(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\.\.?[\\/])[\w\\/.\-]+(\.[\w]{1,6})\b/g;
   let hoveredFilePath = null;
   term.registerLinkProvider({
     provideLinks(lineNum, callback) {
@@ -567,6 +1264,38 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
           activate(_, linkText) { window.fileApi.openExternal(linkText); },
           hover(_, linkText) { hoveredFilePath = linkText; },
           leave() { hoveredFilePath = null; }
+        });
+      }
+      callback(links.length ? links : undefined);
+    }
+  });
+
+  // URL links: left-click → default browser, opening the WHOLE url (scheme, host,
+  // path, query and fragment) rather than just the origin.
+  const URL_LINK_RE = /(?:https?:\/\/|www\.)[^\s]+/gi;
+  const URL_TRIM = '.,;:!?\'")]}>';
+  term.registerLinkProvider({
+    provideLinks(lineNum, callback) {
+      const line = term.buffer.active.getLine(lineNum - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      URL_LINK_RE.lastIndex = 0;
+      const links = [];
+      let m;
+      while ((m = URL_LINK_RE.exec(text)) !== null) {
+        // Drop trailing punctuation that is almost always sentence, not URL.
+        let url = m[0];
+        let end = url.length;
+        while (end > 0 && URL_TRIM.includes(url[end - 1])) end--;
+        url = url.slice(0, end);
+        if (!url) continue;
+        links.push({
+          range: { start: { x: m.index + 1, y: lineNum }, end: { x: m.index + url.length, y: lineNum } },
+          text: url,
+          activate(_, linkText) {
+            const href = /^www\./i.test(linkText) ? 'https://' + linkText : linkText;
+            window.fileApi.openExternal(href);
+          }
         });
       }
       callback(links.length ? links : undefined);
@@ -621,6 +1350,17 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     else closeTab(tab.tabId);
   });
   paneEl.appendChild(closeBtn);
+
+  // Hybrid input's band. Always in the DOM, sized and shown only while hybrid mode is
+  // on and the pane is running claude.
+  const mask = document.createElement('div');
+  mask.className = 'pane-mask';
+  paneEl.appendChild(mask);
+  pane.mask = mask;
+
+  // The band has to follow whatever the TUI just drew, so it is driven off renders
+  // rather than a timer.
+  term.onRender(() => updatePaneMask(pane));
 
   // OSC 6633: command line capture (claude / copilot detection)
   term.parser.registerOscHandler(6633, (data) => {
@@ -1583,7 +2323,7 @@ resizeEl.addEventListener('dblclick', () => { sidebarEl.style.width = '240px'; l
 let agentRenderQueued = false;
 function scheduleAgentRender() {
   if (agentRenderQueued) return; agentRenderQueued = true;
-  requestAnimationFrame(() => { agentRenderQueued = false; renderAgentPanel(); });
+  requestAnimationFrame(() => { agentRenderQueued = false; renderAgentPanel(); updateHybrid(); });
 }
 function formatTokens(n) {
   if (n == null) return '—';
@@ -2334,6 +3074,11 @@ window.shortcuts?.onCtrlZ?.(() => {
       return;
     }
     view.undo();
+    return;
+  }
+  // Hybrid mode: the composer under the pane is a textarea with its own chunk stack.
+  if (tab.hybridBar && document.activeElement === tab.hybridBar.input) {
+    tab.hybridBar.undo();
     return;
   }
   const pane = getActivePane(tab);

@@ -488,6 +488,81 @@
     .pane-container:hover .pane-close-btn { display: flex; }
     .pane-close-btn:hover { background: var(--close-hover); border-color: var(--close-hover); color: #fff; }
 
+    /* ---------- Hybrid Claude input ---------- */
+    /* An opaque band over Claude's own composer box. The TUI draws that box directly
+       after the transcript rather than pinned to the bottom of the screen, so the band
+       is positioned from JS by row, not anchored to an edge. The statusline below the
+       box is deliberately left visible. */
+    .pane-mask {
+      position: absolute;
+      left: 1px; right: 1px;
+      top: 0; height: 0;
+      display: none;
+      background: var(--bg);
+      z-index: 5;
+      pointer-events: none;
+    }
+    .pane-mask.on { display: block; }
+
+    /* Own composer for a Claude-in-terminal pane. Lives in .term-container below the
+       pane grid, so the pane shrinks and the PTY is resized to match. The wrapper is
+       the positioning context for the command palette, which opens above the bar. */
+    .hybrid-wrap { position: relative; flex-shrink: 0; margin-top: 8px; }
+    .hybrid-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 10px;
+      background: var(--composer);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .hybrid-bar.focused { border-color: rgba(96, 205, 255, 0.28); }
+    .hybrid-row { display: flex; align-items: flex-end; gap: 8px; }
+    .hybrid-foot { display: flex; align-items: center; gap: 6px; }
+    .hybrid-status { font-size: 11px; color: var(--fg-faint); margin-left: auto; white-space: nowrap; }
+    .palette-hdr.hybrid { display: flex; align-items: center; justify-content: space-between; }
+    .palette-refresh { cursor: default; color: var(--fg-muted); padding: 0 6px; font-size: 13px; }
+    .palette-refresh:hover { color: var(--fg-strong); }
+    .hybrid-bar.dialog { border-color: rgba(215, 186, 125, 0.5); }
+    .hybrid-input {
+      flex: 1;
+      min-height: 20px;
+      max-height: 160px;
+      resize: none;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--fg);
+      font-family: var(--ui);
+      font-size: 13px;
+      line-height: 1.45;
+      padding: 2px 0;
+    }
+    .hybrid-input::placeholder { color: var(--fg-faint); }
+    .hybrid-hint {
+      font-size: 11px;
+      color: var(--amber);
+      white-space: nowrap;
+      display: none;
+    }
+    .hybrid-bar.dialog .hybrid-hint { display: block; }
+    .hybrid-btn {
+      flex-shrink: 0;
+      height: 24px;
+      padding: 0 9px;
+      background: var(--fill);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--fg-dim);
+      font-family: var(--ui);
+      font-size: 11.5px;
+      cursor: default;
+    }
+    .hybrid-btn:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .hybrid-btn.send { background: rgba(96, 205, 255, 0.16); border-color: rgba(96, 205, 255, 0.3); color: var(--accent); }
+    .hybrid-btn.send:hover { background: rgba(96, 205, 255, 0.24); }
+
     /* Editor tab */
     .editor-pane { position: absolute; inset: 0; border-radius: 8px; overflow: hidden; }
     .editor-error { padding: 20px; color: var(--red); font-size: 13px; }
@@ -654,6 +729,8 @@
       margin: 8px 0;
     }
     .msg-assistant pre code { background: none; padding: 0; font-size: inherit; }
+    .chat-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; word-break: break-all; }
+    .chat-link:hover { color: var(--accent-hi); }
 
     .tool-group { flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
     .tool-row {
@@ -1200,6 +1277,10 @@
     .status-limits.warn { color: var(--amber); }
     .status-limits.danger { color: var(--red); }
     .composer-hint { font-size: 11.5px; color: rgba(255, 255, 255, 0.38); }
+    .work-timer { font-family: var(--mono); font-size: 11.5px; flex-shrink: 0; }
+    .work-timer:empty { display: none; }
+    .work-timer.active { color: var(--amber); animation: agentpulse 1.6s infinite; }
+    .work-timer.done { color: var(--green); }
     .send-btn {
       display: flex;
       align-items: center;
@@ -1515,6 +1596,9 @@
     .status-agent { display: flex; align-items: center; gap: 6px; }
     .status-agent .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
     .status-agent.working .dot { background: var(--amber); animation: agentpulse 0.9s infinite; }
+    .status-toggle { display: flex; align-items: center; gap: 5px; cursor: default; }
+    .status-toggle input { margin: 0; accent-color: var(--accent); width: 12px; height: 12px; }
+    .status-toggle:hover { color: var(--fg-strong); }
 
     /* ---------- Context menu ---------- */
     .ctx-menu {
@@ -1681,6 +1765,12 @@
       <span class="status-shell" id="status-shell">pwsh</span>
       <span class="status-sep" id="status-limits-sep" style="display:none">&middot;</span>
       <span class="status-limits" id="status-limits" title="Plan usage"></span>
+      <span class="status-sep">&middot;</span>
+      <label class="status-toggle" id="hybrid-toggle-wrap"
+             title="Hide Claude's own input box in terminal panes and drive it from a composer here instead">
+        <input type="checkbox" id="hybrid-toggle">
+        <span>Hybrid input</span>
+      </label>
     </div>
     <div class="statusbar-right" id="status-agents"></div>
   </div>

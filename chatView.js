@@ -56,6 +56,25 @@
     Bash: 'bash', PowerShell: 'bash', Task: 'bash'
   };
 
+  // ---------- streaming pace ----------
+  // 'smooth' paces arrived text out over frames so it flows like the terminal, at the
+  // cost of deliberately staying about half a lump behind. 'instant' writes each lump
+  // the moment it lands, the way the terminal itself does. Shared by every pane, so a
+  // toggle in one applies to all of them.
+  const PACE_KEY = 'chatStreamPace';
+  const paceListeners = new Set();
+
+  function storedPace() {
+    return localStorage.getItem(PACE_KEY) === 'instant' ? 'instant' : 'smooth';
+  }
+
+  function broadcastPace(pace) {
+    localStorage.setItem(PACE_KEY, pace);
+    for (const fn of paceListeners) {
+      try { fn(pace); } catch (_) {}
+    }
+  }
+
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -76,7 +95,53 @@
     return i >= 0 ? s.slice(i + 1) || s : s;
   }
 
-  // Just enough markdown for agent replies: fenced blocks, inline code, bold.
+  // Trim trailing sentence punctuation a bare URL almost never owns.
+  const URL_TRIM = '.,;:!?\'")]}>';
+  function trimUrl(u) {
+    let end = u.length;
+    while (end > 0 && URL_TRIM.includes(u[end - 1])) end--;
+    return u.slice(0, end) || u;
+  }
+
+  // Escape text and apply the one non-link inline mark (bold). `**` survives esc, so
+  // this runs safely on already-escaped text.
+  function fmtText(s) {
+    return esc(s).replace(/\*\*([^*\n]+)\*\*/g, (_m, c) => `<strong>${c}</strong>`);
+  }
+
+  function anchorHtml(url, label) {
+    const href = /^www\./i.test(url) ? 'https://' + url : url;
+    return `<a class="chat-link" href="${esc(href)}" data-href="${esc(href)}">` +
+           `${esc(label != null ? label : url)}</a>`;
+  }
+
+  // Inline markdown for prose: inline code, [label](url) links, bare URLs, bold.
+  // Tokenised on the RAW text so escaping and each mark can be applied per token and
+  // nothing a URL contains is ever treated as markup.
+  const INLINE_RE = /(`[^`\n]+`)|(\[[^\]\n]+\]\((?:https?:\/\/|www\.)[^\s)]+\))|((?:https?:\/\/|www\.)[^\s]+)/g;
+  function inlineHtml(raw) {
+    let out = '';
+    let last = 0;
+    let m;
+    INLINE_RE.lastIndex = 0;
+    while ((m = INLINE_RE.exec(raw)) !== null) {
+      out += fmtText(raw.slice(last, m.index));
+      if (m[1]) {
+        out += `<code>${esc(m[1].slice(1, -1))}</code>`;
+      } else if (m[2]) {
+        const mm = /^\[([^\]\n]+)\]\(((?:https?:\/\/|www\.)[^\s)]+)\)$/.exec(m[2]);
+        out += anchorHtml(mm[2], mm[1]);
+      } else {
+        const url = trimUrl(m[3]);
+        out += anchorHtml(url) + fmtText(m[3].slice(url.length));
+      }
+      last = m.index + m[0].length;
+    }
+    out += fmtText(raw.slice(last));
+    return out;
+  }
+
+  // Just enough markdown for agent replies: fenced blocks, inline code, bold, links.
   // Everything is escaped first, so no markup can come out of model output.
   // One ```-delimited segment: odd index is fenced code, even is prose.
   function segmentEl(part, fenced) {
@@ -88,9 +153,7 @@
       return pre;
     }
     const span = document.createElement('span');
-    span.innerHTML = esc(part)
-      .replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`)
-      .replace(/\*\*([^*\n]+)\*\*/g, (_m, c) => `<strong>${c}</strong>`);
+    span.innerHTML = inlineHtml(part);
     return span;
   }
 
@@ -161,6 +224,8 @@
       permissionMode: opts.permissionMode || 'default',
       sessionMcp: null,
       working: false,
+      // Wall-clock start of the current turn, for the "how long Claude worked" timer.
+      turnStartedAt: 0,
       exited: false,
       interrupting: false,
       contextTokens: null,
@@ -235,6 +300,16 @@
     const emptyHint = el('div', 'chat-empty', 'Ask Claude anything about ' + state.name + '.');
     stream.appendChild(emptyHint);
     card.appendChild(stream);
+
+    // Links in the transcript open in the default browser; a raw <a href> would try to
+    // navigate the whole renderer instead.
+    stream.addEventListener('click', (e) => {
+      const a = e.target.closest && e.target.closest('a.chat-link');
+      if (!a) return;
+      e.preventDefault();
+      const href = a.dataset.href || a.getAttribute('href');
+      if (href) window.fileApi.openExternal(href);
+    });
 
     // MCP panel lives inside the card so it covers the transcript, not the composer.
     const mcp = buildMcpPanel();
@@ -400,6 +475,13 @@
     termBtn.title = 'Shell in this folder — Ctrl+`';
     foot.appendChild(termBtn);
 
+    const paceBtn = el('button', 'cf-btn');
+    paceBtn.type = 'button';
+    const paceGlyph = el('span', null, '⚡');
+    paceBtn.appendChild(paceGlyph);
+    paceBtn.appendChild(el('span', null, 'Instant'));
+    foot.appendChild(paceBtn);
+
     const undoBtn = el('button', 'cf-btn icon', '↶');
     undoBtn.type = 'button';
     undoBtn.title = 'Undo last input — Ctrl+Z';
@@ -412,6 +494,11 @@
 
     const hint = el('span', 'composer-hint', 'Shift+Enter for a new line');
     foot.appendChild(hint);
+
+    // Live elapsed time for the current turn, the way the CLI shows how long it has
+    // been working. Idle until the first turn runs, then keeps the last duration.
+    const workEl = el('span', 'work-timer');
+    foot.appendChild(workEl);
 
     const sendBtn = el('button', 'send-btn');
     sendBtn.type = 'button';
@@ -918,9 +1005,42 @@
       };
     }
 
+    // ---------- turn timer ----------
+    let workTimer = null;
+    function fmtElapsed(ms) {
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return s + 's';
+      const m = Math.floor(s / 60);
+      return m + 'm ' + (s % 60) + 's';
+    }
+    function tickWork() {
+      if (!state.turnStartedAt) return;
+      workEl.textContent = '✻ Working ' + fmtElapsed(Date.now() - state.turnStartedAt);
+    }
+    function startWorkTimer() {
+      state.turnStartedAt = Date.now();
+      workEl.className = 'work-timer active';
+      tickWork();
+      workTimer = setInterval(tickWork, 250);
+    }
+    // done=true leaves the final duration on screen; false just clears (e.g. exit).
+    function stopWorkTimer(done) {
+      if (workTimer) { clearInterval(workTimer); workTimer = null; }
+      if (done && state.turnStartedAt) {
+        workEl.className = 'work-timer done';
+        workEl.textContent = '✓ ' + fmtElapsed(Date.now() - state.turnStartedAt);
+      } else if (!done) {
+        workEl.className = 'work-timer';
+        workEl.textContent = '';
+      }
+      state.turnStartedAt = 0;
+    }
+
     function setWorking(v) {
       if (state.working === v) return;
       state.working = v;
+      if (v) startWorkTimer();
+      else stopWorkTimer(true);
       refreshStats();
     }
 
@@ -1371,6 +1491,28 @@
     let revealMs = 220;
     let lastArrivalAt = 0;
     let tailRush = false;
+    let pace = storedPace();
+
+    // Switching to instant mid-turn has to flush whatever is still held back, or the
+    // tail of the current answer would sit there unrevealed until the next lump.
+    function applyPace(next) {
+      pace = next === 'instant' ? 'instant' : 'smooth';
+      if (pace === 'instant' && revealing.size) {
+        for (const node of Array.from(revealing)) {
+          const text = node._raw || '';
+          node._shown = text.length;
+          writeBlock(node, text);
+        }
+        revealing.clear();
+        pin();
+      }
+      paceBtn.classList.toggle('active', pace === 'instant');
+      paceBtn.title = pace === 'instant'
+        ? 'Instant: text lands as it arrives (fastest)'
+        : 'Smooth: text is paced out over frames (~half a lump behind)';
+    }
+    paceListeners.add(applyPace);
+    function togglePace() { broadcastPace(pace === 'instant' ? 'smooth' : 'instant'); }
 
     function noteArrival() {
       const now = performance.now();
@@ -1398,6 +1540,18 @@
     function queueBlockText(node, text) {
       if (node._shown == null) node._shown = 0;
       node._raw = text;
+      // Instant writes on the arrival tick rather than the next frame: the lumps come
+      // a couple of times a second, so one write per lump is cheaper than the paced
+      // path and has no frame of latency in front of it.
+      if (pace === 'instant') {
+        revealing.delete(node);
+        if (node._shown < text.length) {
+          node._shown = text.length;
+          writeBlock(node, text);
+          pin();
+        }
+        return;
+      }
       if (node._shown < text.length) { revealing.add(node); requestFrame(); }
     }
 
@@ -1433,6 +1587,7 @@
     // smoothing would be undone exactly where it is most visible.
     function retargetBlock(node, text) {
       queueBlockText(node, text);
+      if (pace === 'instant') return;
       if (!revealing.has(node)) { node._shown = text.length; writeBlock(node, text); }
     }
 
@@ -1553,6 +1708,7 @@
 
     function handleExit(code) {
       state.working = false;
+      stopWorkTimer(false);
       state.interrupting = false;
       currentMessageId = null;
       for (const [permId] of permCards) {
@@ -1694,6 +1850,12 @@
         {
           cmd: '/mcp', desc: 'Manage MCP servers for this folder', key: '',
           run: () => setMcpOpen(true)
+        },
+        {
+          cmd: '/instant',
+          desc: pace === 'instant' ? 'Streaming: instant — switch to smooth' : 'Streaming: smooth — switch to instant',
+          key: '',
+          run: () => togglePace()
         }
       ];
       for (const c of appCommands) {
@@ -1938,6 +2100,7 @@
     }
 
     sendBtn.addEventListener('click', submit);
+    paceBtn.addEventListener('click', () => { togglePace(); input.focus(); });
     termBtn.addEventListener('click', () => {
       setDrawer(!drawerOpen);
       if (drawerOpen && optsFn('onTerminalFocus')) opts.onTerminalFocus();
@@ -1947,6 +2110,7 @@
     // ---------- controller ----------
     refreshStats();
     autoGrow();
+    applyPace(pace);
 
     return {
       el: root,
@@ -1994,6 +2158,7 @@
       get sessionId() { return state.sessionId; },
       get model() { return state.model; },
       dispose() {
+        paceListeners.delete(applyPace);
         for (const [permId] of permCards) {
           window.chatApi.respondPermission({ permId, decision: 'deny' });
         }

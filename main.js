@@ -890,7 +890,18 @@ ipcMain.handle('file:write', async (_, p, content) => {
   catch (err) { return { error: err.message }; }
 });
 ipcMain.handle('file:openExternal', async (_, p) => {
-  const err = await shell.openPath(p);
+  const s = String(p == null ? '' : p);
+  // URLs must go through shell.openExternal — shell.openPath only resolves
+  // filesystem paths and silently fails (or opens the wrong thing) on a URL.
+  if (/^(https?:\/\/|mailto:)/i.test(s)) {
+    try { await shell.openExternal(s); return { ok: true }; }
+    catch (err) { return { error: err.message }; }
+  }
+  if (/^www\./i.test(s)) {
+    try { await shell.openExternal('https://' + s); return { ok: true }; }
+    catch (err) { return { error: err.message }; }
+  }
+  const err = await shell.openPath(s);
   return err ? { error: err } : { ok: true };
 });
 
