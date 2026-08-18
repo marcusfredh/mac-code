@@ -100,9 +100,16 @@ contextBridge.exposeInMainWorld('sessionApi', {
 });
 
 contextBridge.exposeInMainWorld('shortcuts', {
+  onSplitH: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('app:split-h', listener);
+    return () => ipcRenderer.removeListener('app:split-h', listener);
+  },
   onCtrlZ: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('app:ctrl-z', listener);
     return () => ipcRenderer.removeListener('app:ctrl-z', listener);
-  }
+  },
+  // Report whether a real text field has focus, so main leaves native undo/redo alone.
+  setTextFieldFocus: (focused) => ipcRenderer.send('app:text-field-focus', !!focused)
 });

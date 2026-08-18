@@ -7,8 +7,9 @@ Modern PowerShell wrapper for Windows. Electron + xterm.js + node-pty. Frameless
 ### Terminal
 - Real PowerShell 7 (`pwsh.exe`) per tab via node-pty (falls back to `powershell.exe`)
 - xterm.js with Windows Terminal default color scheme
-- Split panes (horizontal / vertical), drag-to-resize, drag-to-reorder tabs
-- Chunk-level `Ctrl+Z` undo of terminal input
+- Split panes (horizontal / vertical), drag-to-resize, drag-to-reorder tabs — panes grow to fill the window
+- Running Claude in a terminal pane gets its own composer band below that pane, so both halves of a split can drive Claude at once
+- Native Notepad-style undo/redo in the composers (`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z`), chunk-level `Ctrl+Z` undo in the terminal
 
 ### Claude chat panes
 A chat tab drives the Claude CLI directly instead of running it inside a terminal:
@@ -114,7 +115,7 @@ command's head — so an allowlisted head cannot smuggle something through a pip
 | `Ctrl+B` / `Ctrl+Shift+B` | Toggle Explorer / Agents panel |
 | `F2` | Rename tab |
 | `Ctrl+\`` | Toggle a chat pane's terminal drawer |
-| `Ctrl+Z` | Undo last input chunk — routed to whichever input has focus |
+| `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` | Undo / redo — native in a composer (like Notepad), chunk-level undo in the terminal |
 | `Enter` / `Shift+Enter` | Send / newline (composer) |
 | `Ctrl+Enter` | Allow the newest pending permission request |
 | `Esc` | Interrupt the current turn (composer) |

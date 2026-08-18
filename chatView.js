@@ -210,6 +210,8 @@
     const helpers = opts.helpers || {};
     const fmtTokens = helpers.formatTokens || ((n) => String(n));
     const ctxWindowFor = helpers.contextWindowFor || (() => 200000);
+    // Natively-1M models (Opus/Sonnet 4.6+, Fable 5) don't need the `[1m]` beta toggle.
+    const nativeOneM = helpers.modelIsNativeOneM || (() => false);
     const modelLabel = helpers.shortModelLabel || ((m) => m || '');
 
     // ---------- state ----------
@@ -229,7 +231,7 @@
       exited: false,
       interrupting: false,
       contextTokens: null,
-      contextWindow: isOneM(opts.model) ? 1000000 : 200000,
+      contextWindow: ctxWindowFor(opts.model),
       cost: 0,
       // 5-hour and weekly plan usage, pushed in from the app's shared poll.
       limits: null,
@@ -1796,38 +1798,18 @@
     });
 
     // ---------- composer input, undo, palette ----------
-    // Chunk-level undo, matching the terminal's Ctrl+Z: a burst of typing collapses
-    // into one chunk, so one undo removes a word or a paste rather than a keystroke.
-    const undoStack = [];
-    let undoPending = '';
-    let undoTimer = null;
-
-    function flushUndo() {
-      if (undoPending) { undoStack.push(undoPending); undoPending = ''; }
-      if (undoStack.length > 200) undoStack.shift();
-    }
-    function trackUndo(prev) {
-      if (undoPending === '') undoPending = prev;
-      clearTimeout(undoTimer);
-      undoTimer = setTimeout(flushUndo, 400);
-    }
-    function undo() {
-      flushUndo();
-      const prev = undoStack.pop();
-      if (prev == null) return;
-      input.value = prev;
-      autoGrow();
-    }
+    // The composer is a textarea, so undo/redo are the browser's own — Notepad-style
+    // Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, chunked by word and pause, with real redo. Main
+    // leaves those keys alone while this field has focus (see app:text-field-focus), and
+    // the ↶ button drives that same native stack.
+    function undo() { input.focus(); document.execCommand('undo'); }
     undoBtn.addEventListener('click', () => { undo(); input.focus(); });
 
-    let lastValue = '';
     function autoGrow() {
       input.style.height = 'auto';
       input.style.height = Math.min(260, Math.max(44, input.scrollHeight)) + 'px';
     }
     input.addEventListener('input', () => {
-      trackUndo(lastValue);
-      lastValue = input.value;
       autoGrow();
       syncPalette();
     });
@@ -1928,13 +1910,11 @@
         // goes in as the name itself instead of sending half a sentence.
         if (row.text.includes('$ARGS')) {
           input.value = row.cmd + ' ';
-          lastValue = input.value;
           autoGrow();
           input.focus();
           return;
         }
         input.value = row.text;
-        lastValue = input.value;
         autoGrow();
         if (mode === 'send') submit();
         input.focus();
@@ -1942,13 +1922,11 @@
       }
       if (row.run) {
         input.value = '';
-        lastValue = '';
         autoGrow();
         row.run();
       } else {
         // A CLI slash command is just message text.
         input.value = row.cmd + ' ';
-        lastValue = input.value;
         autoGrow();
         input.focus();
       }
@@ -1957,7 +1935,6 @@
       if (palette.classList.contains('show')) { hidePalette(); return; }
       if (!input.value.startsWith('/')) {
         input.value = '/';
-        lastValue = '/';
         autoGrow();
       }
       input.focus();
@@ -2031,7 +2008,8 @@
       state.model = target;
       state.oneM = oneM;
       // Optimistic: the init event of the relaunched CLI confirms or corrects it.
-      state.contextWindow = oneM ? 1000000 : 200000;
+      // ctxWindowFor keeps the window at 1M for natively-1M models with the toggle off.
+      state.contextWindow = oneM ? 1000000 : ctxWindowFor(base);
       refreshStats();
       if (opts.onModelChange) opts.onModelChange(target);
     }
@@ -2060,10 +2038,13 @@
       }
 
       items.push({ separator: true });
+      const native1M = nativeOneM(current);
       items.push({
-        label: (state.oneM ? '✓ ' : '') + '1M context',
-        hint: supportsOneM(current) ? (state.oneM ? 'on' : 'off') : 'not on this model',
-        disabled: !supportsOneM(current),
+        label: ((state.oneM || native1M) ? '✓ ' : '') + '1M context',
+        hint: native1M ? 'always on'
+          : (supportsOneM(current) ? (state.oneM ? 'on' : 'off') : 'not on this model'),
+        // Native-1M models are already 1M — the `[1m]` beta toggle is a no-op there.
+        disabled: native1M || !supportsOneM(current),
         action: () => pickModel(current, !state.oneM)
       });
       openMenu(modelBtn, items);
@@ -2088,7 +2069,6 @@
       if (raw.toLowerCase() === '/commands' && !attachments.length
           && custom && typeof custom.manage === 'function' && expandCustom(raw) == null) {
         input.value = '';
-        lastValue = '';
         autoGrow();
         hidePalette();
         custom.manage();
@@ -2133,9 +2113,7 @@
         return;
       }
       state.sent++;
-      flushUndo();
       input.value = '';
-      lastValue = '';
       autoGrow();
       attachments.length = 0;
       renderAttachments();

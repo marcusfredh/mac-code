@@ -13,6 +13,13 @@ app.setAppUserModelId('Mac Code');
 let mainWindow = null;
 const ptys = new Map();
 
+// The renderer tells us when a real text field (a composer or rename box, NOT xterm's
+// own hidden textarea) has focus. There, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z belong to the
+// browser's native undo/redo — we must not steal them. Only the terminal, whose keys
+// are already down the PTY, needs our chunk-undo.
+let textFieldFocused = false;
+ipcMain.on('app:text-field-focus', (_e, focused) => { textFieldFocused = !!focused; });
+
 function resolveShell() {
   const candidates = [
     'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
@@ -102,11 +109,25 @@ function createWindow() {
 
   mainWindow.loadFile('renderer.html');
 
-  // Ctrl+Z is intercepted in main process so menu accelerators, browser textarea
-  // undo, and xterm's textarea handlers can't swallow it first. Renderer applies
-  // chunk-level undo on the active pane.
+  // Ctrl+Z is intercepted in main process so menu accelerators and xterm's textarea
+  // handlers can't swallow it first, then the renderer applies chunk-level undo on the
+  // active pane. But a focused text field owns its own Notepad-style undo/redo natively,
+  // so leave every editing key alone there — steal nothing while textFieldFocused.
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
+
+    // Block Chromium's built-in reload accelerators (Ctrl+R / Ctrl+Shift+R). A stray
+    // reload wipes every terminal pane and chat session. This runs even while a text
+    // field is focused. Ctrl+Shift+R stays repurposed for horizontal split — forwarded
+    // to the renderer over IPC, since preventDefault also swallows the DOM keydown.
+    if (input.control && !input.alt && !input.meta &&
+        (input.key || '').toLowerCase() === 'r') {
+      event.preventDefault();
+      if (input.shift) mainWindow.webContents.send('app:split-h');
+      return;
+    }
+
+    if (textFieldFocused) return;
     if (input.control && !input.shift && !input.alt && !input.meta &&
         (input.key || '').toLowerCase() === 'z') {
       event.preventDefault();
@@ -243,6 +264,23 @@ function encodeCwdForClaude(cwd) {
   return cwd.replace(/[:\\/\s]/g, '-');
 }
 
+// A model's native context window is 1M for every current family except Haiku —
+// Opus/Sonnet from 4.6 on, Fable/Mythos from 5 on — so those get a 1M window even
+// without the CLI's `[1m]` beta alias. Older versions and all Haiku stay at 200k.
+// A bare family alias (`opus`, no version) tracks the newest release of that family.
+function modelIsNativeOneM(model) {
+  const s = String(model || '').toLowerCase();
+  const v = s.match(/(opus|sonnet|haiku|fable|mythos)[-\s]?(\d+)(?:[-.\s](\d+))?/);
+  if (v) {
+    const family = v[1], maj = +v[2], min = v[3] ? +v[3] : 0;
+    if (family === 'haiku') return false;
+    if (family === 'fable' || family === 'mythos') return maj >= 5;
+    return maj > 4 || (maj === 4 && min >= 6); // opus & sonnet went 1M-native at 4.6
+  }
+  if (/\bhaiku\b/.test(s)) return false;
+  return /\b(opus|sonnet|fable|mythos)\b/.test(s);
+}
+
 ipcMain.handle('claude:usage', async (event, cwd) => {
   if (!cwd) return null;
   const encoded = encodeCwdForClaude(cwd);
@@ -315,7 +353,10 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
       oneMFromSettings = /\[1m\]|\(1M context\)/i.test(settingsModel);
     } catch (_) {}
 
-    const contextWindow = (oneMFromCommand || oneMFromBeta || oneMFromModel || oneMFromSettings || contextTokens > 200000)
+    // Opus 4.8 (and Opus/Sonnet 4.6+, Fable 5) are natively 1M — no `[1m]` alias needed.
+    const oneMFromNative = modelIsNativeOneM(model) || modelIsNativeOneM(selectedModelLabel);
+
+    const contextWindow = (oneMFromCommand || oneMFromBeta || oneMFromModel || oneMFromSettings || oneMFromNative || contextTokens > 200000)
       ? 1000000 : 200000;
 
     const displayModel = selectedModelLabel || model;

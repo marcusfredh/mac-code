@@ -675,11 +675,13 @@ async function hybridLoadCommands(pane) {
 
 // ---------- the composer itself ----------
 function hybridSend(tab) {
-  if (tab.hybridBar) tab.hybridBar.submit();
+  const pane = getActivePane(tab);
+  if (pane && pane.hybridBar) pane.hybridBar.submit();
 }
 
-function ensureHybridBar(tab) {
-  if (tab.hybridBar) return tab.hybridBar;
+function ensureHybridBar(tab, pane) {
+  if (!pane) return null;
+  if (pane.hybridBar) return pane.hybridBar;
 
   const wrap = document.createElement('div');
   wrap.className = 'hybrid-wrap';
@@ -755,8 +757,7 @@ function ensureHybridBar(tab) {
   const setStatus = (t) => { status.textContent = t || ''; };
 
   const keyTo = (bytes) => {
-    const pane = getActivePane(tab);
-    if (pane) window.term.input(pane.ptyId, bytes);
+    window.term.input(pane.ptyId, bytes);
   };
 
   // ---------- attachments ----------
@@ -845,31 +846,11 @@ function ensureHybridBar(tab) {
   });
 
   // ---------- undo ----------
-  // Chunk-level, matching the chat composer and the terminal's own Ctrl+Z: a burst of
-  // typing collapses into one chunk, so one undo removes a word or a paste.
-  const undoStack = [];
-  let undoPending = '';
-  let undoTimer = null;
-  let lastValue = '';
-
-  function flushUndo() {
-    if (undoPending) { undoStack.push(undoPending); undoPending = ''; }
-    if (undoStack.length > 200) undoStack.shift();
-  }
-  function trackUndo(prev) {
-    if (undoPending === '') undoPending = prev;
-    clearTimeout(undoTimer);
-    undoTimer = setTimeout(flushUndo, 400);
-  }
-  function doUndo() {
-    flushUndo();
-    const prev = undoStack.pop();
-    if (prev == null) return;
-    input.value = prev;
-    lastValue = prev;
-    autoGrow();
-    syncPalette();
-  }
+  // The composer is a textarea, so undo/redo are the browser's own — Notepad-style
+  // Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, chunked by word and pause, with real redo. Main
+  // leaves those keys alone while this field has focus (see app:text-field-focus), and
+  // the ↶ button drives that same native stack.
+  function doUndo() { input.focus(); document.execCommand('undo'); }
 
   function autoGrow() {
     input.style.height = 'auto';
@@ -972,26 +953,22 @@ function ensureHybridBar(tab) {
       // in as the name itself instead of sending half a sentence.
       if (r.text.includes('$ARGS')) {
         input.value = r.cmd + ' ';
-        lastValue = input.value;
         autoGrow();
         input.focus();
         return;
       }
       input.value = r.text;
-      lastValue = input.value;
       autoGrow();
       if (mode === 'send') submit();
       input.focus();
       return;
     }
     input.value = r.cmd + ' ';
-    lastValue = input.value;
     autoGrow();
     input.focus();
   }
 
   async function loadCommands(force) {
-    const pane = getActivePane(tab);
     if (!pane || loading) return;
     if (tab.hybridCommands && !force) return;
     loading = true;
@@ -1016,13 +993,11 @@ function ensureHybridBar(tab) {
     // than going to Claude as a message.
     if (input.value.trim().toLowerCase() === '/commands' && !findCustomCommand('commands')) {
       input.value = '';
-      lastValue = '';
       autoGrow();
       hidePalette();
       openCustomCommands();
       return;
     }
-    const pane = getActivePane(tab);
     if (!pane) return;
     // The band is down, so the pane is showing something that owns the keyboard itself —
     // a permission prompt, a menu, /usage. Text sent now would land in that, not in a
@@ -1039,9 +1014,6 @@ function ensureHybridBar(tab) {
     const body = (paths.length ? paths.join('\n') + '\n' : '') + (expanded == null ? typed : expanded);
     if (!body.trim()) return;
     input.value = '';
-    lastValue = '';
-    undoStack.length = 0;
-    undoPending = '';
     attachments.length = 0;
     renderAttachments();
     autoGrow();
@@ -1055,12 +1027,10 @@ function ensureHybridBar(tab) {
   stopBtn.addEventListener('click', () => { keyTo('\x03'); input.focus(); });
   undoBtn.addEventListener('click', () => { doUndo(); input.focus(); });
   rawBtn.addEventListener('click', () => {
-    const pane = getActivePane(tab);
-    if (!pane) return;
     pane.hybridRaw = !pane.hybridRaw;
     rawBtn.classList.toggle('send', pane.hybridRaw);
     updatePaneMask(pane);
-    refreshHybridBar(tab);
+    refreshHybridBar(pane);
     if (pane.hybridRaw) pane.term.focus();
     else input.focus();
   });
@@ -1068,7 +1038,6 @@ function ensureHybridBar(tab) {
     if (palette.classList.contains('show')) { hidePalette(); input.focus(); return; }
     if (!input.value.startsWith('/')) {
       input.value = '/';
-      lastValue = '/';
       autoGrow();
     }
     input.focus();
@@ -1077,8 +1046,6 @@ function ensureHybridBar(tab) {
   });
 
   input.addEventListener('input', () => {
-    trackUndo(lastValue);
-    lastValue = input.value;
     autoGrow();
     syncPalette();
   });
@@ -1101,64 +1068,68 @@ function ensureHybridBar(tab) {
     e.stopPropagation();
   });
 
-  tab.container.appendChild(wrap);
-  tab.hybridBar = {
+  // The composer lives inside its own pane, below that pane's terminal.
+  pane.el.appendChild(wrap);
+  pane.hybridBar = {
     el: wrap, input, submit, undo: doUndo, loadCommands,
     focus: () => input.focus()
   };
   renderAttachments();
   autoGrow();
-  // The pane just lost height to the bar; the PTY has to be told.
-  requestAnimationFrame(() => { for (const [, pane] of tab.panes) fitPane(pane); });
-  return tab.hybridBar;
+  // The terminal just lost height to the bar; refit so the PTY matches.
+  requestAnimationFrame(() => fitPane(pane));
+  return pane.hybridBar;
 }
-function removeHybridBar(tab) {
-  if (!tab.hybridBar) return;
-  tab.hybridBar.el.remove();
-  tab.hybridBar = null;
-  for (const [, pane] of tab.panes) {
-    if (pane.mask) { pane.mask.classList.remove('on'); pane.mask.style.height = '0px'; }
-    pane.masked = false;
-    pane.everMasked = false;
-    pane.hybridRaw = false;
-    pane.hybridScraping = false;
-    setPaneStdin(pane, true);
-  }
-  requestAnimationFrame(() => { for (const [, pane] of tab.panes) fitPane(pane); });
+function removeHybridBar(pane) {
+  if (!pane || !pane.hybridBar) return;
+  pane.hybridBar.el.remove();
+  pane.hybridBar = null;
+  if (pane.mask) { pane.mask.classList.remove('on'); pane.mask.style.height = '0px'; }
+  pane.masked = false;
+  pane.everMasked = false;
+  pane.hybridRaw = false;
+  pane.hybridScraping = false;
+  setPaneStdin(pane, true);
+  // The terminal just reclaimed the bar's height; refit so the PTY matches.
+  requestAnimationFrame(() => fitPane(pane));
 }
 
 // Amber border + hint whenever the pane is showing something we deliberately did not
 // mask, so it's clear the keyboard is back in the terminal for that moment.
-function refreshHybridBar(tab) {
-  if (!tab.hybridBar) return;
-  const pane = getActivePane(tab);
-  const dialog = !!(pane && pane.claudeRunning && pane.everMasked && !pane.masked && !pane.hybridRaw);
-  tab.hybridBar.el.classList.toggle('dialog', dialog);
+function refreshHybridBar(pane) {
+  if (!pane || !pane.hybridBar) return;
+  const dialog = !!(pane.claudeRunning && pane.everMasked && !pane.masked && !pane.hybridRaw);
+  pane.hybridBar.el.classList.toggle('dialog', dialog);
 }
 
 function updateHybrid() {
   for (const [, tab] of tabs) {
     if (tab.type === 'chat' || tab.type === 'editor') continue;
-    let anyClaude = false;
-    for (const [, pane] of tab.panes) if (pane.claudeRunning) anyClaude = true;
-    if (hybridEnabled && anyClaude) ensureHybridBar(tab);
-    else removeHybridBar(tab);
-    for (const [, pane] of tab.panes) updatePaneMask(pane);
-    refreshHybridBar(tab);
+    // One composer per pane running Claude, so both halves of a split get their own.
+    for (const [, pane] of tab.panes) {
+      if (hybridEnabled && pane.claudeRunning) ensureHybridBar(tab, pane);
+      else removeHybridBar(pane);
+      updatePaneMask(pane);
+      refreshHybridBar(pane);
+    }
     maybeLoadHybridCommands(tab);
   }
 }
 
-// Reading the list drives the pane's keyboard, so it waits for a moment where that is
-// safe: the band is up, Claude is not mid-turn, and its composer is empty.
+// Reading the list drives a pane's keyboard, so it waits for a moment where that is
+// safe: the band is up, Claude is not mid-turn, and its composer is empty. The list is
+// the same across a tab's panes, so it is scraped once (from whichever pane is ready)
+// and shared via tab.hybridCommands.
 function maybeLoadHybridCommands(tab) {
-  if (!tab.hybridBar || tab.hybridCommands || tab.hybridAutoTried) return;
-  const pane = getActivePane(tab);
-  if (!pane || !pane.masked || pane.hybridScraping) return;
-  if (Date.now() < (pane.claudeBusyUntil || 0)) return;
-  if (promptRest(pane.term) !== '') return;
-  tab.hybridAutoTried = true;
-  tab.hybridBar.loadCommands(false);
+  if (tab.hybridCommands || tab.hybridAutoTried) return;
+  for (const [, pane] of tab.panes) {
+    if (!pane.hybridBar || !pane.masked || pane.hybridScraping) continue;
+    if (Date.now() < (pane.claudeBusyUntil || 0)) continue;
+    if (promptRest(pane.term) !== '') continue;
+    tab.hybridAutoTried = true;
+    pane.hybridBar.loadCommands(false);
+    return;
+  }
 }
 
 if (hybridToggleEl) {
@@ -1169,8 +1140,9 @@ if (hybridToggleEl) {
     updateHybrid();
     const tab = tabs.get(activeId);
     if (!tab) return;
-    if (tab.hybridBar) tab.hybridBar.input.focus();
-    else { const pane = getActivePane(tab); if (pane) pane.term.focus(); }
+    const pane = getActivePane(tab);
+    if (pane && pane.hybridBar) pane.hybridBar.input.focus();
+    else if (pane) pane.term.focus();
   });
 }
 
@@ -1190,9 +1162,9 @@ function setActivePane(tab, paneId) {
   if (!pane) return;
   pane.el.classList.add('pane-active');
   pane.term.focus();
-  // Hybrid mode switched the terminal's keyboard off, so focus belongs in our own
-  // composer instead.
-  if (pane.masked && tab.hybridBar) tab.hybridBar.input.focus();
+  // Hybrid mode switched the terminal's keyboard off, so focus belongs in this pane's
+  // own composer instead.
+  if (pane.masked && pane.hybridBar) pane.hybridBar.input.focus();
   if (tab.tabId === activeId) {
     if (!tab.customTitle) setTabTitle(tab, basename(pane.cwd || '') || 'PowerShell');
     updateStatus();
@@ -1232,6 +1204,15 @@ function setActive(tabId) {
   updateStatus();
   scheduleAgentRender();
   scheduleSaveSession();
+}
+
+// Cycle the active tab in visual order. dir = +1 next, -1 previous; wraps around.
+function cycleTab(dir) {
+  const ids = Array.from(tabs.keys());
+  if (ids.length < 2) return;
+  const cur = activeId ? ids.indexOf(activeId) : -1;
+  const next = (cur + dir + ids.length) % ids.length;
+  setActive(ids[next]);
 }
 
 // ---------- context menu ----------
@@ -1311,8 +1292,11 @@ function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
     if (!drag) return;
     const delta = (direction === 'h' ? e.clientX : e.clientY) - drag.startPos;
     const nb = Math.max(80, Math.min(drag.available - 80, drag.startBefore + delta));
-    beforeEl.style.flex = `0 0 ${nb}px`;
-    afterEl.style.flex  = `0 0 ${drag.available - nb}px`;
+    // Proportional grow (basis 0), not fixed px: the ratio is what we want to keep, so
+    // the panes still fill — and keep filling — when the window grows. Fixed-px flex
+    // would freeze them at a max size and leave dead space beside a larger window.
+    beforeEl.style.flex = `${Math.round(nb)} 1 0`;
+    afterEl.style.flex  = `${Math.round(drag.available - nb)} 1 0`;
   });
   const end = (e) => {
     if (!drag) return;
@@ -1320,6 +1304,7 @@ function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
     drag = null;
     resizerEl.classList.remove('dragging');
     document.body.classList.remove('resizing-pane', 'resizing-pane-h', 'resizing-pane-v');
+    fitAll();
   };
   resizerEl.addEventListener('pointerup', end);
   resizerEl.addEventListener('pointercancel', end);
@@ -1643,13 +1628,15 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     return false;
   });
 
-  // Resize observer per pane
+  // Resize observer per pane. Watch the terminal element, not the pane box: when a
+  // per-pane composer appears, grows, or closes, the pane box is unchanged but the
+  // terminal's height shifts — observing it keeps cols/rows in step with those too.
   let roTimer = null;
   pane.ro = new ResizeObserver(() => {
     clearTimeout(roTimer);
     roTimer = setTimeout(() => fitPane(pane), 16);
   });
-  pane.ro.observe(paneEl);
+  pane.ro.observe(term.element || paneEl);
 
   // Fallback runOnReady
   if (pane.runOnReady) {
@@ -1672,6 +1659,9 @@ async function splitPane(tab, paneId, direction) {
 
   const splitEl = document.createElement('div');
   splitEl.className = direction === 'h' ? 'split-h' : 'split-v';
+  // The split takes over the slot the pane held, so it must inherit that slot's flex —
+  // otherwise a nested split collapses to content width and leaves dead space beside it.
+  splitEl.style.flex = pane.el.style.flex || '1 1 0';
   pane.el.replaceWith(splitEl);
 
   pane.el.style.flex = '1 1 50%';
@@ -1690,6 +1680,13 @@ async function splitPane(tab, paneId, direction) {
 
   const newPane = await createPaneProcess(tab, newPaneEl, { cwd: pane.cwd });
   setActivePane(tab, newPane.paneId);
+  // Both panes just changed width/height; xterm cols/rows only follow if we refit. The
+  // ResizeObserver is debounced and can miss the mid-surgery reflow, so refit explicitly
+  // across two frames once layout has settled.
+  requestAnimationFrame(() => {
+    for (const [, p] of tab.panes) fitPane(p);
+    requestAnimationFrame(() => { for (const [, p] of tab.panes) fitPane(p); });
+  });
 }
 
 // ---------- close pane ----------
@@ -1997,7 +1994,7 @@ async function createChatTab(opts = {}) {
     model: opts.model || defaultChatModel(),
     permissionMode,
     pinnedModels: pinnedModels,
-    helpers: { formatTokens, contextWindowFor, shortModelLabel },
+    helpers: { formatTokens, contextWindowFor, shortModelLabel, modelIsNativeOneM },
     showMenu: (x, y, items) => showContextMenu(x, y, items),
     commands: chatPaletteCommands(tab),
     customCommands: {
@@ -2569,12 +2566,32 @@ function formatTokens(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1)+'k';
   return String(n);
 }
-// 1M shows up as the `[1m]` alias suffix (`opus[1m]`, `claude-sonnet-5[1m]`) or as the
-// `(1M context)` label the CLI prints. Matching a bare "1m" would also hit model ids
-// that merely contain those characters, so both forms are anchored.
+// A model can reach 1M two independent ways: it is *natively* a 1M model, or the CLI's
+// `[1m]` beta alias extends an older 200k model. `[1m]` shows up as the alias suffix
+// (`opus[1m]`, `claude-sonnet-5[1m]`) or as the `(1M context)` label the CLI prints;
+// bare "1m" is anchored so it doesn't hit ids that merely contain those characters.
+function modelHasOneMFlag(model) {
+  return /\[1m\]|\b1m\b|\(1M context\)/i.test(String(model || ''));
+}
+// Native 1M window by family + version: every current family except Haiku ships 1M by
+// default — Opus/Sonnet from 4.6 on, Fable/Mythos from 5 on. Older versions and all
+// Haiku stay at 200k. A bare family alias (`opus`, no version) tracks the newest
+// release, so it inherits that family's 1M default (again, except haiku).
+function modelIsNativeOneM(model) {
+  const s = String(model || '').toLowerCase();
+  const v = s.match(/(opus|sonnet|haiku|fable|mythos)[-\s]?(\d+)(?:[-.\s](\d+))?/);
+  if (v) {
+    const family = v[1], maj = +v[2], min = v[3] ? +v[3] : 0;
+    if (family === 'haiku') return false;
+    if (family === 'fable' || family === 'mythos') return maj >= 5;
+    return maj > 4 || (maj === 4 && min >= 6); // opus & sonnet went 1M-native at 4.6
+  }
+  if (/\bhaiku\b/.test(s)) return false;
+  return /\b(opus|sonnet|fable|mythos)\b/.test(s);
+}
 function contextWindowFor(model) {
   if (!model) return 200000;
-  return /\[1m\]|\b1m\b|\(1M context\)/i.test(model) ? 1000000 : 200000;
+  return (modelHasOneMFlag(model) || modelIsNativeOneM(model)) ? 1000000 : 200000;
 }
 function shortModelLabel(model) {
   if (!model) return '';
@@ -3294,8 +3311,31 @@ newTabBtn.addEventListener('contextmenu', (e) => {
 let resizeTimer = null;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitAll, 50); });
 
+// Tell main which context has focus. A real text field (composer, rename box) does
+// Notepad-style undo/redo natively, so main leaves Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z alone
+// there. xterm's own hidden textarea does NOT count — the terminal has already sent its
+// keys to the PTY and needs our chunk-undo instead.
+function activeIsNativeUndoField() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag !== 'INPUT' && tag !== 'TEXTAREA') return false;
+  if (el.classList.contains('xterm-helper-textarea')) return false;
+  if (el.closest && el.closest('.xterm')) return false;
+  if (el.readOnly || el.disabled) return false;
+  return true;
+}
+function syncTextFieldFocus() {
+  window.shortcuts?.setTextFieldFocus?.(activeIsNativeUndoField());
+}
+document.addEventListener('focusin', syncTextFieldFocus);
+// focusout lands before the next focusin, so read the new target on the next frame.
+document.addEventListener('focusout', () => requestAnimationFrame(syncTextFieldFocus));
+syncTextFieldFocus();
+
 // Ctrl+Z arrives via IPC from the main process (before-input-event), bypassing menu
 // accelerators and xterm's textarea. Apply chunk-level undo to the active pane.
+// (Only fires when no native-undo text field has focus — main skips it otherwise.)
 window.shortcuts?.onCtrlZ?.(() => {
   if (!activeId) return;
   const tab = tabs.get(activeId);
@@ -3314,10 +3354,10 @@ window.shortcuts?.onCtrlZ?.(() => {
     view.undo();
     return;
   }
-  // Hybrid mode: the composer under the pane is a textarea with its own chunk stack.
-  if (tab.hybridBar && document.activeElement === tab.hybridBar.input) {
-    tab.hybridBar.undo();
-    return;
+  // A pane composer normally keeps Ctrl+Z (main won't forward it), but if it ever
+  // arrives here, hand it to that textarea's native undo rather than the pane's PTY.
+  for (const [, p] of tab.panes) {
+    if (p.hybridBar && document.activeElement === p.hybridBar.input) { p.hybridBar.undo(); return; }
   }
   const pane = getActivePane(tab);
   if (!pane) return;
@@ -3328,6 +3368,17 @@ window.shortcuts?.onCtrlZ?.(() => {
 });
 
 // ---------- keyboard shortcuts ----------
+// Ctrl+Tab / Ctrl+Shift+Tab cycle tabs. Capture phase so it fires before xterm's
+// textarea and the composer swallow the key — otherwise it only works once, until
+// focus lands back outside a terminal/chat pane.
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'Tab' || e.code === 'Tab')) {
+    e.preventDefault();
+    e.stopPropagation();
+    cycleTab(e.shiftKey ? -1 : 1);
+  }
+}, true);
+
 window.addEventListener('keydown', (e) => {
   // Ctrl+` toggles a chat pane's terminal drawer. Handled before the field guard so
   // it also works from inside the composer and from the drawer's own shell.
@@ -3371,11 +3422,17 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     const t = activeId ? tabs.get(activeId) : null;
     if (t && t.panes.size) splitPane(t, t.activePaneId, 'v');
-  } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'r') {
-    e.preventDefault();
-    const t = activeId ? tabs.get(activeId) : null;
-    if (t && t.panes.size) splitPane(t, t.activePaneId, 'h');
   }
+});
+
+// Ctrl+Shift+R arrives via IPC from the main process — it preventDefaults the key to
+// block Chromium's force-reload, so the DOM keydown above never fires. Mirror the old
+// field guard: no split while a text field owns focus.
+window.shortcuts?.onSplitH?.(() => {
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  const t = activeId ? tabs.get(activeId) : null;
+  if (t && t.panes.size) splitPane(t, t.activePaneId, 'h');
 });
 
 // ---------- session persistence ----------

@@ -440,8 +440,11 @@
     .term-container.active { display: flex; flex-direction: column; }
 
     /* Split pane layout */
-    .split-h { display: flex; flex-direction: row; width: 100%; height: 100%; overflow: hidden; }
-    .split-v { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; }
+    /* flex:1 + min:0 so a split fills its slot (the column tab body, or a parent split's
+       pane slot when nested) and can shrink instead of overflowing to a fixed max size. */
+    .split-h, .split-v { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; }
+    .split-h { flex-direction: row; }
+    .split-v { flex-direction: column; }
     .pane-container {
       flex: 1;
       min-width: 80px;
@@ -452,8 +455,11 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--bg);
+      /* Column so a per-pane Claude composer can sit below this pane's terminal. */
+      display: flex;
+      flex-direction: column;
     }
-    .pane-container .xterm { height: 100%; }
+    .pane-container .xterm { flex: 1 1 0; min-height: 0; width: 100%; }
     .pane-container .xterm-viewport::-webkit-scrollbar { width: 10px; }
     .pane-container .xterm-viewport::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 5px; }
     .pane-container .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
@@ -504,9 +510,10 @@
     }
     .pane-mask.on { display: block; }
 
-    /* Own composer for a Claude-in-terminal pane. Lives in .term-container below the
-       pane grid, so the pane shrinks and the PTY is resized to match. The wrapper is
-       the positioning context for the command palette, which opens above the bar. */
+    /* Own composer for a Claude-in-terminal pane. Lives inside its own .pane-container,
+       below that pane's terminal, so the terminal shrinks and the PTY is resized to
+       match — one composer per pane. The wrapper is the positioning context for the
+       command palette, which opens above the bar. */
     .hybrid-wrap { position: relative; flex-shrink: 0; margin-top: 8px; }
     .hybrid-bar {
       display: flex;
