@@ -1358,6 +1358,150 @@
       flex-shrink: 0;
     }
 
+    /* ---------- Your commands (user macros) ---------- */
+    .cmd-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.55);
+    }
+    .cmd-modal.show { display: flex; }
+    .cmd-box {
+      width: 600px;
+      max-width: 92vw;
+      max-height: 86vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--menu);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 10px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.62);
+      font-family: var(--ui);
+      color: var(--fg);
+      overflow: hidden;
+    }
+    .cmd-hdr {
+      height: 44px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 8px 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--card-hdr);
+    }
+    .cmd-title { flex: 1; font-size: 13px; font-weight: 600; color: var(--fg-strong); }
+    .cmd-close {
+      width: 26px; height: 26px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 5px;
+      color: var(--fg-muted);
+      cursor: pointer;
+      font-size: 15px;
+      line-height: 1;
+    }
+    .cmd-close:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .cmd-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .cmd-note { font-size: 12px; line-height: 18px; color: var(--fg-muted); }
+    .cmd-note code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--accent);
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 3px;
+      padding: 1px 4px;
+    }
+    .cmd-list { display: flex; flex-direction: column; gap: 6px; }
+    .cmd-empty { font-size: 12px; color: var(--fg-faint); padding: 4px 0 2px; }
+    .cmd-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+    .cmd-row.editing { border-color: rgba(96, 205, 255, 0.45); }
+    .cmd-row-name {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      width: 108px;
+      flex-shrink: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cmd-row-text { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cmd-act {
+      height: 24px;
+      padding: 0 8px;
+      display: flex; align-items: center;
+      border-radius: 4px;
+      font-size: 11.5px;
+      color: var(--fg-dim);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .cmd-act:hover { background: rgba(255, 255, 255, 0.09); color: var(--fg-strong); }
+    .cmd-act.danger:hover { background: rgba(196, 43, 28, 0.20); color: var(--fg-strong); }
+    .cmd-form {
+      flex-shrink: 0;
+      border-top: 1px solid var(--line);
+      padding: 12px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--card-hdr);
+    }
+    .cmd-name-row { display: flex; align-items: center; gap: 6px; }
+    .cmd-slash { font-family: var(--mono); font-size: 13px; color: var(--fg-muted); }
+    .cmd-input {
+      background: var(--composer);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--fg-strong);
+      font-family: var(--ui);
+      font-size: 13px;
+      padding: 7px 9px;
+      outline: none;
+      width: 100%;
+      resize: none;
+    }
+    .cmd-input:focus { border-color: rgba(96, 205, 255, 0.45); }
+    #cmd-name { font-family: var(--mono); width: 170px; }
+    .cmd-area { line-height: 19px; min-height: 62px; }
+    .cmd-error { font-size: 11.5px; color: var(--red); min-height: 15px; }
+    .cmd-foot { display: flex; align-items: center; gap: 8px; }
+    .cmd-foot-hint { flex: 1; font-size: 11.5px; color: var(--fg-faint); }
+    .cmd-btn {
+      height: 28px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--fill);
+      color: var(--fg);
+      font-family: var(--ui);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .cmd-btn:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .cmd-btn.primary { background: var(--accent); border-color: transparent; color: #06212f; font-weight: 600; }
+    .cmd-btn.primary:hover { background: var(--accent-hi); }
+
     /* ---------- Agents panel ---------- */
     .agents-panel {
       width: 300px;
@@ -1773,6 +1917,37 @@
       </label>
     </div>
     <div class="statusbar-right" id="status-agents"></div>
+  </div>
+
+  <div class="cmd-modal" id="cmd-modal">
+    <div class="cmd-box">
+      <div class="cmd-hdr">
+        <span class="cmd-title">Your commands</span>
+        <span class="cmd-close" id="cmd-close" title="Close">&times;</span>
+      </div>
+      <div class="cmd-body">
+        <div class="cmd-note">
+          A command is a shortcut for text you send often. Type <code>/cp</code> in any Claude
+          composer and it goes in as whatever you put here. Put <code>$ARGS</code> in the text
+          to drop what you type after the name into that spot.
+        </div>
+        <div class="cmd-list" id="cmd-list"></div>
+      </div>
+      <div class="cmd-form">
+        <div class="cmd-name-row">
+          <span class="cmd-slash">/</span>
+          <input class="cmd-input" id="cmd-name" placeholder="cp" spellcheck="false" autocomplete="off">
+        </div>
+        <textarea class="cmd-input cmd-area" id="cmd-text" rows="3" spellcheck="false"
+                  placeholder="Commit and push"></textarea>
+        <div class="cmd-error" id="cmd-error"></div>
+        <div class="cmd-foot">
+          <span class="cmd-foot-hint" id="cmd-foot-hint">Letters, digits, - and _ in the name</span>
+          <button type="button" class="cmd-btn" id="cmd-cancel">Cancel</button>
+          <button type="button" class="cmd-btn primary" id="cmd-save">Add command</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="ctx-menu" id="ctx-menu"></div>

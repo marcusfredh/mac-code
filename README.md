@@ -16,6 +16,8 @@ message stream, collapsible tool cards, inline diffs for edits, and an approval 
 for every tool call that needs permission.
 
 - Composer with image paste/drop, a `/` command palette, model picker, and a context meter
+- **Your own commands**: `/cp` for "Commit and push", `/pr` for a whole review-then-PR
+  instruction — see below
 - **Plan usage**: the 5-hour and weekly windows `/usage` prints in the CLI, in the
   composer footer and the status bar, with reset times on hover. Read from the same
   subscription endpoint the CLI uses, so it needs a Claude subscription login —
@@ -36,6 +38,27 @@ for every tool call that needs permission.
 - Switching model relaunches the CLI with `--resume`, so the conversation carries over
   (skipped before the first message, when there is no transcript to resume yet)
 - Sessions can be saved to the library and resumed later as a chat pane or in a terminal
+
+#### Your own commands
+
+A command is a shortcut for message text you send often. `/commands` in any Claude
+composer — a chat pane or a hybrid terminal pane — opens the editor; add a name and the
+text it stands for, and it shows up at the top of the `/` palette in every pane.
+
+| In the palette | Does |
+|---|---|
+| `Enter` or click | Sends the command's text |
+| `Tab` | Puts the text in the composer to edit first |
+
+Anything typed after the name is appended — `/cp the drawer fix` sends
+"Commit and push the drawer fix". Put `$ARGS` in the text to place it yourself instead:
+`Fix $ARGS and add a test for it`. A command with `$ARGS` never sends on its own — it
+fills the composer with its name and waits for the rest of the line.
+
+These are Mac Code's own, not the CLI's: a composer expands one into plain text before
+anything is sent, so nothing has to be written into `.claude/commands`, and the CLI's own
+`/`-commands keep working next to them (they are listed in the same palette, below yours).
+The list is per machine, kept in the app's local storage.
 
 #### Permission modes
 

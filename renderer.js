@@ -237,6 +237,202 @@ function updateStatusAgents() {
   });
 }
 
+// ---------- Your commands (user macros) ----------
+// A shortcut for message text: /cp sends "Commit and push", /pr sends a whole
+// review-then-PR instruction. They are Mac Code's own, not the CLI's - a composer
+// expands one into plain text before anything is sent, so the same list works in chat
+// panes and in hybrid terminal panes, and nothing has to be written into .claude.
+const CUSTOM_CMD_KEY = 'customCommands';
+const CUSTOM_CMD_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+function normCustomCommandName(raw) {
+  return String(raw == null ? '' : raw).trim().replace(/^\/+/, '');
+}
+
+function readCustomCommands() {
+  let list = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_CMD_KEY) || '[]');
+    if (Array.isArray(parsed)) list = parsed;
+  } catch (_) {}
+  return list
+    .map((c) => ({ name: normCustomCommandName(c && c.name), text: String((c && c.text) || '') }))
+    .filter((c) => CUSTOM_CMD_NAME_RE.test(c.name) && c.text.trim());
+}
+
+let customCommands = readCustomCommands();
+
+function getCustomCommands() { return customCommands; }
+function persistCustomCommands() {
+  localStorage.setItem(CUSTOM_CMD_KEY, JSON.stringify(customCommands));
+}
+function findCustomCommand(name) {
+  const n = normCustomCommandName(name).toLowerCase();
+  return customCommands.find((c) => c.name.toLowerCase() === n) || null;
+}
+function customCommandPreview(text) {
+  const one = String(text || '').replace(/\s+/g, ' ').trim();
+  return one.length > 96 ? one.slice(0, 95) + '\u2026' : one;
+}
+
+// /cp becomes the command's text. Anything typed after the name is appended, or dropped
+// in at $ARGS when the text names the spot itself. Returns null when the line is not one
+// of these commands, which leaves it alone - the CLI's own /-commands still work.
+function expandCustomCommand(body) {
+  const line = String(body == null ? '' : body);
+  if (line.includes('\n') || !line.trim().startsWith('/')) return null;
+  const m = line.trim().match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const cmd = findCustomCommand(m[1]);
+  if (!cmd) return null;
+  const args = (m[2] || '').trim();
+  if (cmd.text.includes('$ARGS')) {
+    const filled = cmd.text.split('$ARGS').join(args);
+    // An empty $ARGS leaves a gap behind; close it rather than sending double spaces.
+    return (args ? filled : filled.replace(/[ \t]{2,}/g, ' ')).trim();
+  }
+  return args ? cmd.text + ' ' + args : cmd.text;
+}
+
+// ---------- the manager dialog ----------
+const cmdModalEl  = document.getElementById('cmd-modal');
+const cmdListEl   = document.getElementById('cmd-list');
+const cmdNameEl   = document.getElementById('cmd-name');
+const cmdTextEl   = document.getElementById('cmd-text');
+const cmdErrorEl  = document.getElementById('cmd-error');
+const cmdSaveEl   = document.getElementById('cmd-save');
+const cmdCancelEl = document.getElementById('cmd-cancel');
+const cmdCloseEl  = document.getElementById('cmd-close');
+
+// The name being edited, or null while the form is adding a new one.
+let cmdEditing = null;
+
+function renderCustomCommandList() {
+  cmdListEl.innerHTML = '';
+  if (!customCommands.length) {
+    const empty = document.createElement('div');
+    empty.className = 'cmd-empty';
+    empty.textContent = 'No commands yet. Add one below.';
+    cmdListEl.appendChild(empty);
+    return;
+  }
+  for (const c of customCommands) {
+    const row = document.createElement('div');
+    row.className = 'cmd-row' + (cmdEditing === c.name ? ' editing' : '');
+    const name = document.createElement('span');
+    name.className = 'cmd-row-name';
+    name.textContent = '/' + c.name;
+    row.appendChild(name);
+    const text = document.createElement('span');
+    text.className = 'cmd-row-text';
+    text.textContent = customCommandPreview(c.text);
+    text.title = c.text;
+    row.appendChild(text);
+    const edit = document.createElement('span');
+    edit.className = 'cmd-act';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => startEditCustomCommand(c.name));
+    row.appendChild(edit);
+    const del = document.createElement('span');
+    del.className = 'cmd-act danger';
+    del.textContent = 'Delete';
+    del.addEventListener('click', () => deleteCustomCommand(c.name));
+    row.appendChild(del);
+    cmdListEl.appendChild(row);
+  }
+}
+
+function setCustomCommandForm(cmd) {
+  cmdEditing = cmd ? cmd.name : null;
+  cmdNameEl.value = cmd ? cmd.name : '';
+  cmdTextEl.value = cmd ? cmd.text : '';
+  cmdErrorEl.textContent = '';
+  cmdSaveEl.textContent = cmd ? 'Save changes' : 'Add command';
+  cmdCancelEl.textContent = cmd ? 'Cancel edit' : 'Close';
+  renderCustomCommandList();
+}
+
+function startEditCustomCommand(name) {
+  const cmd = findCustomCommand(name);
+  if (!cmd) return;
+  setCustomCommandForm(cmd);
+  cmdTextEl.focus();
+}
+
+function deleteCustomCommand(name) {
+  const n = normCustomCommandName(name).toLowerCase();
+  customCommands = customCommands.filter((c) => c.name.toLowerCase() !== n);
+  persistCustomCommands();
+  if (cmdEditing && cmdEditing.toLowerCase() === n) setCustomCommandForm(null);
+  else renderCustomCommandList();
+}
+
+function saveCustomCommandForm() {
+  const name = normCustomCommandName(cmdNameEl.value);
+  const text = cmdTextEl.value.trim();
+  if (!CUSTOM_CMD_NAME_RE.test(name)) {
+    cmdErrorEl.textContent = 'Name: letters, digits, - and _, starting with a letter or digit.';
+    cmdNameEl.focus();
+    return;
+  }
+  if (!text) {
+    cmdErrorEl.textContent = 'Give the command some text to send.';
+    cmdTextEl.focus();
+    return;
+  }
+  const clash = findCustomCommand(name);
+  if (clash && (!cmdEditing || clash.name.toLowerCase() !== cmdEditing.toLowerCase())) {
+    cmdErrorEl.textContent = '/' + clash.name + ' already exists.';
+    cmdNameEl.focus();
+    return;
+  }
+  if (cmdEditing) {
+    const old = cmdEditing.toLowerCase();
+    const at = customCommands.findIndex((c) => c.name.toLowerCase() === old);
+    if (at >= 0) customCommands[at] = { name, text };
+    else customCommands.push({ name, text });
+  } else {
+    customCommands.push({ name, text });
+  }
+  persistCustomCommands();
+  setCustomCommandForm(null);
+  cmdNameEl.focus();
+}
+
+function openCustomCommands(prefillName) {
+  // Re-read first: another window may have changed the list since this one loaded.
+  customCommands = readCustomCommands();
+  const existing = prefillName ? findCustomCommand(prefillName) : null;
+  setCustomCommandForm(existing);
+  if (!existing && prefillName) cmdNameEl.value = normCustomCommandName(prefillName);
+  cmdModalEl.classList.add('show');
+  (existing ? cmdTextEl : cmdNameEl).focus();
+}
+function closeCustomCommands() { cmdModalEl.classList.remove('show'); }
+
+cmdSaveEl.addEventListener('click', saveCustomCommandForm);
+cmdCloseEl.addEventListener('click', closeCustomCommands);
+cmdCancelEl.addEventListener('click', () => {
+  if (cmdEditing) { setCustomCommandForm(null); cmdNameEl.focus(); return; }
+  closeCustomCommands();
+});
+// Only the backdrop closes it; a click inside the box must not.
+cmdModalEl.addEventListener('mousedown', (e) => { if (e.target === cmdModalEl) closeCustomCommands(); });
+cmdNameEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); cmdTextEl.focus(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeCustomCommands(); }
+  e.stopPropagation();
+});
+cmdTextEl.addEventListener('keydown', (e) => {
+  // Enter saves; the text itself can still be multi-line with Shift+Enter.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveCustomCommandForm(); }
+  if (e.key === 'Escape') { e.preventDefault(); closeCustomCommands(); }
+  e.stopPropagation();
+});
+cmdModalEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); closeCustomCommands(); }
+});
+
 // ---------- pane resize ----------
 function fitPane(pane) {
   if (!pane?.fit) return;
@@ -535,7 +731,7 @@ function ensureHybridBar(tab) {
 
   const imageBtn = mkBtn('🖼 Image', 'Attach an image — or paste or drop one', null);
   foot.appendChild(imageBtn);
-  const cmdBtn = mkBtn('/ Commands', "Claude's slash commands", null);
+  const cmdBtn = mkBtn('/ Commands', "Your commands and Claude's own", null);
   foot.appendChild(cmdBtn);
   const undoBtn = mkBtn('↶', 'Undo last input — Ctrl+Z', null);
   foot.appendChild(undoBtn);
@@ -687,8 +883,14 @@ function ensureHybridBar(tab) {
 
   function paletteRows(filter) {
     const cmds = tab.hybridCommands || [];
-    const rows = cmds.map((c) => ({ cmd: c.cmd, desc: c.desc }));
-    if (!rows.length) {
+    // Your own commands come first: they are the ones typed most, and they are text this
+    // composer expands rather than a command handed to the CLI.
+    const rows = getCustomCommands().map((c) => ({
+      cmd: '/' + c.name, desc: customCommandPreview(c.text), custom: true, text: c.text
+    }));
+    rows.push({ cmd: '/commands', desc: 'Create or edit your own commands', manage: true });
+    for (const c of cmds) rows.push({ cmd: c.cmd, desc: c.desc });
+    if (!cmds.length) {
       rows.push({
         cmd: loading ? '(reading…)' : '(no commands loaded)',
         desc: loading ? "Paging through Claude's own menu" : 'Click ↻ to read the list from Claude',
@@ -714,7 +916,7 @@ function ensureHybridBar(tab) {
     hdr.className = 'palette-hdr hybrid';
     const hdrText = document.createElement('span');
     const total = (tab.hybridCommands || []).length;
-    hdrText.textContent = 'Claude commands' + (total ? ' · ' + total : '');
+    hdrText.textContent = 'Commands' + (total ? ' · ' + total + ' from Claude' : '');
     hdr.appendChild(hdrText);
     const refresh = document.createElement('span');
     refresh.className = 'palette-refresh';
@@ -740,7 +942,7 @@ function ensureHybridBar(tab) {
       desc.textContent = r.desc;
       item.appendChild(desc);
       item.addEventListener('mouseenter', () => setPaletteIndex(i));
-      item.addEventListener('mousedown', (e) => { e.preventDefault(); runPalette(i); });
+      item.addEventListener('mousedown', (e) => { e.preventDefault(); runPalette(i, 'send'); });
       palette.appendChild(item);
     });
     palette.classList.add('show');
@@ -760,10 +962,28 @@ function ensureHybridBar(tab) {
     else hidePalette();
   }
 
-  function runPalette(i) {
+  function runPalette(i, mode) {
     const r = paletteItems[i];
     if (!r || r.noInsert) return;
     hidePalette();
+    if (r.manage) { openCustomCommands(); return; }
+    if (r.custom) {
+      // A command whose text names $ARGS is waiting for the rest of the line, so it goes
+      // in as the name itself instead of sending half a sentence.
+      if (r.text.includes('$ARGS')) {
+        input.value = r.cmd + ' ';
+        lastValue = input.value;
+        autoGrow();
+        input.focus();
+        return;
+      }
+      input.value = r.text;
+      lastValue = input.value;
+      autoGrow();
+      if (mode === 'send') submit();
+      input.focus();
+      return;
+    }
     input.value = r.cmd + ' ';
     lastValue = input.value;
     autoGrow();
@@ -792,6 +1012,16 @@ function ensureHybridBar(tab) {
 
   // ---------- submit ----------
   function submit() {
+    // /commands typed straight in, with the palette dismissed, opens the editor rather
+    // than going to Claude as a message.
+    if (input.value.trim().toLowerCase() === '/commands' && !findCustomCommand('commands')) {
+      input.value = '';
+      lastValue = '';
+      autoGrow();
+      hidePalette();
+      openCustomCommands();
+      return;
+    }
     const pane = getActivePane(tab);
     if (!pane) return;
     // The band is down, so the pane is showing something that owns the keyboard itself —
@@ -803,7 +1033,10 @@ function ensureHybridBar(tab) {
     }
     // Attachment paths go in ahead of the message, one per line.
     const paths = attachments.map((a) => a.path);
-    const body = (paths.length ? paths.join('\n') + '\n' : '') + input.value;
+    // One of your own commands turns into its text here, so Claude only sees a message.
+    const typed = input.value;
+    const expanded = expandCustomCommand(typed);
+    const body = (paths.length ? paths.join('\n') + '\n' : '') + (expanded == null ? typed : expanded);
     if (!body.trim()) return;
     input.value = '';
     lastValue = '';
@@ -856,9 +1089,9 @@ function ensureHybridBar(tab) {
     if (palette.classList.contains('show')) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIndex((paletteIndex + 1) % paletteItems.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setPaletteIndex((paletteIndex - 1 + paletteItems.length) % paletteItems.length); return; }
-      if (e.key === 'Tab') { e.preventDefault(); runPalette(paletteIndex); return; }
+      if (e.key === 'Tab') { e.preventDefault(); runPalette(paletteIndex, 'insert'); return; }
       if (e.key === 'Escape') { e.preventDefault(); hidePalette(); return; }
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runPalette(paletteIndex); return; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runPalette(paletteIndex, 'send'); return; }
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); submit(); return; }
     // Escape belongs to Claude: it is how a running turn is interrupted.
@@ -1767,6 +2000,11 @@ async function createChatTab(opts = {}) {
     helpers: { formatTokens, contextWindowFor, shortModelLabel },
     showMenu: (x, y, items) => showContextMenu(x, y, items),
     commands: chatPaletteCommands(tab),
+    customCommands: {
+      list: getCustomCommands,
+      expand: expandCustomCommand,
+      manage: openCustomCommands
+    },
     getDefaultPermissionMode: defaultPermissionMode,
     onDefaultPermissionMode: setDefaultPermissionMode,
     onTerminalOpen: (mount) => openChatTerminal(tab, mount),

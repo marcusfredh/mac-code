@@ -1834,15 +1834,37 @@
     input.addEventListener('focus', () => composer.classList.add('focused'));
     input.addEventListener('blur', () => composer.classList.remove('focused'));
 
-    // Palette: app commands first (they act on the pane), then the CLI's own.
+    // Palette: your own commands first, then app commands (they act on the pane), then
+    // the CLI's own. Your commands are shortcuts for message text, expanded here, so the
+    // CLI never sees them as commands at all.
     const appCommands = Array.isArray(opts.commands) ? opts.commands : [];
+    const custom = opts.customCommands || null;
+    const customList = () => (custom && typeof custom.list === 'function' ? custom.list() : []);
+    const expandCustom = (t) => (custom && typeof custom.expand === 'function' ? custom.expand(t) : null);
+    const customPreview = (t) => {
+      const one = String(t || '').replace(/\s+/g, ' ').trim();
+      return one.length > 96 ? one.slice(0, 95) + '\u2026' : one;
+    };
     let paletteItems = [];
     let paletteIndex = 0;
 
     function paletteRows(filter) {
-      // Pane-local commands first, then whatever the app registered, then the CLI's
-      // own slash commands (which only arrive with the first `init` event).
-      const rows = [
+      // Your own commands, then pane-local ones, then whatever the app registered, then
+      // the CLI's own slash commands (which only arrive with the first `init` event).
+      const rows = [];
+      for (const c of customList()) {
+        rows.push({
+          cmd: '/' + c.name, desc: customPreview(c.text), key: 'yours',
+          custom: true, text: c.text, run: null
+        });
+      }
+      if (custom && typeof custom.manage === 'function') {
+        rows.push({
+          cmd: '/commands', desc: 'Create or edit your own commands', key: '',
+          manage: true, run: null
+        });
+      }
+      rows.push(
         {
           cmd: '/terminal', desc: 'Toggle a shell in this folder', key: 'Ctrl+`',
           run: () => { setDrawer(!drawerOpen); if (drawerOpen && optsFn('onTerminalFocus')) opts.onTerminalFocus(); }
@@ -1857,7 +1879,7 @@
           key: '',
           run: () => togglePace()
         }
-      ];
+      );
       for (const c of appCommands) {
         rows.push({ cmd: c.cmd, desc: c.desc, key: c.key || '', run: c.run });
       }
@@ -1880,7 +1902,7 @@
         item.appendChild(el('span', 'palette-desc', row.desc));
         if (row.key) item.appendChild(el('span', 'palette-key', row.key));
         item.addEventListener('mouseenter', () => setPaletteIndex(i));
-        item.addEventListener('click', () => runPalette(i));
+        item.addEventListener('click', () => runPalette(i, 'send'));
         palette.appendChild(item);
       });
       palette.classList.add('show');
@@ -1896,10 +1918,28 @@
       if (v.startsWith('/') && !v.includes('\n')) showPalette(v.trim());
       else hidePalette();
     }
-    function runPalette(i) {
+    function runPalette(i, mode) {
       const row = paletteItems[i];
       if (!row) return;
       hidePalette();
+      if (row.manage) { custom.manage(); return; }
+      if (row.custom) {
+        // A command whose text names $ARGS is waiting for the rest of the line, so it
+        // goes in as the name itself instead of sending half a sentence.
+        if (row.text.includes('$ARGS')) {
+          input.value = row.cmd + ' ';
+          lastValue = input.value;
+          autoGrow();
+          input.focus();
+          return;
+        }
+        input.value = row.text;
+        lastValue = input.value;
+        autoGrow();
+        if (mode === 'send') submit();
+        input.focus();
+        return;
+      }
       if (row.run) {
         input.value = '';
         lastValue = '';
@@ -1928,10 +1968,11 @@
       if (palette.classList.contains('show')) {
         if (e.key === 'ArrowDown') { e.preventDefault(); setPaletteIndex((paletteIndex + 1) % paletteItems.length); return; }
         if (e.key === 'ArrowUp')   { e.preventDefault(); setPaletteIndex((paletteIndex - 1 + paletteItems.length) % paletteItems.length); return; }
-        if (e.key === 'Tab')       { e.preventDefault(); runPalette(paletteIndex); return; }
+        if (e.key === 'Tab')       { e.preventDefault(); runPalette(paletteIndex, 'insert'); return; }
         if (e.key === 'Escape')    { e.preventDefault(); hidePalette(); return; }
-        if (e.key === 'Enter' && !e.shiftKey && paletteItems[paletteIndex] && paletteItems[paletteIndex].run) {
-          e.preventDefault(); runPalette(paletteIndex); return;
+        const sel = paletteItems[paletteIndex];
+        if (e.key === 'Enter' && !e.shiftKey && sel && (sel.run || sel.custom || sel.manage)) {
+          e.preventDefault(); runPalette(paletteIndex, 'send'); return;
         }
       }
       if (e.key === 'Enter' && e.ctrlKey) {
@@ -2041,6 +2082,18 @@
 
     // ---------- send ----------
     async function submit() {
+      // /commands typed straight in, with the palette dismissed, opens the editor rather
+      // than going to Claude as a message.
+      const raw = input.value.trim();
+      if (raw.toLowerCase() === '/commands' && !attachments.length
+          && custom && typeof custom.manage === 'function' && expandCustom(raw) == null) {
+        input.value = '';
+        lastValue = '';
+        autoGrow();
+        hidePalette();
+        custom.manage();
+        return;
+      }
       if (state.working) { interrupt(); return; }
       if (state.exited) {
         if (opts.onRestart) opts.onRestart();
@@ -2048,6 +2101,9 @@
       }
       const text = input.value.trim();
       if (!text && !attachments.length) return;
+      // One of your own commands turns into its text here, so Claude only sees a message.
+      const expanded = expandCustom(text);
+      const body = expanded == null ? text : expanded;
 
       const content = [];
       for (const att of attachments) {
@@ -2060,7 +2116,7 @@
           content.push({ type: 'text', text: att.text });
         }
       }
-      if (text) content.push({ type: 'text', text });
+      if (body) content.push({ type: 'text', text: body });
 
       // Echo the user's turn immediately; --replay-user-messages would echo it back
       // too, but only after the CLI has picked it up.
@@ -2068,7 +2124,7 @@
       const label = attachments.length
         ? attachments.map((a) => a.label).join(', ') + (text ? '\n' : '')
         : '';
-      renderMarkdown(bubble, label + text);
+      renderMarkdown(bubble, label + body);
       addBlock(bubble);
 
       const res = await window.chatApi.send({ chatId: state.chatId, content });
