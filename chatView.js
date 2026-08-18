@@ -16,11 +16,28 @@
   // CLI aliases rather than pinned ids — `claude --model opus` always resolves to
   // the current Opus, so this list doesn't rot when a new model ships.
   const MODELS = [
-    { id: 'opus',   label: 'Opus 5',    dot: '#4ec994' },
-    { id: 'sonnet', label: 'Sonnet 5',  dot: '#61d6d6' },
+    { id: 'opus',   label: 'Opus 5',    dot: '#4ec994', oneM: true },
+    { id: 'sonnet', label: 'Sonnet 5',  dot: '#61d6d6', oneM: true },
     { id: 'haiku',  label: 'Haiku 4.5', dot: '#d7ba7d' },
     { id: 'fable',  label: 'Fable 5',   dot: '#b393ff' }
   ];
+
+  // `opus[1m]` and friends are CLI model aliases: same model, 1M-context beta on.
+  // The suffixed id is what goes to --model, so it is carried around whole and only
+  // split when a label or a context window is needed.
+  function baseModelId(id) { return String(id || '').replace(/\[1m\]/gi, ''); }
+  function isOneM(id) { return /\[1m\]/i.test(String(id || '')); }
+
+  // Family of an alias (`sonnet`) or a pinned id (`claude-sonnet-4-6`).
+  function modelFamily(id) {
+    const m = /(opus|sonnet|haiku|fable|mythos)/i.exec(baseModelId(id));
+    return m ? m[1].toLowerCase() : '';
+  }
+  const FAMILY_DOTS = {
+    opus: '#4ec994', sonnet: '#61d6d6', haiku: '#d7ba7d', fable: '#b393ff', mythos: '#b393ff'
+  };
+  // Haiku has no 1M variant; the CLI offers one for the other families.
+  function supportsOneM(id) { return modelFamily(id) !== 'haiku' && modelFamily(id) !== ''; }
 
   // Named after the CLI's permission modes, but the decisions are Mac Code's own —
   // the CLI's `auto` classifier does not grant approvals in print mode, so `auto`
@@ -61,24 +78,43 @@
 
   // Just enough markdown for agent replies: fenced blocks, inline code, bold.
   // Everything is escaped first, so no markup can come out of model output.
+  // One ```-delimited segment: odd index is fenced code, even is prose.
+  function segmentEl(part, fenced) {
+    if (fenced) {
+      const nl = part.indexOf('\n');
+      const body = nl >= 0 ? part.slice(nl + 1) : part;
+      const pre = el('pre');
+      pre.appendChild(el('code', null, body.replace(/\n$/, '')));
+      return pre;
+    }
+    const span = document.createElement('span');
+    span.innerHTML = esc(part)
+      .replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`)
+      .replace(/\*\*([^*\n]+)\*\*/g, (_m, c) => `<strong>${c}</strong>`);
+    return span;
+  }
+
   function renderMarkdown(target, text) {
+    const parts = String(text).split('```');
     target.innerHTML = '';
-    const parts = String(text).split(/```/);
-    parts.forEach((part, i) => {
-      if (i % 2 === 1) {
-        const nl = part.indexOf('\n');
-        const body = nl >= 0 ? part.slice(nl + 1) : part;
-        const pre = el('pre');
-        pre.appendChild(el('code', null, body.replace(/\n$/, '')));
-        target.appendChild(pre);
-      } else if (part) {
-        const span = document.createElement('span');
-        span.innerHTML = esc(part)
-          .replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`)
-          .replace(/\*\*([^*\n]+)\*\*/g, (_m, c) => `<strong>${c}</strong>`);
-        target.appendChild(span);
-      }
-    });
+    // One element per segment, empty ones included, so a streaming update can address
+    // the trailing segment by position instead of rebuilding the whole block.
+    for (let i = 0; i < parts.length; i++) target.appendChild(segmentEl(parts[i], i % 2 === 1));
+    target._parts = parts.length;
+  }
+
+  // Streaming only ever appends. While the fence count is unchanged the earlier
+  // segments cannot have changed either, so only the trailing one is rebuilt — that
+  // keeps a long answer from being torn down and re-parsed on every update, which is
+  // what made the transcript lurch instead of scrolling.
+  function appendMarkdown(target, text) {
+    const parts = String(text).split('```');
+    if (target._parts !== parts.length || !target.lastChild) {
+      renderMarkdown(target, text);
+      return;
+    }
+    const last = parts.length - 1;
+    target.replaceChild(segmentEl(parts[last], last % 2 === 1), target.lastChild);
   }
 
   function lineCount(s) {
@@ -121,16 +157,35 @@
       sessionId: null,
       model: opts.model || 'opus',
       apiModel: null,
+      oneM: isOneM(opts.model),
       permissionMode: opts.permissionMode || 'default',
       sessionMcp: null,
       working: false,
       exited: false,
       interrupting: false,
       contextTokens: null,
-      contextWindow: 200000,
+      contextWindow: isOneM(opts.model) ? 1000000 : 200000,
       cost: 0,
+      // 5-hour and weekly plan usage, pushed in from the app's shared poll.
+      limits: null,
+      // Pinned model versions ([{id, label}]) from /v1/models, pushed in the same way.
+      pinned: Array.isArray(opts.pinnedModels) ? opts.pinnedModels : [],
+      // A session id exists from the first hook event, but --resume only works once a
+      // message has been written to the transcript. A resumed pane already has one.
+      sent: opts.resumeSessionId ? 1 : 0,
       slashCommands: []
     };
+
+    // The label for whatever `state.model` currently is: an alias, or a pinned id that
+    // only the fetched list knows the display name for.
+    function currentModelLabel() {
+      const base = baseModelId(state.model);
+      const alias = MODELS.find((m) => m.id === base);
+      if (alias) return alias.label;
+      const pin = state.pinned.find((m) => m.id === base);
+      if (pin) return pin.label;
+      return modelLabel(base) || base;
+    }
 
     // message id -> [{ type, node, reconciled }] in stream order. The buffered
     // `assistant` events are incremental snapshots, so their content array index is
@@ -236,6 +291,9 @@
         opts.onTerminalFit(false);
       }
       termBtn.classList.toggle('active', open);
+      // The drawer takes its height off the transcript, so a pinned view has to be
+      // pushed back to the bottom once the new height is laid out.
+      catchUpScroll();
     }
     function optsFn(name) { return typeof opts[name] === 'function'; }
 
@@ -268,6 +326,7 @@
       const h = Math.round(drawer.getBoundingClientRect().height);
       if (h >= 80) localStorage.setItem(DRAWER_KEY, String(h));
       if (optsFn('onTerminalFit')) opts.onTerminalFit(true);
+      catchUpScroll();
     };
     grip.addEventListener('pointerup', endDrag);
     grip.addEventListener('pointercancel', endDrag);
@@ -308,6 +367,12 @@
     ctxMeter.appendChild(ctxBar);
     ctxMeter.appendChild(ctxLabel);
     foot.appendChild(ctxMeter);
+
+    // Plan usage: the same 5-hour and weekly windows the CLI's /usage prints. Hidden
+    // until the first poll answers, and for auth that has no subscription window.
+    const limMeter = el('div', 'lim-meter');
+    limMeter.style.display = 'none';
+    foot.appendChild(limMeter);
 
     foot.appendChild(el('div', 'cf-divider'));
 
@@ -698,11 +763,29 @@
     }
 
     // ---------- scroll pinning ----------
+    // An inactive tab is `display: none`, so its transcript has no layout: scrollTop
+    // cannot be set and every metric reads 0. Both halves of the pinning logic have to
+    // sit that out, and the view has to catch up once it is on screen again.
     let pinned = true;
+    function hasLayout() { return stream.clientHeight > 0; }
     stream.addEventListener('scroll', () => {
+      // Hiding and showing the pane fires scroll with zeroed metrics, which would
+      // otherwise be read as a deliberate scroll and unpin the view.
+      if (!hasLayout()) return;
       pinned = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 40;
     });
-    function pin() { if (pinned) stream.scrollTop = stream.scrollHeight; }
+    function pin() {
+      if (!pinned || !hasLayout()) return;
+      stream.scrollTop = stream.scrollHeight;
+    }
+    // Called when the pane is revealed or the window comes back: replays the pins that
+    // were dropped while there was nothing to scroll.
+    function catchUpScroll() {
+      if (!pinned) return;
+      requestAnimationFrame(() => {
+        if (hasLayout()) stream.scrollTop = stream.scrollHeight;
+      });
+    }
 
     function addBlock(node) {
       if (emptyHint.parentNode) emptyHint.remove();
@@ -733,9 +816,8 @@
         ? "Auto: Mac Code's own safe-command list, not the CLI's auto-mode classifier"
         : 'Change how tool calls are approved';
 
-      const model = MODELS.find((m) => m.id === state.model);
-      modelText.textContent = model ? model.label : modelLabel(state.apiModel) || state.model;
-      modelDot.style.background = model ? model.dot : '#4ec994';
+      modelText.textContent = currentModelLabel() + (state.oneM ? ' · 1M' : '');
+      modelDot.style.background = FAMILY_DOTS[modelFamily(state.model)] || '#4ec994';
 
       const maxLabel = state.contextWindow >= 1e6
         ? '1M'
@@ -757,19 +839,79 @@
       if (opts.onStateChange) opts.onStateChange(getState());
     }
 
+    // ---------- plan usage meter ----------
+    function limItem(key, entry) {
+      const wrap = el('span', 'lim-item');
+      const level = entry.percent >= 90 || entry.severity === 'exhausted' ? 'danger'
+        : entry.percent >= 75 || entry.severity === 'warning' ? 'warn'
+        : '';
+      if (level) wrap.classList.add(level);
+      wrap.appendChild(el('span', 'lim-k', key));
+      const bar = el('span', 'lim-bar');
+      const fill = document.createElement('i');
+      fill.style.width = entry.percent + '%';
+      bar.appendChild(fill);
+      wrap.appendChild(bar);
+      wrap.appendChild(el('span', 'lim-v', entry.percent + '%'));
+      return wrap;
+    }
+
+    function resetHint(entry) {
+      if (!entry || !entry.resetsAt) return '';
+      const t = new Date(entry.resetsAt);
+      if (isNaN(t.getTime())) return '';
+      const sameDay = t.toDateString() === new Date().toDateString();
+      return ' · resets ' + (sameDay
+        ? t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : t.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }));
+    }
+
+    // Only redrawn when new numbers arrive, so it stays off the per-token path.
+    function renderLimits() {
+      const lim = state.limits;
+      limMeter.innerHTML = '';
+      if (!lim || (!lim.session && !lim.weekly)) {
+        limMeter.style.display = 'none';
+        return;
+      }
+      limMeter.style.display = '';
+      const lines = [];
+      if (lim.session) {
+        limMeter.appendChild(limItem('5h', lim.session));
+        lines.push(`Session (5h): ${lim.session.percent}% used${resetHint(lim.session)}`);
+      }
+      if (lim.weekly) {
+        limMeter.appendChild(limItem('wk', lim.weekly));
+        lines.push(`Week: ${lim.weekly.percent}% used${resetHint(lim.weekly)}`);
+      }
+      for (const s of lim.scoped || []) {
+        // Per-model weekly caps only matter once something has been charged to them.
+        if (!s.percent) continue;
+        limMeter.appendChild(limItem(s.key, s));
+        lines.push(`${s.label}: ${s.percent}% used${resetHint(s)}`);
+      }
+      if (lim.stale) lines.push('(last known numbers — refresh failed)');
+      lines.push('Click to refresh');
+      limMeter.title = lines.join('\n');
+    }
+
+    limMeter.addEventListener('click', () => {
+      if (opts.onRefreshLimits) opts.onRefreshLimits(true);
+    });
+
     function getState() {
-      const picked = MODELS.find((m) => m.id === state.model);
       return {
         chatId: state.chatId,
         cwd: state.cwd,
         name: state.name,
         sessionId: state.sessionId,
         model: state.model,
-        modelLabel: picked ? picked.label : state.model,
+        modelLabel: currentModelLabel() + (state.oneM ? ' · 1M' : ''),
         apiModel: state.apiModel,
         permissionMode: state.permissionMode,
         working: state.working,
         exited: state.exited,
+        canResume: state.sent > 0,
         contextTokens: state.contextTokens,
         contextWindow: state.contextWindow,
         cost: state.cost
@@ -1092,6 +1234,10 @@
     function handleEvent(ev) {
       if (!ev || !ev.type) return;
 
+      // Only a live process emits events, so a pane still marked dead — after a model
+      // switch, or a restart from the composer — is demonstrably back.
+      if (state.exited) { state.exited = false; refreshStats(); }
+
       if (ev.session_id && ev.session_id !== state.sessionId) {
         state.sessionId = ev.session_id;
         if (opts.onSessionId) opts.onSessionId(ev.session_id);
@@ -1109,16 +1255,23 @@
       }
     }
 
+    // The init event reports the alias the CLI resolved (`claude-sonnet-5[1m]`), but
+    // every later assistant message reports the plain API id — so the 1M flag has to
+    // stick, or the meter would drop back to 200k after the first reply.
+    function noteModel(id, authoritative) {
+      if (!id) return;
+      state.apiModel = id;
+      if (authoritative || isOneM(id)) state.oneM = isOneM(id);
+      state.contextWindow = state.oneM ? 1000000 : ctxWindowFor(id);
+    }
+
     function handleSystem(ev) {
       if (ev.subtype === 'init') {
         if (Array.isArray(ev.slash_commands)) state.slashCommands = ev.slash_commands;
         // What this pane's CLI actually attached — the authoritative answer to
         // "can the agent use this server here?".
         if (Array.isArray(ev.mcp_servers)) state.sessionMcp = ev.mcp_servers;
-        if (ev.model) {
-          state.apiModel = ev.model;
-          state.contextWindow = ctxWindowFor(ev.model);
-        }
+        noteModel(ev.model, true);
         if (ev.cwd) { state.cwd = ev.cwd; cwdEl.textContent = prettyCwd(ev.cwd); cwdEl.title = ev.cwd; }
         refreshStats();
       } else if (ev.subtype === 'permission_denied') {
@@ -1134,6 +1287,9 @@
 
     function handleRateLimit(ev) {
       const info = ev.rate_limit_info || {};
+      // The CLI emits this when the window it charges against moves, which is exactly
+      // when the plan meter is out of date.
+      if (opts.onRefreshLimits) opts.onRefreshLimits(true);
       if (info.status && info.status !== 'allowed') {
         const node = el('div', 'msg-error');
         const resets = info.resetsAt ? new Date(info.resetsAt * 1000).toLocaleTimeString() : 'later';
@@ -1154,6 +1310,8 @@
           streamNodes.set(currentMessageId, []);
           blockEls.set(currentMessageId, new Map());
         }
+        lastArrivalAt = 0;
+        tailRush = false;
         setWorking(true);
         return;
       }
@@ -1167,6 +1325,7 @@
         if (type === 'text' || type === 'thinking') {
           const node = el('div', type === 'text' ? 'msg-assistant' : 'msg-thinking');
           node._raw = '';
+          node._shown = 0;
           els.set(inner.index, node);
           list.push({ type, node, reconciled: false });
           addBlock(node);
@@ -1181,14 +1340,108 @@
           : d.type === 'thinking_delta' ? d.thinking
           : '';
         if (!chunk) return;
-        setBlockText(node, (node._raw || '') + chunk);
-        pin();
+        noteArrival();
+        queueBlockText(node, (node._raw || '') + chunk);
         return;
+      }
+      if (inner.type === 'message_stop') {
+        // Nothing more is coming, so stop pacing for the next lump and finish the
+        // remaining backlog briskly.
+        tailRush = true;
+        requestFrame();
       }
     }
 
-    function setBlockText(node, text) {
+    // ---------- streaming writes ----------
+    // The CLI does not forward per-token deltas: it hands over ~80-character lumps a
+    // couple of times a second. Writing each lump straight to the DOM is what made the
+    // answer arrive in jerks — a block of text appearing at once, then a pause. Arrived
+    // text is held as a target and revealed a slice per frame instead, so it flows the
+    // way the terminal does. One write and one pin() per frame also replaces the old
+    // full markdown rebuild per delta.
+    const REVEAL_MIN = 2;      // keep creeping forward on a small backlog
+    const REVEAL_CAP = 1500;   // further behind than this (background tab): jump
+    const REVEAL_TAIL = 90;    // time constant once the turn is over
+    const revealing = new Set();
+    let frameQueued = false;
+    let lastFrameAt = 0;
+    // Time constant for draining a backlog, paced at roughly half the observed gap
+    // between lumps: long enough that the text keeps moving until the next lump lands,
+    // short enough that it stays about half a lump behind rather than a whole one.
+    let revealMs = 220;
+    let lastArrivalAt = 0;
+    let tailRush = false;
+
+    function noteArrival() {
+      const now = performance.now();
+      if (lastArrivalAt) {
+        const gap = Math.min(800, Math.max(80, now - lastArrivalAt));
+        revealMs = Math.round(revealMs * 0.6 + (gap / 2) * 0.4);
+        revealMs = Math.min(400, Math.max(120, revealMs));
+      }
+      lastArrivalAt = now;
+      tailRush = false;
+    }
+
+    function requestFrame() {
+      if (frameQueued) return;
+      frameQueued = true;
+      requestAnimationFrame(revealFrame);
+    }
+
+    function writeBlock(node, text) {
+      if (node.classList.contains('msg-assistant')) appendMarkdown(node, text);
+      else node.textContent = text;
+    }
+
+    // Adds newly arrived text to a block's target without touching the DOM.
+    function queueBlockText(node, text) {
+      if (node._shown == null) node._shown = 0;
       node._raw = text;
+      if (node._shown < text.length) { revealing.add(node); requestFrame(); }
+    }
+
+    function revealFrame() {
+      frameQueued = false;
+      const now = performance.now();
+      // One frame's worth at most: after an idle gap between lumps the previous
+      // timestamp is stale, and letting that count would reveal the whole lump in a
+      // single frame — the very jump this is meant to remove.
+      const dt = Math.min(32, Math.max(8, now - lastFrameAt));
+      lastFrameAt = now;
+
+      let wrote = false;
+      for (const node of Array.from(revealing)) {
+        const target = node._raw || '';
+        const shown = Math.min(node._shown || 0, target.length);
+        const behind = target.length - shown;
+        if (behind <= 0) { node._shown = target.length; revealing.delete(node); continue; }
+        const tau = tailRush ? REVEAL_TAIL : revealMs;
+        const step = behind > REVEAL_CAP
+          ? behind
+          : Math.max(REVEAL_MIN, Math.ceil(behind * (dt / tau)));
+        node._shown = Math.min(target.length, shown + step);
+        writeBlock(node, target.slice(0, node._shown));
+        wrote = true;
+        if (node._shown >= target.length) revealing.delete(node);
+      }
+      if (wrote) pin();
+      if (revealing.size) requestFrame();
+    }
+
+    // A snapshot repeats the whole block. Retarget rather than snap to the end, or the
+    // smoothing would be undone exactly where it is most visible.
+    function retargetBlock(node, text) {
+      queueBlockText(node, text);
+      if (!revealing.has(node)) { node._shown = text.length; writeBlock(node, text); }
+    }
+
+    // For text that is already complete when it first appears (a block that never
+    // streamed, a user bubble, an error): render it in full, now.
+    function setBlockText(node, text) {
+      revealing.delete(node);
+      node._raw = text;
+      node._shown = text.length;
       if (node.classList.contains('msg-assistant')) renderMarkdown(node, text);
       else node.textContent = text;
     }
@@ -1198,10 +1451,7 @@
       const id = msg.id;
       const list = (id && streamNodes.get(id)) || null;
 
-      if (msg.model) {
-        state.apiModel = msg.model;
-        state.contextWindow = ctxWindowFor(msg.model);
-      }
+      noteModel(msg.model, false);
       if (msg.usage) {
         const u = msg.usage;
         state.contextTokens = (u.input_tokens || 0) +
@@ -1218,7 +1468,7 @@
           const slot = list && list.find((s) => s.type === block.type && !s.reconciled);
           if (slot) {
             slot.reconciled = true;
-            if (text != null) setBlockText(slot.node, text);
+            if (text != null) retargetBlock(slot.node, text);
             continue;
           }
           if (!text) continue;
@@ -1260,6 +1510,9 @@
     }
 
     function handleResult(ev) {
+      // Backstop for panes that never saw a message_stop (a shed stream, an error).
+      tailRush = true;
+      if (revealing.size) requestFrame();
       if (typeof ev.total_cost_usd === 'number') state.cost += ev.total_cost_usd;
       // An interrupted turn ends as an error by design — report it as a stop, not
       // as something that went wrong.
@@ -1569,18 +1822,60 @@
       openMenu(permPill, items);
     });
 
+    function pickModel(base, oneM) {
+      const target = base + (oneM ? '[1m]' : '');
+      if (target === state.model) return;
+      state.model = target;
+      state.oneM = oneM;
+      // Optimistic: the init event of the relaunched CLI confirms or corrects it.
+      state.contextWindow = oneM ? 1000000 : 200000;
+      refreshStats();
+      if (opts.onModelChange) opts.onModelChange(target);
+    }
+
     modelBtn.addEventListener('click', () => {
-      openMenu(modelBtn, MODELS.map((m) => ({
+      const current = baseModelId(state.model);
+      const items = MODELS.map((m) => ({
         label: m.label,
-        hint: m.id === state.model ? 'current' : '',
-        action: () => {
-          if (m.id === state.model) return;
-          state.model = m.id;
-          refreshStats();
-          if (opts.onModelChange) opts.onModelChange(m.id);
+        hint: m.id === current ? 'current' : 'latest',
+        // Keep 1M on across a family switch, but only where the beta exists.
+        action: () => pickModel(m.id, state.oneM && supportsOneM(m.id))
+      }));
+
+      // Older versions, pinned by exact id. The aliases above always track the newest
+      // of each family, so this is the only way to stay on, say, Opus 4.8.
+      const older = state.pinned.filter((m) => !aliasCovers(m.id));
+      if (older.length) {
+        items.push({ separator: true });
+        for (const m of older) {
+          items.push({
+            label: m.label,
+            hint: m.id === current ? 'current' : 'pinned',
+            action: () => pickModel(m.id, state.oneM && supportsOneM(m.id))
+          });
         }
-      })));
+      }
+
+      items.push({ separator: true });
+      items.push({
+        label: (state.oneM ? '✓ ' : '') + '1M context',
+        hint: supportsOneM(current) ? (state.oneM ? 'on' : 'off') : 'not on this model',
+        disabled: !supportsOneM(current),
+        action: () => pickModel(current, !state.oneM)
+      });
+      openMenu(modelBtn, items);
     });
+
+    // The newest id of a family is what its alias already resolves to, so listing it
+    // again under "older" would just be the same model twice.
+    function aliasCovers(id) {
+      const family = modelFamily(id);
+      if (!family) return false;
+      // A family with no alias of its own (Mythos, say) always has to be listed.
+      if (!MODELS.some((m) => modelFamily(m.id) === family)) return false;
+      const newest = state.pinned.find((m) => modelFamily(m.id) === family);
+      return !!newest && newest.id === id;
+    }
 
     // ---------- send ----------
     async function submit() {
@@ -1619,6 +1914,7 @@
         handleStderr('Could not send: ' + res.error);
         return;
       }
+      state.sent++;
       flushUndo();
       input.value = '';
       lastValue = '';
@@ -1657,7 +1953,11 @@
       chatId: state.chatId,
       focus() { input.focus(); },
       setName(name) { state.name = name; nameEl.textContent = name; },
-      setActive(on) { root.classList.toggle('active', !!on); },
+      setActive(on) {
+        root.classList.toggle('active', !!on);
+        if (on) catchUpScroll();
+      },
+      catchUpScroll,
       handleEvent,
       handleStderr,
       handleExit,
@@ -1665,6 +1965,12 @@
       addRangeAttachment,
       undo,
       getState,
+      setLimits(limits) { state.limits = limits; renderLimits(); },
+      setModels(models) {
+        state.pinned = Array.isArray(models) ? models : [];
+        // A pane restored onto a pinned id only learns its display name here.
+        refreshStats();
+      },
       // terminal drawer
       toggleTerminal() {
         setDrawer(!drawerOpen);

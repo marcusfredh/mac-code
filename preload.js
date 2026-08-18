@@ -36,8 +36,11 @@ contextBridge.exposeInMainWorld('fs', {
 
 contextBridge.exposeInMainWorld('claudeApi', {
   usage: (cwd) => ipcRenderer.invoke('claude:usage', cwd),
+  limits: (force) => ipcRenderer.invoke('claude:limits', { force: !!force }),
+  models: (force) => ipcRenderer.invoke('claude:models', { force: !!force }),
   handoff: (args) => ipcRenderer.invoke('claude:handoff', args),
-  defaultPermissionMode: () => ipcRenderer.invoke('claude:defaultPermissionMode')
+  defaultPermissionMode: () => ipcRenderer.invoke('claude:defaultPermissionMode'),
+  defaultModel: () => ipcRenderer.invoke('claude:defaultModel')
 });
 
 contextBridge.exposeInMainWorld('copilotApi', {

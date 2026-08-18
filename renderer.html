@@ -1161,6 +1161,44 @@
     .ctx-label { font-family: var(--mono); font-size: 11px; color: var(--fg-muted); }
     .ctx-meter.warn .ctx-label { color: var(--amber); }
     .ctx-meter.danger .ctx-label { color: var(--red); }
+    .lim-meter {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 28px;
+      padding: 0 9px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .lim-meter:hover { background: var(--fill-hover); }
+    .lim-item { display: flex; align-items: center; gap: 5px; }
+    .lim-k {
+      font-family: var(--mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--fg-faint);
+    }
+    .lim-bar {
+      width: 26px; height: 4px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.12);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .lim-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--fg-muted); width: 0; }
+    .lim-v { font-family: var(--mono); font-size: 11px; color: var(--fg-muted); }
+    .lim-item.warn .lim-bar > i { background: var(--amber); }
+    .lim-item.warn .lim-v, .lim-item.warn .lim-k { color: var(--amber); }
+    .lim-item.danger .lim-bar > i { background: var(--red); }
+    .lim-item.danger .lim-v, .lim-item.danger .lim-k { color: var(--red); }
+    .lim-item.danger .lim-v { font-weight: 600; }
+    .status-limits { font-family: var(--mono); }
+    .status-limits.warn { color: var(--amber); }
+    .status-limits.danger { color: var(--red); }
     .composer-hint { font-size: 11.5px; color: rgba(255, 255, 255, 0.38); }
     .send-btn {
       display: flex;
@@ -1641,6 +1679,8 @@
       <span id="status-tabs">1 tab</span>
       <span class="status-sep">&middot;</span>
       <span class="status-shell" id="status-shell">pwsh</span>
+      <span class="status-sep" id="status-limits-sep" style="display:none">&middot;</span>
+      <span class="status-limits" id="status-limits" title="Plan usage"></span>
     </div>
     <div class="statusbar-right" id="status-agents"></div>
   </div>

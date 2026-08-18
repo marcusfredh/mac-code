@@ -16,6 +16,16 @@ message stream, collapsible tool cards, inline diffs for edits, and an approval 
 for every tool call that needs permission.
 
 - Composer with image paste/drop, a `/` command palette, model picker, and a context meter
+- **Plan usage**: the 5-hour and weekly windows `/usage` prints in the CLI, in the
+  composer footer and the status bar, with reset times on hover. Read from the same
+  subscription endpoint the CLI uses, so it needs a Claude subscription login —
+  API-key, Bedrock and Vertex setups have no such window and the meter stays hidden.
+- **Model picker**: the four CLI aliases (always the newest of each family) plus the
+  older versions your account can use — Opus 4.8, Sonnet 4.6, … — listed from
+  `/v1/models` rather than hardcoded. A **1M context** toggle composes with any of them
+  (every family except Haiku), and passes the CLI's `[1m]` alias suffix.
+- Streaming text is revealed per animation frame, paced to how fast the CLI hands over
+  chunks, instead of a lump landing per delta
 - **Terminal drawer** (`Ctrl+\``): a real shell in the pane's folder, for the things a
   chat can't do — interactive prompts, watching a build, `claude mcp login`. Resizable,
   survives `exit` (the chat tab stays open and the next open starts a fresh shell), and
@@ -24,6 +34,7 @@ for every tool call that needs permission.
   details, remove, and add (HTTP/SSE/stdio, local/project/user scope)
 - Approve with **Allow once**, **Always allow &lt;command&gt;** (for the rest of the pane), or **Deny**
 - Switching model relaunches the CLI with `--resume`, so the conversation carries over
+  (skipped before the first message, when there is no transcript to resume yet)
 - Sessions can be saved to the library and resumed later as a chat pane or in a terminal
 
 #### Permission modes

@@ -33,6 +33,8 @@ const statusCwd       = document.getElementById('status-cwd');
 const statusTabs      = document.getElementById('status-tabs');
 const statusShell     = document.getElementById('status-shell');
 const statusAgentsEl  = document.getElementById('status-agents');
+const statusLimitsEl  = document.getElementById('status-limits');
+const statusLimitsSepEl = document.getElementById('status-limits-sep');
 const treeEl          = document.getElementById('tree');
 const treeRootEl      = document.getElementById('tree-root');
 const treeRootNameEl  = document.getElementById('tree-root-name');
@@ -927,6 +929,47 @@ function setDefaultPermissionMode(mode) {
   localStorage.setItem(PERM_DEFAULT_KEY, mode);
 }
 
+// Same idea for the model: a chat pane always passes --model, so settings.json has to
+// be read or a CLI configured for `opus[1m]` would quietly become a 200k pane here.
+const CHAT_MODEL_IDS = ['opus', 'sonnet', 'haiku', 'fable'];
+// Haiku is the one family the CLI has no 1M variant for.
+const ONE_M_MODEL_IDS = new Set(['opus', 'sonnet', 'fable']);
+let cliDefaultModel = 'opus';
+
+function normalizeChatModel(raw) {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim().toLowerCase();
+  if (!value) return null;
+  const oneM = /\[1m\]/.test(value);
+  const bare = value.replace(/\[1m\]/g, '');
+  // An exact model id is already what --model wants; don't collapse it to its alias,
+  // or a CLI pinned to `claude-opus-4-8` would silently jump to the newest Opus.
+  if (/^claude-/.test(bare)) return bare + (oneM ? '[1m]' : '');
+  let id = CHAT_MODEL_IDS.find((k) => bare === k);
+  // `opusplan` swaps models per mode, which a chat pane can't mirror — take the Opus half.
+  if (!id && bare === 'opusplan') id = 'opus';
+  if (!id) id = CHAT_MODEL_IDS.find((k) => bare.includes(k));
+  if (!id) return null;
+  return id + (oneM && ONE_M_MODEL_IDS.has(id) ? '[1m]' : '');
+}
+
+function defaultChatModel() {
+  return cliDefaultModel;
+}
+
+// Exact model ids the account may use, newest first — the source for the model menu's
+// "older versions" entries. Fetched once (cached in the main process) rather than
+// hardcoded, so a new release doesn't have to be shipped here to show up.
+let pinnedModels = [];
+
+async function refreshChatModels() {
+  try {
+    const res = await window.claudeApi.models();
+    if (res && Array.isArray(res.models) && res.models.length) pinnedModels = res.models;
+  } catch (_) {}
+  for (const [, view] of chatTabs) view.setModels(pinnedModels);
+}
+
 async function createChatTab(opts = {}) {
   const tabId = newTabId();
   const chatId = 'chat-' + (++chatSeq);
@@ -978,8 +1021,9 @@ async function createChatTab(opts = {}) {
     cwd: cwd || '',
     name,
     getHomeDir: () => homeDir,
-    model: opts.model || 'opus',
+    model: opts.model || defaultChatModel(),
     permissionMode,
+    pinnedModels: pinnedModels,
     helpers: { formatTokens, contextWindowFor, shortModelLabel },
     showMenu: (x, y, items) => showContextMenu(x, y, items),
     commands: chatPaletteCommands(tab),
@@ -993,18 +1037,23 @@ async function createChatTab(opts = {}) {
     onStateChange: () => { scheduleAgentRender(); updateStatusAgents(); },
     onSessionId: (id) => { tab.chatSessionId = id; scheduleSaveSession(); },
     onModelChange: (model) => restartChat(tab, model),
-    onRestart: () => restartChat(tab, view.model)
+    onRestart: () => restartChat(tab, view.model),
+    onRefreshLimits: (force) => refreshPlanLimits(force)
   });
   chatTabs.set(tabId, view);
   container.appendChild(view.el);
   view.setActive(true);
+  // Seed the pane from the last poll so a new tab isn't blank until the next tick.
+  if (planLimits) view.setLimits(planLimits);
+  refreshPlanLimits();
+  if (!pinnedModels.length) refreshChatModels();
 
   setActive(tabId);
   updateStatus();
 
   const res = await window.chatApi.start({
     chatId, cwd,
-    model: opts.model || 'opus',
+    model: opts.model || defaultChatModel(),
     permissionMode,
     resumeSessionId: opts.resumeSessionId || null
   });
@@ -1078,11 +1127,16 @@ function chatPaletteCommands(tab) {
 async function restartChat(tab, model) {
   const view = chatTabs.get(tab.tabId);
   if (!view) return;
-  const resumeSessionId = view.sessionId || tab.chatSessionId || null;
-  window.chatApi.stop(tab.chatId);
+  // Resuming a session that has no transcript yet (model switched before the first
+  // message) makes the CLI exit with "No conversation found".
+  const resumeSessionId = view.getState().canResume
+    ? (view.sessionId || tab.chatSessionId || null)
+    : null;
+  // `replace` lets the main process retire the old process itself, so its exit is not
+  // reported as this pane dying right after the new one came up.
   const res = await window.chatApi.start({
-    chatId: tab.chatId, cwd: tab.cwd || undefined,
-    model: model || 'opus', resumeSessionId,
+    chatId: tab.chatId, cwd: tab.cwd || undefined, replace: true,
+    model: model || defaultChatModel(), resumeSessionId,
     // Carry the pane's mode across, or the gate would silently drop back to asking
     // while the pill still showed the old mode.
     permissionMode: view.getState().permissionMode
@@ -1537,19 +1591,25 @@ function formatTokens(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1)+'k';
   return String(n);
 }
+// 1M shows up as the `[1m]` alias suffix (`opus[1m]`, `claude-sonnet-5[1m]`) or as the
+// `(1M context)` label the CLI prints. Matching a bare "1m" would also hit model ids
+// that merely contain those characters, so both forms are anchored.
 function contextWindowFor(model) {
   if (!model) return 200000;
-  const m = model.toLowerCase();
-  return (m.includes('1m') || m.includes('[1m]')) ? 1000000 : 200000;
+  return /\[1m\]|\b1m\b|\(1M context\)/i.test(model) ? 1000000 : 200000;
 }
 function shortModelLabel(model) {
   if (!model) return '';
-  if (/^(opus|sonnet|haiku|default)/i.test(model))
-    return model.replace(/\s*\((?:1M|200k)\s*context\)/i, '').trim();
-  const m = model.toLowerCase();
-  const x = m.match(/claude-(opus|sonnet|haiku)-(\d+)-(\d+)/);
-  if (x) return x[1].charAt(0).toUpperCase()+x[1].slice(1)+` ${x[2]}.${x[3]}`;
-  return model;
+  // The window size is shown next to this label, so the 1M marker is dropped here.
+  const bare = String(model).replace(/\[1m\]/gi, '');
+  if (/^(opus|sonnet|haiku|fable|default)/i.test(bare))
+    return bare.replace(/\s*\((?:1M|200k)\s*context\)/i, '').trim();
+  const x = bare.toLowerCase().match(/claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?/);
+  if (x) {
+    const family = x[1].charAt(0).toUpperCase() + x[1].slice(1);
+    return family + ' ' + (x[3] ? `${x[2]}.${x[3]}` : x[2]);
+  }
+  return bare;
 }
 
 function markAgentRunningFromCmd(pane, cmd) {
@@ -2108,11 +2168,88 @@ function checkAgentNotifications() {
   }
 }
 
+// ---------- plan limits (5-hour + weekly) ----------
+// One poll for the whole window: the main process caches, and every chat pane plus the
+// status bar reads the same answer. `null` means "nothing to show" — API-key auth, a
+// Bedrock/Vertex setup, or a first request that hasn't landed yet.
+let planLimits = null;
+let planLimitsAt = 0;
+
+async function refreshPlanLimits(force = false) {
+  const now = Date.now();
+  // A rate-limit event or a click can jump the queue, but not spam the endpoint.
+  if (now - planLimitsAt < (force ? 20000 : 55000)) return;
+  planLimitsAt = now;
+  let next = null;
+  try {
+    const res = await window.claudeApi.limits(force);
+    if (res && !res.unavailable && (res.session || res.weekly)) next = res;
+  } catch (_) {}
+  planLimits = next;
+  for (const [, view] of chatTabs) view.setLimits(planLimits);
+  updateStatusLimits();
+}
+
+function limitLevel(entry) {
+  if (!entry) return '';
+  if (entry.percent >= 90 || entry.severity === 'exhausted') return 'danger';
+  if (entry.percent >= 75 || entry.severity === 'warning') return 'warn';
+  return '';
+}
+
+function updateStatusLimits() {
+  if (!statusLimitsEl) return;
+  const lim = planLimits;
+  if (statusLimitsSepEl) statusLimitsSepEl.style.display = lim ? '' : 'none';
+  if (!lim) { statusLimitsEl.textContent = ''; statusLimitsEl.title = ''; return; }
+  const parts = [];
+  const tips = [];
+  const stamp = (entry) => {
+    if (!entry || !entry.resetsAt) return '';
+    const t = new Date(entry.resetsAt);
+    if (isNaN(t.getTime())) return '';
+    return ' · resets ' + t.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  };
+  if (lim.session) { parts.push(`5h ${lim.session.percent}%`); tips.push(`Session (5h): ${lim.session.percent}% used${stamp(lim.session)}`); }
+  if (lim.weekly) { parts.push(`wk ${lim.weekly.percent}%`); tips.push(`Week: ${lim.weekly.percent}% used${stamp(lim.weekly)}`); }
+  for (const s of lim.scoped || []) {
+    if (!s.percent) continue;
+    parts.push(`${s.key} ${s.percent}%`);
+    tips.push(`${s.label}: ${s.percent}% used${stamp(s)}`);
+  }
+  statusLimitsEl.textContent = parts.join(' · ');
+  statusLimitsEl.title = tips.join('\n');
+  const level = limitLevel(lim.session) === 'danger' || limitLevel(lim.weekly) === 'danger' ? 'danger'
+    : limitLevel(lim.session) === 'warn' || limitLevel(lim.weekly) === 'warn' ? 'warn'
+    : '';
+  statusLimitsEl.className = 'status-limits' + (level ? ' ' + level : '');
+}
+
+setInterval(() => { if (!document.hidden) refreshPlanLimits(); }, 60000);
+window.addEventListener('focus', () => refreshPlanLimits());
+refreshPlanLimits();
+
 setInterval(refreshClaudeUsage, 2000);
 setInterval(refreshCopilotUsage, 2000);
-setInterval(() => { if (getAllAgentPanes().length > 0) { renderAgentPanel(); checkAgentNotifications(); } }, 400);
+// Chat panes count too: their cards mirror pane state that changes between the
+// state-change callbacks (and a dropped animation frame would otherwise leave a card
+// showing the previous model's context window).
+setInterval(() => {
+  if (getAllAgentPanes().length > 0 || chatTabs.size > 0) { renderAgentPanel(); checkAgentNotifications(); }
+}, 400);
 renderAgentPanel();
 renderClaudeSessions();
+
+// A minimized or background window can also drop the pinning writes, and unlike a tab
+// switch nothing calls setActive when it comes back.
+function catchUpActiveChatScroll() {
+  const view = chatTabs.get(activeId);
+  if (view) view.catchUpScroll();
+}
+window.addEventListener('focus', catchUpActiveChatScroll);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) catchUpActiveChatScroll();
+});
 
 // ---------- chat pane event routing ----------
 function chatViewFor(chatId) {
@@ -2307,6 +2444,14 @@ window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSes
     const r = await window.claudeApi.defaultPermissionMode();
     if (r && PERM_MODE_IDS.has(r.mode)) cliPermissionDefault = r.mode;
   } catch (_) {}
+  // Same for the model, so a settings.json of `opus[1m]` gives a 1M pane, not a 200k one.
+  try {
+    const r = await window.claudeApi.defaultModel();
+    const id = normalizeChatModel(r && r.model);
+    if (id) cliDefaultModel = id;
+  } catch (_) {}
+  // Not awaited: the menu only needs it by the time it is opened.
+  refreshChatModels();
   try {
     const sess = await window.sessionApi.load();
     if (Array.isArray(sess?.claudeSessions)) {
@@ -2326,7 +2471,7 @@ window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSes
         else if (t.type === 'chat') {
           tab = await createChatTab({
             cwd: t.cwd || undefined,
-            model: t.chatModel || 'opus',
+            model: t.chatModel || defaultChatModel(),
             permissionMode: t.chatPermissionMode || undefined,
             resumeSessionId: t.chatSessionId || null,
             color: t.color || null

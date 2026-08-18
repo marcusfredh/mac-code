@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const pty = require('node-pty');
@@ -302,7 +303,9 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
       oneMFromCommand = /\(1M context\)|\[1m\]/i.test(selectedModelLabel);
     }
 
-    const oneMFromBeta = /context-1m/.test(content);
+    // Only a real beta list counts: a bare `context-1m` can show up in tool output
+    // (a grep of this very file, say) and would flip every pane to 1M.
+    const oneMFromBeta = /"betas"\s*:\s*\[[^\]]*context-1m/.test(content);
     const oneMFromModel = /\b1m\b|\[1m\]/i.test(model || '');
 
     let oneMFromSettings = false;
@@ -333,6 +336,165 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
   } catch (err) {
     return { error: err.code || err.message };
   }
+});
+
+// ----- IPC: plan limits (5-hour + weekly), the numbers `/usage` shows -----
+//
+// The CLI itself reads these off `anthropic-ratelimit-unified-*` response headers,
+// which only exist inside its own HTTP calls — nothing lands on disk. The same
+// subscription endpoint it uses for `/usage` is reachable with the OAuth token in
+// ~/.claude/.credentials.json, so that is what gets polled here. One cache for the
+// whole app: every chat pane and the status bar want the same two numbers.
+const LIMITS_TTL = 60000;
+let limitsCache = { at: 0, data: null };
+let limitsInflight = null;
+
+function readClaudeOauth() {
+  try {
+    const raw = fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8');
+    const oauth = JSON.parse(raw)?.claudeAiOauth;
+    return oauth && oauth.accessToken ? oauth : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// GET api.anthropic.com as the CLI's own OAuth session. Never throws: callers get
+// {raw} on success, or {unavailable} / {error} to fall back on.
+function anthropicGet(token, requestPath, extraHeaders) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      host: 'api.anthropic.com',
+      path: requestPath,
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'anthropic-beta': 'oauth-2025-04-20',
+        Accept: 'application/json',
+        ...(extraHeaders || {})
+      },
+      timeout: 8000
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          resolve({ unavailable: 'unauthorized' });
+        } else if (res.statusCode !== 200) {
+          resolve({ error: 'HTTP ' + res.statusCode });
+        } else {
+          try { resolve({ raw: JSON.parse(body) }); }
+          catch (_) { resolve({ error: 'unreadable response' }); }
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timed out')));
+    req.on('error', (err) => resolve({ error: err.message }));
+    req.end();
+  });
+}
+
+// The response carries both a per-window shape (five_hour/seven_day) and a newer
+// `limits` array. The array is what the CLI renders, so prefer it and keep the
+// older fields as the fallback.
+function normalizePlanLimits(raw, oauth) {
+  const pick = (entry) => {
+    if (!entry) return null;
+    const value = entry.percent != null ? entry.percent : entry.utilization;
+    if (value == null) return null;
+    return {
+      percent: Math.min(100, Math.max(0, Math.round(Number(value)))),
+      resetsAt: entry.resets_at || null,
+      severity: entry.severity || 'normal'
+    };
+  };
+  const arr = Array.isArray(raw.limits) ? raw.limits : [];
+  const scoped = [];
+  for (const entry of arr) {
+    if (entry.kind !== 'weekly_scoped') continue;
+    const parsed = pick(entry);
+    if (!parsed) continue;
+    const model = entry.scope?.model?.display_name || null;
+    scoped.push({
+      ...parsed,
+      label: model ? model + ' weekly' : 'Scoped weekly',
+      key: model ? model.toLowerCase() : 'scoped'
+    });
+  }
+  return {
+    session: pick(arr.find((l) => l.kind === 'session')) || pick(raw.five_hour),
+    weekly: pick(arr.find((l) => l.kind === 'weekly_all')) || pick(raw.seven_day),
+    scoped,
+    tier: oauth?.rateLimitTier || null,
+    plan: oauth?.subscriptionType || null,
+    fetchedAt: Date.now()
+  };
+}
+
+ipcMain.handle('claude:limits', async (_event, args = {}) => {
+  const now = Date.now();
+  if (!args.force && limitsCache.data && now - limitsCache.at < LIMITS_TTL) return limitsCache.data;
+  if (limitsInflight) return limitsInflight;
+
+  limitsInflight = (async () => {
+    const oauth = readClaudeOauth();
+    // API-key, Bedrock and Vertex users have no subscription window to report.
+    if (!oauth) return { unavailable: 'no-oauth' };
+    const res = await anthropicGet(oauth.accessToken, '/api/oauth/usage');
+    if (res.raw) {
+      const data = normalizePlanLimits(res.raw, oauth);
+      limitsCache = { at: Date.now(), data };
+      return data;
+    }
+    // A blip shouldn't blank the meter — keep serving the last good numbers.
+    if (limitsCache.data) {
+      return { ...limitsCache.data, stale: true, error: res.error || res.unavailable || null };
+    }
+    return res.unavailable ? { unavailable: res.unavailable } : { error: res.error || 'usage unavailable' };
+  })();
+
+  try { return await limitsInflight; }
+  finally { limitsInflight = null; }
+});
+
+// ----- IPC: selectable models -----
+//
+// The four names the chat pane offers by default are CLI aliases that always resolve
+// to the current model of each family. Pinning an older version means passing its
+// exact id, and which ids an account may use is not something to guess — /v1/models
+// answers it for this login, newest first, and keeps working when new models ship.
+const MODELS_TTL = 10 * 60 * 1000;
+let modelsCache = { at: 0, data: null };
+let modelsInflight = null;
+
+ipcMain.handle('claude:models', async (_event, args = {}) => {
+  const now = Date.now();
+  if (!args.force && modelsCache.data && now - modelsCache.at < MODELS_TTL) return modelsCache.data;
+  if (modelsInflight) return modelsInflight;
+
+  modelsInflight = (async () => {
+    const oauth = readClaudeOauth();
+    if (!oauth) return { unavailable: 'no-oauth' };
+    const res = await anthropicGet(oauth.accessToken, '/v1/models?limit=100', { 'anthropic-version': '2023-06-01' });
+    if (res.raw) {
+      const models = (Array.isArray(res.raw.data) ? res.raw.data : [])
+        .filter((m) => m && typeof m.id === 'string')
+        .map((m) => ({
+          id: m.id,
+          // "Claude Opus 4.8" reads as "Opus 4.8" next to the alias entries.
+          label: String(m.display_name || m.id).replace(/^Claude\s+/i, '')
+        }));
+      const data = { models, fetchedAt: Date.now() };
+      modelsCache = { at: Date.now(), data };
+      return data;
+    }
+    if (modelsCache.data) return { ...modelsCache.data, stale: true };
+    return res.unavailable ? { unavailable: res.unavailable } : { error: res.error || 'model list unavailable' };
+  })();
+
+  try { return await modelsInflight; }
+  finally { modelsInflight = null; }
 });
 
 // ============================================================================
@@ -540,6 +702,19 @@ ipcMain.handle('claude:defaultPermissionMode', async () => {
     return { mode: 'default', cliMode: mode || null };
   } catch (err) {
     return { mode: 'default', error: err.code || err.message };
+  }
+});
+
+// ----- IPC: the CLI's own default model -----
+// A chat pane always passes --model, which overrides settings.json. Without reading
+// it first, a user whose CLI runs `opus[1m]` would silently get a 200k pane here.
+ipcMain.handle('claude:defaultModel', async () => {
+  try {
+    const raw = await fs.promises.readFile(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8');
+    const model = JSON.parse(raw)?.model;
+    return { model: typeof model === 'string' && model.trim() ? model.trim() : null };
+  } catch (err) {
+    return { model: null, error: err.code || err.message };
   }
 });
 
@@ -1095,9 +1270,7 @@ function hookSettings() {
   };
 }
 
-function killChat(chatId) {
-  const chat = chats.get(chatId);
-  if (!chat) return;
+function releaseChatPerms(chat) {
   for (const permId of chat.pending) {
     const entry = pendingPerms.get(permId);
     if (entry) {
@@ -1106,6 +1279,15 @@ function killChat(chatId) {
     }
   }
   chat.pending.clear();
+}
+
+// `silent` is for a process being replaced on purpose (a model switch): its exit is
+// not news the pane should react to, and reporting it would mark a live pane dead.
+function killChat(chatId, opts = {}) {
+  const chat = chats.get(chatId);
+  if (!chat) return;
+  if (opts.silent) chat.silentExit = true;
+  releaseChatPerms(chat);
   chats.delete(chatId);
   try { chat.proc.stdin.end(); } catch (_) {}
   try { chat.proc.kill(); } catch (_) {}
@@ -1119,7 +1301,12 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
   const cwd = opts.cwd || defaultCwd();
   const chatId = opts.chatId;
   if (!chatId) return { error: 'no chatId' };
-  if (chats.has(chatId)) return { error: 'chat already running' };
+  if (chats.has(chatId)) {
+    // A model change relaunches the CLI for the same pane; anything else asking twice
+    // is a bug worth surfacing.
+    if (!opts.replace) return { error: 'chat already running' };
+    killChat(chatId, { silent: true });
+  }
 
   try { await startGateServer(); }
   catch (err) { return { error: 'permission gate failed to start: ' + err.message }; }
@@ -1189,16 +1376,21 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
   proc.stderr.setEncoding('utf8');
   proc.stderr.on('data', (text) => send('chat:stderr', { chatId, text }));
 
+  // A replaced process can exit after its successor is already registered, so the map
+  // is only cleaned up when the entry is still this process — otherwise the restart
+  // would tear down the pane it just brought up.
+  const finish = (payload) => {
+    if (!chat.silentExit) send('chat:exit', { chatId, ...payload });
+    if (chats.get(chatId) === chat) killChat(chatId);
+    else releaseChatPerms(chat);
+  };
+
   proc.on('error', (err) => {
-    send('chat:stderr', { chatId, text: 'spawn error: ' + err.message });
-    send('chat:exit', { chatId, code: -1 });
-    killChat(chatId);
+    if (!chat.silentExit) send('chat:stderr', { chatId, text: 'spawn error: ' + err.message });
+    finish({ code: -1 });
   });
 
-  proc.on('exit', (code) => {
-    send('chat:exit', { chatId, code, sessionId: chat.sessionId });
-    killChat(chatId);
-  });
+  proc.on('exit', (code) => finish({ code, sessionId: chat.sessionId }));
 
   return { ok: true, chatId, cwd, bin, pid: proc.pid };
 });
