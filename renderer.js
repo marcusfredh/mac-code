@@ -867,24 +867,14 @@ function ensureHybridBar(tab, pane) {
   // the ↶ button drives that same native stack.
   function doUndo() { input.focus(); document.execCommand('undo'); }
 
-  // Auto-grow the composer with its content, up to 160px — but once the user drags the
-  // textarea's own resize grip we stop fighting them and leave the height they chose.
-  let userResized = false;
-  let lastAutoH = 0;
+  // Auto-grow the composer with its content, from ~2 lines (min-height) up to 200px.
+  // The textarea's own resize grip is off (resize:none in CSS), so this is the only
+  // thing driving its height — no user-drag state to preserve.
   function autoGrow() {
-    if (userResized) return;
     input.style.height = 'auto';
-    const h = Math.min(160, Math.max(20, input.scrollHeight));
+    const h = Math.min(200, Math.max(46, input.scrollHeight));
     input.style.height = h + 'px';
-    lastAutoH = h;
   }
-  // A height change we did not produce (offsetHeight diverging from the last value
-  // autoGrow set) means the user dragged the grip — a width-only reflow leaves the
-  // explicit height untouched, so it won't trip this.
-  new ResizeObserver(() => {
-    if (userResized || !lastAutoH) return;
-    if (Math.abs(input.offsetHeight - lastAutoH) > 1) userResized = true;
-  }).observe(input);
 
   // ---------- command palette ----------
   let paletteItems = [];
@@ -1402,7 +1392,14 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   term.loadAddon(fit);
   const serialize = new SerializeAddon();
   term.loadAddon(serialize);
-  term.open(paneEl);
+  // The xterm lives in its own framed box; this pane's composer is appended to paneEl
+  // later as a sibling below it, so the composer sits under the terminal, not inside its
+  // frame. The mask stays a child of paneEl (its offset is measured live), so its
+  // geometry is unaffected by this wrapper.
+  const termWrap = document.createElement('div');
+  termWrap.className = 'pane-term';
+  paneEl.appendChild(termWrap);
+  term.open(termWrap);
   fit.fit();
 
   if (opts.initialContent) {

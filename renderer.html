@@ -451,19 +451,29 @@
       min-height: 40px;
       overflow: hidden;
       position: relative;
+      /* Transparent column: the terminal (.pane-term) and this pane's composer
+         (.hybrid-wrap) are each their own framed box, stacked with an 8px gap so the
+         composer reads as sitting under the terminal rather than inside its frame. */
+      display: flex;
+      flex-direction: column;
+    }
+    .pane-term {
+      flex: 1 1 0;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
       padding: 10px 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--bg);
-      /* Column so a per-pane Claude composer can sit below this pane's terminal. */
-      display: flex;
-      flex-direction: column;
     }
     .pane-container .xterm { flex: 1 1 0; min-height: 0; width: 100%; }
     .pane-container .xterm-viewport::-webkit-scrollbar { width: 10px; }
     .pane-container .xterm-viewport::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 5px; }
     .pane-container .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-    .pane-active { border-color: rgba(96, 205, 255, 0.28); }
+    .pane-active .pane-term { border-color: rgba(96, 205, 255, 0.28); }
 
     .pane-resizer { background: transparent; flex-shrink: 0; transition: background 0.12s; z-index: 2; }
     .resizer-h { width: 8px; cursor: ew-resize; }
@@ -537,9 +547,9 @@
     .hybrid-bar.dialog { border-color: rgba(215, 186, 125, 0.5); }
     .hybrid-input {
       flex: 1;
-      min-height: 20px;
-      max-height: 60vh;
-      resize: vertical;
+      min-height: 46px;
+      max-height: 200px;
+      resize: none;
       border: 0;
       outline: 0;
       background: transparent;
