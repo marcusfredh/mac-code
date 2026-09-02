@@ -5,7 +5,7 @@ const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 
 app.setName('Mac Code');
@@ -257,6 +257,87 @@ ipcMain.handle('fs:parent', (event, p) => {
   if (!p) return null;
   const parent = path.dirname(p);
   return parent === p ? null : parent;
+});
+
+// ----- IPC: git -----
+// Run git in `cwd`, never throw: resolve with { code, stdout, stderr }.
+function runGit(cwd, args) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
+        stdout: stdout || '',
+        stderr: (stderr || '') || (err ? err.message : '')
+      });
+    });
+  });
+}
+
+// Best guess at the repo's default branch (main/master). Prefer what origin/HEAD
+// points at; fall back to whichever of main/master exists on the remote, then locally.
+async function detectDefaultBranch(cwd) {
+  const head = await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  if (head.code === 0) {
+    const name = head.stdout.trim().replace(/^origin\//, '');
+    if (name) return name;
+  }
+  for (const cand of ['main', 'master']) {
+    const r = await runGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/' + cand]);
+    if (r.code === 0) return cand;
+  }
+  for (const cand of ['main', 'master']) {
+    const r = await runGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + cand]);
+    if (r.code === 0) return cand;
+  }
+  return null;
+}
+
+async function hasOriginRemote(cwd) {
+  const r = await runGit(cwd, ['remote']);
+  return r.stdout.split('\n').map((s) => s.trim()).includes('origin');
+}
+
+// List local branches + current branch for the repo containing `cwd`.
+ipcMain.handle('git:branches', async (event, cwd) => {
+  if (!cwd) return { isRepo: false };
+  const inside = await runGit(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (inside.code !== 0 || inside.stdout.trim() !== 'true') return { isRepo: false };
+  const cur  = await runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const list = await runGit(cwd, ['for-each-ref', '--format=%(refname:short)', '--sort=-committerdate', 'refs/heads']);
+  const current = cur.stdout.trim();
+  const detached = current === 'HEAD' || current === '';
+  const branches = list.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  const defaultBranch = await detectDefaultBranch(cwd);
+  const hasRemote = await hasOriginRemote(cwd);
+  return { isRepo: true, current: detached ? null : current, detached, branches, defaultBranch, hasRemote };
+});
+
+// Fetch the latest default branch (main/master) from origin and fast-forward the
+// local branch. If it is the checked-out branch, pull --ff-only; otherwise update
+// the local ref directly (fetch origin D:D) without changing the working tree.
+ipcMain.handle('git:updateMain', async (event, cwd) => {
+  if (!cwd) return { ok: false, error: 'no path' };
+  if (!(await hasOriginRemote(cwd))) return { ok: false, error: 'no "origin" remote' };
+  const branch = await detectDefaultBranch(cwd);
+  if (!branch) return { ok: false, error: 'no main/master branch found' };
+  const before = (await runGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).stdout.trim();
+  const cur = (await runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+  const res = cur === branch
+    ? await runGit(cwd, ['pull', '--ff-only', 'origin', branch])
+    : await runGit(cwd, ['fetch', 'origin', branch + ':' + branch]);
+  if (res.code !== 0) {
+    return { ok: false, branch, error: (res.stderr || res.stdout || 'fetch failed').trim() };
+  }
+  const after = (await runGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).stdout.trim();
+  return { ok: true, branch, updated: before !== after, message: (res.stdout + '\n' + res.stderr).trim() };
+});
+
+// Switch the repo at `cwd` to `branch`. Returns { ok } or { ok:false, error }.
+ipcMain.handle('git:switch', async (event, { cwd, branch } = {}) => {
+  if (!cwd || !branch) return { ok: false, error: 'missing cwd or branch' };
+  const res = await runGit(cwd, ['switch', branch]);
+  if (res.code !== 0) return { ok: false, error: (res.stderr || res.stdout || 'git switch failed').trim() };
+  return { ok: true };
 });
 
 // ----- IPC: Claude session usage -----

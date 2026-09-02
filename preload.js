@@ -87,6 +87,12 @@ contextBridge.exposeInMainWorld('mcpApi', {
   logout:     (args) => ipcRenderer.invoke('mcp:logout', args)
 });
 
+contextBridge.exposeInMainWorld('gitApi', {
+  branches:   (cwd)         => ipcRenderer.invoke('git:branches', cwd),
+  switch:     (cwd, branch) => ipcRenderer.invoke('git:switch', { cwd, branch }),
+  updateMain: (cwd)         => ipcRenderer.invoke('git:updateMain', cwd)
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

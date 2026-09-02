@@ -30,6 +30,8 @@ const newPaneId = () => 'pane-' + (++paneSeq);
 const tabsEl          = document.getElementById('tabs');
 const areaEl          = document.getElementById('terminal-area');
 const statusCwd       = document.getElementById('status-cwd');
+const statusBranch    = document.getElementById('status-branch');
+const statusBranchSep = document.getElementById('status-branch-sep');
 const statusTabs      = document.getElementById('status-tabs');
 const statusShell     = document.getElementById('status-shell');
 const statusAgentsEl  = document.getElementById('status-agents');
@@ -70,10 +72,18 @@ function editorSvg() {
 
 // Tab chrome: colour dot, then either an agent badge (chat panes) or a file/shell
 // glyph, then the title, then the close affordance.
+function gridSvg() {
+  return `<svg class="tab-icon" viewBox="0 0 16 16" fill="none">
+    <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/>
+    <rect x="9" y="1.5" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/>
+    <rect x="1.5" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/>
+    <rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/>
+  </svg>`;
+}
 function tabInnerHtml(kind, name) {
   const lead = kind === 'chat'
     ? '<span class="tab-badge">C</span>'
-    : kind === 'editor' ? editorSvg() : shellSvg();
+    : kind === 'editor' ? editorSvg() : kind === 'grid' ? gridSvg() : shellSvg();
   return `<span class="tab-dot"></span>${lead}` +
     `<span class="tab-title">${escapeHtml(name)}<span class="tab-dirty"></span></span>` +
     `<span class="tab-close" title="Close tab">${closeSvg()}</span>`;
@@ -133,16 +143,56 @@ function wireTabPointer(tabEl, tabId) {
     if (e.target.closest('.tab-close') || e.target.closest('.tab-rename-input')) return;
     if (e.button === 1) { closeTab(tabId); return; }
     if (e.button !== 0) return;
-    setActive(tabId);
-    tabDrag = { tabEl, startX: e.clientX, started: false };
+    const t = tabs.get(tabId);
+    // While a grid is active, a background chip is a candidate to drag INTO the grid, so
+    // don't switch away on press — that would hide the grid and kill the drop target.
+    // Activation is deferred to a plain click (pointerup with no drag) instead.
+    const activeGrid = (activeId && tabs.get(activeId)?.type === 'grid') ? tabs.get(activeId) : null;
+    const deferActivate = !!(activeGrid && t && t.type !== 'grid' && !t.gridOwner && tabId !== activeGrid.tabId);
+    if (!deferActivate) {
+      // A chip whose content lives in a grid: don't show it standalone (its container is
+      // inside a hidden grid) — surface the grid and focus its cell instead.
+      if (t && t.gridOwner && tabs.has(t.gridOwner)) {
+        setActive(t.gridOwner);
+        focusGridCell(tabs.get(t.gridOwner), tabId);
+      } else {
+        setActive(tabId);
+      }
+    }
+    tabDrag = { tabEl, tabId, startX: e.clientX, startY: e.clientY, started: false, deferActivate };
   });
+}
+// If a chip is being dragged over the active grid's stage, return that grid tab (so the
+// drop mounts the chip as a member instead of reordering the strip).
+function gridUnderPoint(x, y) {
+  const t = activeId ? tabs.get(activeId) : null;
+  if (!t || t.type !== 'grid') return null;
+  const r = t.stage.getBoundingClientRect();
+  return (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) ? t : null;
+}
+function clearGridDropHint() {
+  document.querySelectorAll('.grid-cell.drop-hot, .grid-empty.drop-hot')
+    .forEach((el) => el.classList.remove('drop-hot'));
 }
 document.addEventListener('pointermove', (e) => {
   if (!tabDrag) return;
   const { tabEl } = tabDrag;
   const dx = e.clientX - tabDrag.startX;
-  if (!tabDrag.started && Math.abs(dx) < 5) return;
+  if (!tabDrag.started && Math.abs(dx) < 5 && Math.abs(e.clientY - (tabDrag.startY ?? e.clientY)) < 5) return;
   if (!tabDrag.started) { tabDrag.started = true; tabEl.classList.add('dragging'); }
+
+  // Over the grid stage → offer a drop-into-grid instead of a strip reorder.
+  const dropTab = tabDrag.tabId ? gridUnderPoint(e.clientX, e.clientY) : null;
+  const dragged = tabDrag.tabId && tabs.get(tabDrag.tabId);
+  const canDrop = dropTab && dragged && dragged.type !== 'grid' && !dragged.gridOwner;
+  clearGridDropHint();
+  if (canDrop) {
+    tabEl.classList.add('dragging');
+    const cell = document.elementFromPoint(e.clientX, e.clientY)?.closest('.grid-cell, .grid-empty');
+    (cell || dropTab.stage.querySelector('.grid-empty'))?.classList.add('drop-hot');
+    return;
+  }
+
   for (const other of tabsEl.children) {
     if (other === tabEl) continue;
     const r = other.getBoundingClientRect();
@@ -154,21 +204,46 @@ document.addEventListener('pointermove', (e) => {
     }
   }
 });
-const _endTabDrag = () => {
+const _endTabDrag = (e) => {
   if (!tabDrag) return;
-  const { tabEl, started } = tabDrag;
+  const { tabEl, tabId, started, deferActivate } = tabDrag;
   tabDrag = null;
   tabEl.classList.remove('dragging');
-  if (started) reorderTabsMap();
+  clearGridDropHint();
+  if (!started) {
+    // A plain click on a background chip while a grid was active: switch to it now.
+    if (deferActivate && tabId) setActive(tabId);
+    return;
+  }
+  // Dropped onto a grid stage → mount as a member (non-destructive).
+  const dropTab = e && tabId ? gridUnderPoint(e.clientX, e.clientY) : null;
+  const dragged = tabId && tabs.get(tabId);
+  if (dropTab && dragged && dragged.type !== 'grid' && !dragged.gridOwner) {
+    addToGrid(dropTab, tabId);
+    return;
+  }
+  // A drag that didn't land on the grid just reorders the strip; if activation was
+  // deferred (grid still active), leave the grid active rather than switching.
+  reorderTabsMap();
 };
 document.addEventListener('pointerup', _endTabDrag);
 document.addEventListener('pointercancel', _endTabDrag);
 
 // ---------- tab helpers ----------
 function getActivePane(tab) { return tab.panes.get(tab.activePaneId); }
+// The tab the user is currently working in. For a grid tab that's the focused cell — a
+// real member tab — so Explorer, the status bar and file actions target the cell's own
+// content instead of the empty grid shell. Everything that answers "what am I looking
+// at?" reads this; bookkeeping (history, active-loop, session save) still uses activeId.
+function activeTab() {
+  const t = activeId ? tabs.get(activeId) : null;
+  if (t && t.type === 'grid') return (t.focusedMember && tabs.get(t.focusedMember)) || null;
+  return t;
+}
 function tabAutoName(tab) {
   if (tab.type === 'editor') return basename(tab.filePath || '') || 'Editor';
   if (tab.type === 'chat') return basename(tab.cwd || '') || 'claude';
+  if (tab.type === 'grid') return 'Grid';
   return basename(getActivePane(tab)?.cwd || '') || 'PowerShell';
 }
 // Titles carry a trailing dirty-dot span, so never assign textContent directly.
@@ -193,10 +268,11 @@ function tabCwd(tab) {
 
 function updateStatus() {
   statusTabs.textContent = `${tabs.size} tab${tabs.size === 1 ? '' : 's'}`;
-  const tab = activeId ? tabs.get(activeId) : null;
+  const tab = activeTab();
   const cwd = tabCwd(tab);
   statusCwd.textContent = cwd || '~';
   statusCwd.title = cwd || '';
+  refreshBranch(tab && tab.type !== 'editor' ? cwd : null);
   updateStatusAgents();
 }
 
@@ -1157,7 +1233,7 @@ if (hybridToggleEl) {
     hybridEnabled = !!hybridToggleEl.checked;
     localStorage.setItem(HYBRID_KEY, hybridEnabled ? '1' : '0');
     updateHybrid();
-    const tab = tabs.get(activeId);
+    const tab = activeTab();
     if (!tab) return;
     const pane = getActivePane(tab);
     if (pane && pane.hybridBar) pane.hybridBar.input.focus();
@@ -1193,6 +1269,16 @@ function setActivePane(tab, paneId) {
 
 function setActive(tabId) {
   if (!tabs.has(tabId)) return;
+  // A tab that lives inside a grid can't be shown on its own — its container is mounted
+  // in the grid's cell. Surface the grid and focus that cell instead (covers Ctrl+Tab,
+  // openInEditor, history restore, anything that targets a member directly).
+  const target = tabs.get(tabId);
+  if (target.gridOwner && tabs.has(target.gridOwner)) {
+    const g = tabs.get(target.gridOwner);
+    if (activeId !== g.tabId) setActive(g.tabId);
+    focusGridCell(g, tabId);
+    return;
+  }
   activeId = tabId;
   const idx = tabHistory.indexOf(tabId);
   if (idx !== -1) tabHistory.splice(idx, 1);
@@ -1203,9 +1289,12 @@ function setActive(tabId) {
     tab.container.classList.toggle('active', tid === tabId);
     for (const [, pane] of tab.panes) pane.suppressBusyUntil = suppressUntil;
   }
-  for (const [tid, view] of chatTabs) view.setActive(tid === tabId);
-  updateHybrid();
   const tab = tabs.get(tabId);
+  // A chat tab shown inside the active grid is still on-screen and must count as active,
+  // or its view would pause as if backgrounded.
+  const gridMemberIds = tab && tab.type === 'grid' ? new Set(tab.members) : null;
+  for (const [tid, view] of chatTabs) view.setActive(tid === tabId || !!(gridMemberIds && gridMemberIds.has(tid)));
+  updateHybrid();
   const pane = getActivePane(tab);
   if (pane) {
     requestAnimationFrame(() => {
@@ -1218,6 +1307,11 @@ function setActive(tabId) {
   } else if (tab.type === 'chat') {
     const view = chatTabs.get(tabId);
     if (view) requestAnimationFrame(() => view.focus());
+  } else if (tab.type === 'grid') {
+    requestAnimationFrame(() => {
+      for (const id of tab.members) refitMember(tabs.get(id));
+      focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
+    });
   }
   renderTree();
   updateStatus();
@@ -1290,6 +1384,258 @@ function hideContextMenu() { ctxMenuEl.classList.remove('show'); }
 document.addEventListener('mousedown', (e) => { if (!e.target.closest('.ctx-menu')) hideContextMenu(); });
 window.addEventListener('blur', hideContextMenu);
 window.addEventListener('resize', hideContextMenu);
+
+// ---------- git branch switcher (status bar) ----------
+let branchReqSeq = 0;       // guards against out-of-order async responses
+let branchShownCwd;         // cwd the pill currently reflects (undefined = never fetched)
+let branchInfo = null;      // last { isRepo, current, detached, branches } or null
+
+function renderBranchPill() {
+  statusBranch.classList.remove('error');
+  if (!branchInfo || !branchInfo.isRepo) {
+    statusBranch.style.display = 'none';
+    statusBranchSep.style.display = 'none';
+    return;
+  }
+  const label = branchInfo.detached ? 'detached' : (branchInfo.current || '?');
+  statusBranch.textContent = label;
+  statusBranch.title = 'Switch branch — on ' + label;
+  statusBranch.style.display = '';
+  statusBranchSep.style.display = '';
+}
+
+// Fetch branches for `cwd` and update the pill. Cheap no-op when cwd unchanged
+// (unless force), so it is safe to call from the frequently-run updateStatus().
+async function refreshBranch(cwd, force = false) {
+  if (!cwd || !window.gitApi) {
+    branchShownCwd = cwd || null; branchInfo = null; renderBranchPill();
+    return;
+  }
+  if (!force && cwd === branchShownCwd) { renderBranchPill(); return; }
+  const seq = ++branchReqSeq;
+  let info = null;
+  try { info = await window.gitApi.branches(cwd); } catch { info = null; }
+  if (seq !== branchReqSeq) return;           // a newer request superseded this one
+  branchShownCwd = cwd;
+  branchInfo = (info && info.isRepo) ? info : null;
+  renderBranchPill();
+}
+
+async function switchBranch(cwd, branch) {
+  let res = null;
+  try { res = await window.gitApi.switch(cwd, branch); } catch (e) { res = { ok: false, error: String(e) }; }
+  if (!res || !res.ok) {
+    statusBranch.classList.add('error');
+    statusBranch.textContent = 'switch failed';
+    statusBranch.title = (res && res.error) || 'git switch failed';
+    return;
+  }
+  refreshBranch(cwd, true);
+}
+
+statusBranch.addEventListener('click', async () => {
+  if (branchMenuEl && branchMenuEl.classList.contains('show')) { closeBranchMenu(); return; }
+  const tab = activeTab();
+  const cwd = tab && tab.type !== 'editor' ? tabCwd(tab) : null;
+  if (!cwd) return;
+  let info = null;
+  try { info = await window.gitApi.branches(cwd); } catch { info = null; }
+  branchShownCwd = cwd;
+  branchInfo = (info && info.isRepo) ? info : null;
+  renderBranchPill();
+  if (!branchInfo || !branchInfo.branches.length) return;
+  openBranchMenu(cwd, branchInfo, statusBranch.getBoundingClientRect());
+});
+
+// ---------- filterable branch picker popup ----------
+let branchMenuEl = null;
+let branchMenuState = null;   // { cwd, current, all[], filtered[], index }
+
+function ensureBranchMenu() {
+  if (branchMenuEl) return branchMenuEl;
+  const el = document.createElement('div');
+  el.className = 'branch-menu';
+  el.innerHTML =
+    '<input class="branch-search" type="text" placeholder="Search branches…" spellcheck="false" autocomplete="off">' +
+    '<div class="branch-action" style="display:none"></div>' +
+    '<div class="branch-list"></div>';
+  document.body.appendChild(el);
+  const input = el.querySelector('.branch-search');
+  input.addEventListener('input', () => filterBranchMenu(input.value));
+  input.addEventListener('keydown', onBranchMenuKey);
+  el.querySelector('.branch-action').addEventListener('click', () => runUpdateMain());
+  branchMenuEl = el;
+  return el;
+}
+
+function openBranchMenu(cwd, info, rect) {
+  const el = ensureBranchMenu();
+  branchMenuState = {
+    cwd, current: info.current, all: info.branches.slice(), filtered: info.branches.slice(),
+    index: 0, defaultBranch: info.defaultBranch || null, busy: false
+  };
+  const input = el.querySelector('.branch-search');
+  input.value = '';
+  // Pinned "fetch latest main/master" row — only when there is a remote to fetch from.
+  if (info.hasRemote && info.defaultBranch) {
+    setBranchAction(null, 'Fetch latest ' + info.defaultBranch);
+  } else {
+    el.querySelector('.branch-action').style.display = 'none';
+  }
+  renderBranchMenuList();
+  el.classList.add('show');
+  // Status bar sits at the bottom, so anchor the menu's bottom just above the pill.
+  const menuRect = el.getBoundingClientRect();
+  el.style.left = Math.max(6, Math.min(rect.left, window.innerWidth - menuRect.width - 6)) + 'px';
+  el.style.top = '';
+  el.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+  input.focus();
+}
+
+function closeBranchMenu() {
+  if (branchMenuEl) branchMenuEl.classList.remove('show');
+  branchMenuState = null;
+}
+
+function filterBranchMenu(q) {
+  if (!branchMenuState) return;
+  const f = (q || '').trim().toLowerCase();
+  branchMenuState.filtered = f
+    ? branchMenuState.all.filter((b) => b.toLowerCase().includes(f))
+    : branchMenuState.all.slice();
+  branchMenuState.index = 0;
+  renderBranchMenuList();
+}
+
+function renderBranchMenuList() {
+  if (!branchMenuEl || !branchMenuState) return;
+  const list = branchMenuEl.querySelector('.branch-list');
+  list.innerHTML = '';
+  const { filtered, current, index } = branchMenuState;
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'branch-empty';
+    empty.textContent = 'No matching branch';
+    list.appendChild(empty);
+    return;
+  }
+  filtered.forEach((b, i) => {
+    const item = document.createElement('div');
+    item.className = 'branch-item' + (i === index ? ' sel' : '') + (b === current ? ' current' : '');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = b;
+    item.appendChild(name);
+    if (b === current) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = 'current';
+      item.appendChild(tag);
+    }
+    item.addEventListener('mouseenter', () => { branchMenuState.index = i; markBranchSel(); });
+    item.addEventListener('mousedown', (e) => { e.preventDefault(); pickBranch(i); });
+    list.appendChild(item);
+  });
+  scrollBranchSelIntoView();
+}
+
+function markBranchSel() {
+  if (!branchMenuEl || !branchMenuState) return;
+  Array.from(branchMenuEl.querySelectorAll('.branch-item'))
+    .forEach((n, i) => n.classList.toggle('sel', i === branchMenuState.index));
+}
+
+function scrollBranchSelIntoView() {
+  if (!branchMenuEl || !branchMenuState) return;
+  const node = branchMenuEl.querySelectorAll('.branch-item')[branchMenuState.index];
+  if (node) node.scrollIntoView({ block: 'nearest' });
+}
+
+function onBranchMenuKey(e) {
+  if (!branchMenuState) return;
+  const n = branchMenuState.filtered.length;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (n) { branchMenuState.index = (branchMenuState.index + 1) % n; markBranchSel(); scrollBranchSelIntoView(); }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (n) { branchMenuState.index = (branchMenuState.index - 1 + n) % n; markBranchSel(); scrollBranchSelIntoView(); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    pickBranch(branchMenuState.index);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeBranchMenu();
+  }
+}
+
+function pickBranch(i) {
+  if (!branchMenuState) return;
+  const b = branchMenuState.filtered[i];
+  if (!b) return;
+  const { cwd, current } = branchMenuState;
+  closeBranchMenu();
+  if (b !== current) switchBranch(cwd, b);
+}
+
+// Render the pinned fetch row. kind: null | 'spin' | 'ok' | 'error'.
+function setBranchAction(kind, text) {
+  const row = branchMenuEl && branchMenuEl.querySelector('.branch-action');
+  if (!row) return;
+  row.className = 'branch-action' + (kind ? ' ' + kind : '');
+  row.title = text || '';
+  row.textContent = '';
+  const ic = document.createElement('span');
+  ic.className = 'ba-ic';
+  ic.textContent = kind === 'ok' ? '✓' : kind === 'error' ? '!' : '⟳';
+  const tx = document.createElement('span');
+  tx.className = 'ba-tx';
+  tx.textContent = text;
+  row.appendChild(ic);
+  row.appendChild(tx);
+  row.style.display = '';
+}
+
+async function runUpdateMain() {
+  if (!branchMenuState || branchMenuState.busy) return;
+  const { cwd, defaultBranch } = branchMenuState;
+  if (!defaultBranch) return;
+  branchMenuState.busy = true;
+  setBranchAction('spin', 'Fetching ' + defaultBranch + '…');
+  let res = null;
+  try { res = await window.gitApi.updateMain(cwd); } catch (e) { res = { ok: false, error: String(e) }; }
+  if (!branchMenuState) return;              // menu closed while fetching
+  branchMenuState.busy = false;
+  if (!res || !res.ok) {
+    setBranchAction('error', (res && res.error) ? firstLine(res.error) : 'fetch failed');
+    if (res && res.error) branchMenuEl.querySelector('.branch-action').title = res.error;
+    return;
+  }
+  const b = res.branch || defaultBranch;
+  setBranchAction('ok', res.updated ? ('Updated ' + b + ' to latest') : (b + ' already up to date'));
+  if (res.message) branchMenuEl.querySelector('.branch-action').title = res.message;
+  // Reflect any new commits in the pill and the open list's current marker.
+  refreshBranch(cwd, true);
+  try {
+    const info = await window.gitApi.branches(cwd);
+    if (branchMenuState && info && info.isRepo) {
+      branchMenuState.current = info.current;
+      branchMenuState.all = info.branches.slice();
+      filterBranchMenu(branchMenuEl.querySelector('.branch-search').value);
+    }
+  } catch { /* ignore */ }
+}
+
+function firstLine(s) {
+  return (s || '').split('\n').map((x) => x.trim()).filter(Boolean)[0] || '';
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (branchMenuEl && branchMenuEl.classList.contains('show') &&
+      !e.target.closest('.branch-menu') && !e.target.closest('.status-branch')) closeBranchMenu();
+});
+window.addEventListener('blur', closeBranchMenu);
+window.addEventListener('resize', closeBranchMenu);
 
 // ---------- pane resizer drag ----------
 function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
@@ -1490,6 +1836,39 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     term.focus();
   }, true);
 
+  // A logical line the terminal soft-wrapped spans several buffer rows: the first row
+  // is full width and each continuation row carries isWrapped=true. Link matching has
+  // to run over the JOINED text — otherwise a URL split across two rows only matches
+  // the fragment on whichever row the mouse is over. readWrappedBlock walks back to the
+  // row where the logical line starts, concatenates the full-width rows into one string,
+  // and hands back a coord() that maps a string offset to an xterm cell {x,y}. Rows are
+  // read untrimmed so every row contributes exactly `cols` chars and offset→cell is a
+  // straight division — a link range can therefore span rows (start.y !== end.y).
+  function readWrappedBlock(lineNum) {
+    const buf = term.buffer.active;
+    const cols = term.cols;
+    let start = lineNum - 1;
+    if (start < 0) return null;
+    while (start > 0) {
+      const cur = buf.getLine(start);
+      if (cur && cur.isWrapped) start--; else break;
+    }
+    const first = buf.getLine(start);
+    if (!first) return null;
+    let text = first.translateToString(false);
+    let idx = start;
+    while (true) {
+      const next = buf.getLine(idx + 1);
+      if (next && next.isWrapped) { text += next.translateToString(false); idx++; }
+      else break;
+    }
+    return {
+      text,
+      // offset is 0-based into text; xterm cells are 1-based, y is a 1-based line number.
+      coord(offset) { return { x: (offset % cols) + 1, y: start + Math.floor(offset / cols) + 1 }; }
+    };
+  }
+
   // File path links: left-click → external editor. The leading lookbehind keeps the
   // drive-letter alternative from matching a URL scheme's tail (the "s:/" in
   // "https://…"), which the URL provider below owns instead.
@@ -1497,16 +1876,15 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   let hoveredFilePath = null;
   term.registerLinkProvider({
     provideLinks(lineNum, callback) {
-      const line = term.buffer.active.getLine(lineNum - 1);
-      if (!line) { callback(undefined); return; }
-      const text = line.translateToString(true);
+      const block = readWrappedBlock(lineNum);
+      if (!block) { callback(undefined); return; }
       FILE_LINK_RE.lastIndex = 0;
       const links = [];
       let m;
-      while ((m = FILE_LINK_RE.exec(text)) !== null) {
+      while ((m = FILE_LINK_RE.exec(block.text)) !== null) {
         const fp = m[0];
         links.push({
-          range: { start: { x: m.index + 1, y: lineNum }, end: { x: m.index + fp.length, y: lineNum } },
+          range: { start: block.coord(m.index), end: block.coord(m.index + fp.length - 1) },
           text: fp,
           activate(_, linkText) { window.fileApi.openExternal(linkText); },
           hover(_, linkText) { hoveredFilePath = linkText; },
@@ -1523,13 +1901,12 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   const URL_TRIM = '.,;:!?\'")]}>';
   term.registerLinkProvider({
     provideLinks(lineNum, callback) {
-      const line = term.buffer.active.getLine(lineNum - 1);
-      if (!line) { callback(undefined); return; }
-      const text = line.translateToString(true);
+      const block = readWrappedBlock(lineNum);
+      if (!block) { callback(undefined); return; }
       URL_LINK_RE.lastIndex = 0;
       const links = [];
       let m;
-      while ((m = URL_LINK_RE.exec(text)) !== null) {
+      while ((m = URL_LINK_RE.exec(block.text)) !== null) {
         // Drop trailing punctuation that is almost always sentence, not URL.
         let url = m[0];
         let end = url.length;
@@ -1537,7 +1914,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
         url = url.slice(0, end);
         if (!url) continue;
         links.push({
-          range: { start: { x: m.index + 1, y: lineNum }, end: { x: m.index + url.length, y: lineNum } },
+          range: { start: block.coord(m.index), end: block.coord(m.index + url.length - 1) },
           text: url,
           activate(_, linkText) {
             const href = /^www\./i.test(linkText) ? 'https://' + linkText : linkText;
@@ -1808,6 +2185,244 @@ async function createTab(opts = {}) {
   return tab;
 }
 
+// ---------- Grid (dashboard) tab ----------
+// A grid tab is a non-destructive layout: it BORROWS other tabs' live .term-container
+// nodes into a CSS grid of cells, so several tabs are visible and running at once.
+// Nothing is duplicated — the container is a single live DOM node that is moved into a
+// cell and moved back to the stage when the cell is removed or the grid closed, so the
+// borrowed tab keeps its PTY, scrollback and composer exactly as before. The focused
+// cell is the "working tab" (see activeTab()), so Explorer/status follow it.
+function gridColsFor(n) {
+  if (n <= 1) return 1;
+  if (n <= 4) return 2;
+  if (n <= 9) return 3;
+  return 4;
+}
+
+function createGridTab() {
+  const tabId = newTabId();
+
+  const container = document.createElement('div');
+  container.className = 'term-container grid-container';
+  areaEl.appendChild(container);
+
+  const stage = document.createElement('div');
+  stage.className = 'grid-stage';
+  container.appendChild(stage);
+
+  const tabEl = document.createElement('div');
+  tabEl.className = 'tab';
+  tabEl.innerHTML = tabInnerHtml('grid', 'Grid');
+  tabsEl.appendChild(tabEl);
+  const titleEl = tabEl.querySelector('.tab-title');
+  const closeEl = tabEl.querySelector('.tab-close');
+
+  const tab = {
+    tabId, container, tabEl, titleEl, stage,
+    title: 'Grid', customTitle: null, color: null,
+    type: 'grid', members: [], focusedMember: null,
+    panes: new Map(), activePaneId: null,
+    expandedPaths: new Set(), selectedPath: null
+  };
+  tabs.set(tabId, tab);
+
+  wireTabPointer(tabEl, tabId);
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
+  tabEl.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('.tab-rename-input')) return;
+    e.preventDefault(); e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
+      { label: 'Add a tab…', action: () => pickTabForGrid(tab) },
+      { separator: true },
+      { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      { label: 'Close grid', action: () => closeTab(tabId) }
+    ]);
+  });
+
+  const autoColor = pickRandomUnusedColor();
+  if (autoColor) setTabColor(tab, autoColor);
+
+  setActive(tabId);
+  renderGrid(tab);
+  updateStatus();
+  return tab;
+}
+
+// Deal n cells into `cols` columns as evenly as possible, giving the leftover cells to
+// the earlier columns. e.g. (3,2) -> [2,1]: two cells stack in the left column, the lone
+// third fills the right column's full height. (5,3) -> [2,2,1].
+function gridColSizes(n, cols) {
+  const base = Math.floor(n / cols);
+  const extra = n % cols;
+  const sizes = [];
+  for (let i = 0; i < cols; i++) sizes.push(base + (i < extra ? 1 : 0));
+  return sizes;
+}
+
+function buildGridCell(tab, id) {
+  const m = tabs.get(id);
+  const cell = document.createElement('div');
+  cell.className = 'grid-cell' + (id === tab.focusedMember ? ' focused' : '');
+  cell.dataset.member = id;
+
+  const hdr = document.createElement('div');
+  hdr.className = 'grid-cell-hdr';
+  const dot = document.createElement('span');
+  dot.className = 'gc-dot';
+  if (m.color) dot.style.setProperty('--gc-color', m.color);
+  const title = document.createElement('span');
+  title.className = 'gc-title';
+  title.textContent = m.customTitle || tabAutoName(m);
+  const pop = document.createElement('span');
+  pop.className = 'gc-btn'; pop.title = 'Open as full tab (remove from grid)';
+  pop.innerHTML = '<svg viewBox="0 0 10 10"><path d="M3 1h6v6M9 1L4 6M4 3H1v6h6V6" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  pop.addEventListener('click', (e) => { e.stopPropagation(); removeFromGrid(tab, id, true); });
+  const rm = document.createElement('span');
+  rm.className = 'gc-btn'; rm.title = 'Remove from grid';
+  rm.innerHTML = closeSvg();
+  rm.addEventListener('click', (e) => { e.stopPropagation(); removeFromGrid(tab, id, false); });
+  hdr.append(dot, title, pop, rm);
+
+  cell.appendChild(hdr);
+  m.container.classList.add('in-grid');
+  cell.appendChild(m.container);
+  cell.addEventListener('mousedown', () => focusGridCell(tab, id));
+  return cell;
+}
+
+// Rebuild the cell chrome from tab.members, re-mounting each member's live container.
+// stage.innerHTML is cleared first, which only detaches the (still-live) containers; they
+// are appended straight back into their new cells below.
+function renderGrid(tab) {
+  const stage = tab.stage;
+  stage.innerHTML = '';
+  tab.members = tab.members.filter((id) => tabs.has(id));
+  const members = tab.members;
+  if (!members.includes(tab.focusedMember)) tab.focusedMember = members[0] || null;
+
+  if (!members.length) {
+    const empty = document.createElement('div');
+    empty.className = 'grid-empty grid-drop-zone';
+    empty.textContent = 'Drag active tabs here to build a grid — or click to pick one';
+    empty.addEventListener('click', () => pickTabForGrid(tab));
+    stage.appendChild(empty);
+    return;
+  }
+
+  const cols = Math.min(gridColsFor(members.length), members.length);
+  const sizes = gridColSizes(members.length, cols);
+  let idx = 0;
+  for (let c = 0; c < cols; c++) {
+    const col = document.createElement('div');
+    col.className = 'grid-col';
+    for (let r = 0; r < sizes[c] && idx < members.length; r++) {
+      col.appendChild(buildGridCell(tab, members[idx++]));
+    }
+    stage.appendChild(col);
+  }
+
+  requestAnimationFrame(() => { for (const id of members) refitMember(tabs.get(id)); });
+}
+
+// Bring a member's terminal/editor/chat back in step with the cell size it now occupies.
+function refitMember(m) {
+  if (!m) return;
+  if (m.type === 'editor') { try { m.editor?.layout(); } catch (_) {} return; }
+  for (const [, pane] of m.panes) {
+    try { pane.fit.fit(); window.term.resize(pane.ptyId, pane.term.cols, pane.term.rows); } catch (_) {}
+  }
+}
+function focusMemberSurface(m) {
+  if (!m) return;
+  if (m.type === 'editor') { try { m.editor?.focus(); } catch (_) {} return; }
+  if (m.type === 'chat') { const v = chatTabs.get(m.tabId); if (v) v.focus(); return; }
+  const p = getActivePane(m);
+  if (p) p.term.focus();
+}
+
+function focusGridCell(tab, id) {
+  if (tab.type !== 'grid' || !tabs.has(id)) return;
+  // Every mousedown inside a cell bubbles here; only do the (async, FS-touching) refocus
+  // work when the focused cell actually changes.
+  if (tab.focusedMember === id) return;
+  tab.focusedMember = id;
+  for (const cell of tab.stage.querySelectorAll('.grid-cell')) {
+    cell.classList.toggle('focused', cell.dataset.member === id);
+  }
+  renderTree();
+  updateStatus();
+  focusMemberSurface(tabs.get(id));
+}
+
+// Mount a tab into the grid. Non-destructive: only moves the live container node.
+function addToGrid(tab, memberId) {
+  if (!tab || tab.type !== 'grid') return;
+  const m = tabs.get(memberId);
+  if (!m || m.type === 'grid' || memberId === tab.tabId) return;
+  if (m.gridOwner) {                       // already gridded — focus it where it lives
+    const g = tabs.get(m.gridOwner);
+    if (g) { setActive(g.tabId); focusGridCell(g, memberId); }
+    return;
+  }
+  m.gridOwner = tab.tabId;
+  m.tabEl.classList.add('in-grid-chip');
+  tab.members.push(memberId);
+  tab.focusedMember = memberId;
+  // A chat member shown in the active grid counts as on-screen.
+  const v = chatTabs.get(memberId);
+  if (v && activeId === tab.tabId) v.setActive(true);
+  renderGrid(tab);
+  renderTree();
+  updateStatus();
+  scheduleSaveSession();
+}
+
+// Detach a member from the grid, returning its container to the stage exactly as before.
+// asFull=true also switches to it as a standalone tab.
+function removeFromGrid(tab, memberId, asFull) {
+  const idx = tab.members.indexOf(memberId);
+  if (idx !== -1) tab.members.splice(idx, 1);
+  const m = tabs.get(memberId);
+  if (m) {
+    delete m.gridOwner;
+    m.tabEl.classList.remove('in-grid-chip');
+    m.container.classList.remove('in-grid');
+    areaEl.appendChild(m.container);       // home — hidden until it (or the grid) is active
+    // Back in the pool and off-screen unless it's about to become the active tab.
+    const v = chatTabs.get(memberId);
+    if (v && !asFull) v.setActive(false);
+  }
+  renderGrid(tab);
+  if (asFull && m) {
+    setActive(memberId);
+  } else {
+    renderTree();
+    updateStatus();
+    scheduleSaveSession();
+  }
+}
+
+// Menu of tabs not yet in any grid, for click-to-add on the empty grid / context menu.
+function pickTabForGrid(tab) {
+  const items = [];
+  for (const [id, t] of tabs) {
+    if (t.type === 'grid' || t.gridOwner || id === tab.tabId) continue;
+    items.push({
+      label: t.customTitle || tabAutoName(t),
+      hint: t.type || 'terminal',
+      action: () => { setActive(tab.tabId); addToGrid(tab, id); }
+    });
+  }
+  if (!items.length) {
+    items.push({ label: 'No free tabs — open more first', disabled: true, action: () => {} });
+  }
+  const r = tab.stage.getBoundingClientRect();
+  showContextMenu(r.left + 24, r.top + 24, items);
+}
+
 // ---------- open in editor ----------
 function openInEditor(filePath) {
   for (const [id, tab] of tabs) {
@@ -1972,7 +2587,7 @@ async function refreshChatModels() {
 async function createChatTab(opts = {}) {
   const tabId = newTabId();
   const chatId = 'chat-' + (++chatSeq);
-  const cwd = opts.cwd || (activeId && tabCwd(tabs.get(activeId))) || undefined;
+  const cwd = opts.cwd || tabCwd(activeTab()) || undefined;
 
   const container = document.createElement('div');
   container.className = 'term-container';
@@ -2101,11 +2716,11 @@ function chatPaletteCommands(tab) {
   return [
     {
       cmd: '/split-right', desc: 'Split the active pane to the right', key: 'Ctrl+Shift+R',
-      run: () => { const t = tabs.get(activeId); if (t && t.panes.size) splitPane(t, t.activePaneId, 'h'); }
+      run: () => { const t = activeTab(); if (t && t.panes.size) splitPane(t, t.activePaneId, 'h'); }
     },
     {
       cmd: '/split-down', desc: 'Split the active pane downward', key: 'Ctrl+Shift+D',
-      run: () => { const t = tabs.get(activeId); if (t && t.panes.size) splitPane(t, t.activePaneId, 'v'); }
+      run: () => { const t = activeTab(); if (t && t.panes.size) splitPane(t, t.activePaneId, 'v'); }
     },
     {
       cmd: '/handoff', desc: 'Write a handoff brief and open Copilot here', key: '↗',
@@ -2166,6 +2781,36 @@ function closeTab(tabId) {
   const wasActive = activeId === tabId;
   const histIdx = tabHistory.indexOf(tabId);
   if (histIdx !== -1) tabHistory.splice(histIdx, 1);
+
+  // Closing a grid never touches its members — hand each live container back to the
+  // stage, then remove only the grid shell. The members live on exactly as before.
+  if (tab.type === 'grid') {
+    for (const id of [...tab.members]) {
+      const m = tabs.get(id);
+      if (!m) continue;
+      delete m.gridOwner;
+      m.tabEl.classList.remove('in-grid-chip');
+      m.container.classList.remove('in-grid');
+      areaEl.appendChild(m.container);
+    }
+    tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
+    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
+    updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
+  }
+
+  // A tab that is currently displayed inside a grid: drop its cell first so the grid
+  // reflows (its container is removed by the normal close paths below).
+  if (tab.gridOwner) {
+    const g = tabs.get(tab.gridOwner);
+    if (g && g.type === 'grid') {
+      const i = g.members.indexOf(tabId);
+      if (i !== -1) g.members.splice(i, 1);
+      tab.container.classList.remove('in-grid');
+      renderGrid(g);
+    }
+    delete tab.gridOwner;
+  }
+
   if (tab.type === 'chat') {
     const view = chatTabs.get(tabId);
     if (view) view.dispose();
@@ -2301,8 +2946,9 @@ function startRename(tab) {
 
 // ---------- Explorer tree ----------
 function cdToPath(targetPath) {
-  if (!activeId) return;
-  const pane = getActivePane(tabs.get(activeId));
+  const t = activeTab();
+  if (!t) return;
+  const pane = getActivePane(t);
   // A chat tab has no shell to cd; give it one at the target instead.
   if (!pane) { createTab({ cwd: targetPath }); return; }
   window.term.input(pane.ptyId, `cd '${String(targetPath).replace(/'/g, "''")}'; Clear-Host\r`);
@@ -2340,8 +2986,8 @@ function fileContextItems(fp, name) {
 }
 
 function activeChatView() {
-  if (!activeId) return null;
-  return chatTabs.get(activeId) || null;
+  const t = activeTab();
+  return t ? (chatTabs.get(t.tabId) || null) : null;
 }
 // Rows are indented with a --wt-indent custom property so the CSS indent guide can
 // be drawn at the right x without a wrapper element per level.
@@ -2359,12 +3005,12 @@ function isIgnoredName(name) {
 
 async function renderTree() {
   treeEl.innerHTML = '';
-  if (!activeId || !tabs.has(activeId)) {
+  const tab = activeTab();
+  if (!tab) {
     treeRootEl.style.display = 'none';
     treeEl.innerHTML = '<div class="wt-empty">No active tab</div>';
     return;
   }
-  const tab = tabs.get(activeId);
   const root = tab.type === 'editor' ? null : tabCwd(tab);
   if (!root) {
     treeRootEl.style.display = 'none';
@@ -2480,7 +3126,7 @@ function setAgentsCollapsed(collapsed) {
 document.getElementById('agents-collapse').addEventListener('click', () => setAgentsCollapsed(true));
 agentsHandleEl.addEventListener('click', () => setAgentsCollapsed(false));
 document.getElementById('agents-new').addEventListener('click', () => {
-  const cwd = activeId ? tabCwd(tabs.get(activeId)) : null;
+  const cwd = tabCwd(activeTab());
   createChatTab({ cwd: cwd || undefined });
 });
 
@@ -2538,8 +3184,8 @@ async function runClearOld(days) {
 
 document.getElementById('sb-refresh').addEventListener('click', () => { if (activeId) renderTree(); });
 document.getElementById('sb-up').addEventListener('click', async () => {
-  if (!activeId) return;
-  const tab = tabs.get(activeId);
+  const tab = activeTab();
+  if (!tab) return;
   const cwd = tabCwd(tab);
   if (!cwd) return;
   const parent = await window.fs.parent(cwd);
@@ -3267,7 +3913,8 @@ renderClaudeSessions();
 // A minimized or background window can also drop the pinning writes, and unlike a tab
 // switch nothing calls setActive when it comes back.
 function catchUpActiveChatScroll() {
-  const view = chatTabs.get(activeId);
+  const t = activeTab();
+  const view = t && chatTabs.get(t.tabId);
   if (view) view.catchUpScroll();
 }
 window.addEventListener('focus', catchUpActiveChatScroll);
@@ -3323,11 +3970,14 @@ document.getElementById('btn-min').addEventListener('click',   () => window.win.
 document.getElementById('btn-max').addEventListener('click',   () => window.win.maximize());
 document.getElementById('btn-close').addEventListener('click', () => window.win.close());
 
+const newGridBtn = document.getElementById('new-grid');
+if (newGridBtn) newGridBtn.addEventListener('click', () => createGridTab());
+
 const newTabBtn = document.getElementById('new-tab');
 newTabBtn.addEventListener('click', () => createTab());
 newTabBtn.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  const cwd = activeId ? tabCwd(tabs.get(activeId)) : null;
+  const cwd = tabCwd(activeTab());
   showContextMenu(e.clientX, e.clientY, [
     { label: 'New shell', shortcut: 'Ctrl+T', hint: 'terminal', action: () => createTab({ cwd: cwd || undefined }) },
     { separator: true },
@@ -3366,11 +4016,10 @@ syncTextFieldFocus();
 // accelerators and xterm's textarea. Apply chunk-level undo to the active pane.
 // (Only fires when no native-undo text field has focus — main skips it otherwise.)
 window.shortcuts?.onCtrlZ?.(() => {
-  if (!activeId) return;
-  const tab = tabs.get(activeId);
+  const tab = activeTab();
   if (!tab || tab.type === 'editor') return;
   if (tab.type === 'chat') {
-    const view = chatTabs.get(activeId);
+    const view = chatTabs.get(tab.tabId);
     if (!view) return;
     // Undo belongs to whichever input the user is actually in.
     if (view.terminalHasFocus() && tab.termPane) {
@@ -3412,10 +4061,10 @@ window.addEventListener('keydown', (e) => {
   // Ctrl+` toggles a chat pane's terminal drawer. Handled before the field guard so
   // it also works from inside the composer and from the drawer's own shell.
   if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === '`' || e.code === 'Backquote')) {
-    const t = activeId ? tabs.get(activeId) : null;
+    const t = activeTab();
     if (t && t.type === 'chat') {
       e.preventDefault();
-      const view = chatTabs.get(activeId);
+      const view = chatTabs.get(t.tabId);
       if (view) view.toggleTerminal();
       return;
     }
@@ -3428,7 +4077,7 @@ window.addEventListener('keydown', (e) => {
 
   if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l') {
     e.preventDefault();
-    const cwd = activeId ? tabCwd(tabs.get(activeId)) : null;
+    const cwd = tabCwd(activeTab());
     createChatTab({ cwd: cwd || undefined });
   } else if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 't') {
     e.preventDefault(); createTab();
@@ -3449,7 +4098,7 @@ window.addEventListener('keydown', (e) => {
     if (activeId) { const t = tabs.get(activeId); if (t) startRename(t); }
   } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'd') {
     e.preventDefault();
-    const t = activeId ? tabs.get(activeId) : null;
+    const t = activeTab();
     if (t && t.panes.size) splitPane(t, t.activePaneId, 'v');
   }
 });
@@ -3460,7 +4109,7 @@ window.addEventListener('keydown', (e) => {
 window.shortcuts?.onSplitH?.(() => {
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-  const t = activeId ? tabs.get(activeId) : null;
+  const t = activeTab();
   if (t && t.panes.size) splitPane(t, t.activePaneId, 'h');
 });
 
@@ -3472,6 +4121,9 @@ function saveSession() {
   let activeIndex = -1;
   let i = 0;
   for (const [id, t] of tabs) {
+    // Grids are a transient layout over other tabs; their members persist on their own,
+    // so the grid shell itself is not saved (v1).
+    if (t.type === 'grid') continue;
     const ap = (t.type === 'editor' || t.type === 'chat') ? null : getActivePane(t);
     let scrollback = null;
     if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: 5000 }); } catch (_) {} }
