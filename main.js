@@ -1619,10 +1619,28 @@ ipcMain.handle('session:ages', async (_event, entries = []) => {
 // ----- IPC: Session persistence -----
 function sessionFile() { return path.join(app.getPath('userData'), 'session.json'); }
 ipcMain.handle('session:load', async () => {
-  try { return JSON.parse(await fs.promises.readFile(sessionFile(), 'utf8')); }
-  catch (_) { return null; }
+  const f = sessionFile();
+  // Try the live file, then the last-good backup. A direct writeFile truncates the
+  // target to 0 before writing, so a quit mid-write leaves an empty/half file; the
+  // backup lets us recover instead of booting into a wiped session.
+  for (const p of [f, f + '.bak']) {
+    try {
+      const raw = await fs.promises.readFile(p, 'utf8');
+      if (raw.trim()) return JSON.parse(raw);
+    } catch (_) {}
+  }
+  return null;
 });
-ipcMain.on('session:save', async (_, data) => {
-  try { await fs.promises.writeFile(sessionFile(), JSON.stringify(data), 'utf8'); }
-  catch (_) {}
+ipcMain.on('session:save', (_, data) => {
+  // Atomic write: fill a temp file, keep the previous good copy as .bak, then rename
+  // over the target. rename() is atomic on the same volume, so a reader never sees a
+  // truncated file — it gets either the whole old or the whole new one. Sync so the
+  // write completes inside the handler before the app tears down on quit.
+  try {
+    const f = sessionFile();
+    const tmp = f + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    try { if (fs.existsSync(f)) fs.copyFileSync(f, f + '.bak'); } catch (_) {}
+    fs.renameSync(tmp, f);
+  } catch (_) {}
 });
