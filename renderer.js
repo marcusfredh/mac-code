@@ -4156,6 +4156,34 @@ function scheduleSaveSession() {
 }
 window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSession(); });
 
+// On app close, end every running Claude CLI first: Ctrl+C clears its input, a second
+// Ctrl+C exits, and the CLI prints its "claude --resume <id>" line. Waiting for the
+// shell prompt (OSC 9;9 flips claudeRunning off) means that line is in the scrollback
+// the final save serializes.
+window.shortcuts?.onBeforeClose?.(async () => {
+  const panes = getAllClaudePanes().map(x => x.pane);
+  if (panes.length) {
+    for (const p of panes) window.term.input(p.ptyId, '\x03');
+    await new Promise(r => setTimeout(r, 250));
+    for (const p of panes) if (p.claudeRunning) window.term.input(p.ptyId, '\x03');
+    // A busy pane spends its first Ctrl+C on the interrupt, so keep nudging stragglers.
+    const deadline = Date.now() + 5000;
+    let nextNudge = Date.now() + 1000;
+    while (panes.some(p => p.claudeRunning) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 100));
+      if (Date.now() >= nextNudge) {
+        nextNudge = Date.now() + 1000;
+        for (const p of panes) if (p.claudeRunning) window.term.input(p.ptyId, '\x03');
+      }
+    }
+    // Let xterm finish parsing the exit output before it is serialized.
+    await new Promise(r => setTimeout(r, 300));
+  }
+  clearTimeout(saveTimer);
+  saveSession();
+  window.shortcuts.closeReady();
+});
+
 // ---------- boot ----------
 (async () => {
   let restored = false;

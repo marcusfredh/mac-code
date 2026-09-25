@@ -144,6 +144,18 @@ function createWindow() {
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:state', 'maximized'));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:state', 'normal'));
 
+  // Closing first lets the renderer end running Claude CLI sessions, so their
+  // "claude --resume <id>" line lands in the saved scrollback. The renderer answers
+  // with app:close-ready; the timer is a fallback so a hung pane can't block quit.
+  mainWindow.on('close', (event) => {
+    if (closeReady) return;
+    event.preventDefault();
+    if (closeRequested) return;
+    closeRequested = true;
+    mainWindow.webContents.send('app:before-close');
+    setTimeout(finishClose, 8000);
+  });
+
   mainWindow.on('closed', () => {
     for (const [, p] of ptys) {
       try { p.kill(); } catch (_) {}
@@ -154,6 +166,15 @@ function createWindow() {
     mainWindow = null;
   });
 }
+
+let closeRequested = false;
+let closeReady = false;
+function finishClose() {
+  if (closeReady || !mainWindow || mainWindow.isDestroyed()) return;
+  closeReady = true;
+  mainWindow.close();
+}
+ipcMain.on('app:close-ready', finishClose);
 
 app.whenReady().then(() => {
   createWindow();
