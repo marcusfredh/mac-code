@@ -93,6 +93,36 @@ contextBridge.exposeInMainWorld('gitApi', {
   updateMain: (cwd)         => ipcRenderer.invoke('git:updateMain', cwd)
 });
 
+contextBridge.exposeInMainWorld('ghApi', {
+  status:      ()     => ipcRenderer.invoke('gh:status'),
+  repoForCwd:  (cwd)  => ipcRenderer.invoke('gh:repoForCwd', cwd),
+  myRepos:     ()     => ipcRenderer.invoke('gh:myRepos'),
+  prs:         (args) => ipcRenderer.invoke('gh:prs', args),
+  issues:      (args) => ipcRenderer.invoke('gh:issues', args),
+  runs:        (args) => ipcRenderer.invoke('gh:runs', args),
+  inbox:       (args) => ipcRenderer.invoke('gh:inbox', args),
+  item:        (args) => ipcRenderer.invoke('gh:item', args),
+  prForBranch: (cwd)  => ipcRenderer.invoke('gh:prForBranch', cwd),
+  openWindow:  (url)  => ipcRenderer.invoke('gh:openWindow', url),
+  worktree:    (args) => ipcRenderer.invoke('gh:worktree', args),
+  ownerType:   (o)    => ipcRenderer.invoke('gh:ownerType', o),
+  secretList:  (s)    => ipcRenderer.invoke('gh:secretList', s),
+  secretSet:   (args) => ipcRenderer.invoke('gh:secretSet', args),
+  secretDelete:(args) => ipcRenderer.invoke('gh:secretDelete', args),
+  varList:     (s)    => ipcRenderer.invoke('gh:varList', s),
+  varSet:      (args) => ipcRenderer.invoke('gh:varSet', args),
+  varDelete:   (args) => ipcRenderer.invoke('gh:varDelete', args),
+  envList:     (args) => ipcRenderer.invoke('gh:envList', args),
+  envSave:     (args) => ipcRenderer.invoke('gh:envSave', args),
+  envDelete:   (args) => ipcRenderer.invoke('gh:envDelete', args)
+});
+
+contextBridge.exposeInMainWorld('notesApi', {
+  load: ()     => ipcRenderer.invoke('notes:load'),
+  save: (data) => ipcRenderer.send('notes:save', data),
+  path: ()     => ipcRenderer.invoke('notes:path')
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

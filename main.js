@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 const { deriveFlow } = require('./flowState');
+const github = require('./github');
 
 app.setName('Mac Code');
 app.setAppUserModelId('Mac Code');
@@ -165,6 +166,7 @@ function createWindow() {
     killAllChats();
     stopGateServer();
     stopFlowWatcher();
+    github.closeGitHubWindow();
     mainWindow = null;
   });
 }
@@ -450,6 +452,9 @@ ipcMain.handle('git:switch', async (event, { cwd, branch } = {}) => {
   if (res.code !== 0) return { ok: false, error: (res.stderr || res.stdout || 'git switch failed').trim() };
   return { ok: true };
 });
+
+// ----- IPC: GitHub (via gh CLI) -----
+github.register(ipcMain, () => mainWindow);
 
 // ----- IPC: Claude session usage -----
 function encodeCwdForClaude(cwd) {
@@ -1305,6 +1310,12 @@ const AUTO_RISKY = [
   /\bsc\b\s/i, /\btaskkill\b/i, /stop-process/i, /\bkill\b/i,
   /\bnpm\s+(i|install|publish|link|unpublish)\b/i,
   /\bgit\s+(push|reset|clean|rebase|checkout|switch|restore|filter-branch)\b/i,
+  // gh: only reads ride on the allowlist. Anything that writes to GitHub asks.
+  /\bgh\s+api\b.*\s(-X|--method)[\s=]*(POST|PUT|PATCH|DELETE)\b/i,
+  /\bgh\s+api\b.*\s(-f|-F|--field|--raw-field|--input)\b/,
+  /\bgh\s+(pr|issue)\s+(merge|close|reopen|delete|edit|comment|create|review|ready|lock|transfer|pin|develop|checkout)\b/i,
+  /\bgh\s+repo\s+(delete|archive|rename|edit|create|fork|sync)\b/i,
+  /\bgh\s+run\s+(cancel|delete|rerun)\b/i,
   />\s*\S/, />>/,               // output redirection writes files
   /\biex\b/i, /invoke-expression/i, /\beval\b/i,
   /\|\s*(sh|bash|pwsh|powershell|cmd)\b/i
@@ -1750,11 +1761,33 @@ ipcMain.on('session:save', (_, data) => {
   // over the target. rename() is atomic on the same volume, so a reader never sees a
   // truncated file — it gets either the whole old or the whole new one. Sync so the
   // write completes inside the handler before the app tears down on quit.
+  atomicWriteJson(sessionFile(), data);
+});
+
+function atomicWriteJson(f, data) {
   try {
-    const f = sessionFile();
     const tmp = f + '.' + process.pid + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
     try { if (fs.existsSync(f)) fs.copyFileSync(f, f + '.bak'); } catch (_) {}
     fs.renameSync(tmp, f);
-  } catch (_) {}
-});
+    return true;
+  } catch (_) { return false; }
+}
+async function readJsonWithBackup(f) {
+  for (const p of [f, f + '.bak']) {
+    try {
+      const raw = await fs.promises.readFile(p, 'utf8');
+      if (raw.trim()) return JSON.parse(raw);
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ----- IPC: repo notes -----
+// Personal notes per repository (ideas, todo items, which stage a change has reached).
+// They live only in Mac Code's own data folder — never in the repo, so nothing here can
+// end up in a commit.
+function notesFile() { return path.join(app.getPath('userData'), 'repo-notes.json'); }
+ipcMain.handle('notes:load', () => readJsonWithBackup(notesFile()));
+ipcMain.on('notes:save', (_, data) => { atomicWriteJson(notesFile(), data); });
+ipcMain.handle('notes:path', () => notesFile());

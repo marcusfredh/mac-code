@@ -80,10 +80,15 @@ function gridSvg() {
     <rect x="9" y="9" width="5.5" height="5.5" rx="1" stroke="currentColor" stroke-width="1.1"/>
   </svg>`;
 }
+function githubSvg() {
+  return `<svg class="tab-icon" viewBox="0 0 16 16" fill="currentColor">
+    <path d="M8 1.2a6.8 6.8 0 0 0-2.15 13.25c.34.06.47-.15.47-.33v-1.17c-1.9.41-2.3-.92-2.3-.92-.31-.79-.76-1-.76-1-.62-.42.05-.41.05-.41.68.05 1.04.7 1.04.7.61 1.04 1.6.74 1.99.57.06-.44.24-.74.43-.91-1.51-.17-3.1-.76-3.1-3.36 0-.74.27-1.35.7-1.83-.07-.17-.3-.86.07-1.8 0 0 .57-.18 1.87.7a6.5 6.5 0 0 1 3.4 0c1.3-.88 1.87-.7 1.87-.7.37.94.14 1.63.07 1.8.44.48.7 1.09.7 1.83 0 2.61-1.6 3.19-3.11 3.36.24.21.46.62.46 1.25v1.85c0 .18.12.4.47.33A6.8 6.8 0 0 0 8 1.2z"/>
+  </svg>`;
+}
 function tabInnerHtml(kind, name) {
   const lead = kind === 'chat'
     ? '<span class="tab-badge">C</span>'
-    : kind === 'editor' ? editorSvg() : kind === 'grid' ? gridSvg() : shellSvg();
+    : kind === 'editor' ? editorSvg() : kind === 'grid' ? gridSvg() : kind === 'github' ? githubSvg() : shellSvg();
   return `<span class="tab-dot"></span>${lead}` +
     `<span class="tab-title">${escapeHtml(name)}<span class="tab-dirty"></span></span>` +
     // Flow dot: shown (in the flow's state colour) only while a flow is matched here.
@@ -246,6 +251,7 @@ function tabAutoName(tab) {
   if (tab.type === 'editor') return basename(tab.filePath || '') || 'Editor';
   if (tab.type === 'chat') return basename(tab.cwd || '') || 'claude';
   if (tab.type === 'grid') return 'Grid';
+  if (tab.type === 'github') return tab.view ? tab.view.title() : 'GitHub';
   return basename(getActivePane(tab)?.cwd || '') || 'PowerShell';
 }
 // Titles carry a trailing dirty-dot span, so never assign textContent directly.
@@ -265,6 +271,7 @@ function tabCwd(tab) {
   if (!tab) return null;
   if (tab.type === 'editor') return tab.filePath;
   if (tab.type === 'chat') return tab.cwd;
+  if (tab.type === 'github') return null;
   return getActivePane(tab)?.cwd || null;
 }
 
@@ -276,6 +283,7 @@ function updateStatus() {
   statusCwd.title = cwd || '';
   refreshBranch(tab && tab.type !== 'editor' ? cwd : null);
   updateStatusAgents();
+  refreshNotesContext();
 }
 
 // Right-hand status cluster: one dot per agent kind that is currently present.
@@ -1642,6 +1650,9 @@ function setActive(tabId) {
   // or its view would pause as if backgrounded.
   const gridMemberIds = tab && tab.type === 'grid' ? new Set(tab.members) : null;
   for (const [tid, view] of chatTabs) view.setActive(tid === tabId || !!(gridMemberIds && gridMemberIds.has(tid)));
+  for (const [tid, t] of tabs) {
+    if (t.type === 'github' && t.view) t.view.setActive(tid === tabId || !!(gridMemberIds && gridMemberIds.has(tid)));
+  }
   updateHybrid();
   const pane = getActivePane(tab);
   if (pane) {
@@ -1655,6 +1666,14 @@ function setActive(tabId) {
   } else if (tab.type === 'chat') {
     const view = chatTabs.get(tabId);
     if (view) requestAnimationFrame(() => view.focus());
+  } else if (tab.type === 'github' && tab.view) {
+    if (tab.pendingOpen) {
+      const target = tab.pendingOpen;
+      tab.pendingOpen = null;
+      tab.view.setHere(ghHere);
+      tab.view.open(target);
+    }
+    requestAnimationFrame(() => tab.view.focus());
   } else if (tab.type === 'grid') {
     requestAnimationFrame(() => {
       for (const id of tab.members) refitMember(tabs.get(id));
@@ -1756,10 +1775,10 @@ function renderBranchPill() {
 // (unless force), so it is safe to call from the frequently-run updateStatus().
 async function refreshBranch(cwd, force = false) {
   if (!cwd || !window.gitApi) {
-    branchShownCwd = cwd || null; branchInfo = null; renderBranchPill();
+    branchShownCwd = cwd || null; branchInfo = null; renderBranchPill(); renderPrPill(null);
     return;
   }
-  if (!force && cwd === branchShownCwd) { renderBranchPill(); return; }
+  if (!force && cwd === branchShownCwd) { renderBranchPill(); refreshPrPill(cwd); return; }
   const seq = ++branchReqSeq;
   let info = null;
   try { info = await window.gitApi.branches(cwd); } catch { info = null; }
@@ -1767,7 +1786,105 @@ async function refreshBranch(cwd, force = false) {
   branchShownCwd = cwd;
   branchInfo = (info && info.isRepo) ? info : null;
   renderBranchPill();
+  refreshPrPill(cwd, force);
+  refreshNotesContext();
+  if (branchInfo && branchInfo.hasRemote) {
+    ghContextFor(cwd).then((here) => {
+      if (!here || branchShownCwd !== cwd) return;
+      ghHere = here;
+      const g = findGitHubTab();
+      if (g && g.view) g.view.setHere(here);
+    });
+  }
 }
+
+// ---------- pull request for the current branch (status bar) ----------
+// "#42 ✓" next to the branch pill when the checked-out branch has a PR. Cached per
+// folder+branch for a minute and re-polled while visible, so checks turn green on
+// their own without hammering gh.
+const statusPr    = document.getElementById('status-pr');
+const statusPrSep = document.getElementById('status-pr-sep');
+const PR_CACHE_MS = 60 * 1000;
+const prCache = new Map();   // "cwd|branch" -> { at, data }
+let prReqSeq = 0;
+let prShown = null;
+
+function renderPrPill(pr) {
+  prShown = pr || null;
+  if (!statusPr) return;
+  if (!pr) { statusPr.style.display = 'none'; statusPrSep.style.display = 'none'; return; }
+  // Branch pushed-or-not with no PR yet: offer to create one.
+  if (pr.none) {
+    statusPr.className = 'status-pr none';
+    statusPr.textContent = '+ PR';
+    statusPr.title = 'No pull request for this branch — click to create one';
+    statusPr.style.display = '';
+    statusPrSep.style.display = '';
+    return;
+  }
+  const state = String(pr.state || '').toUpperCase();
+  const kind = state === 'MERGED' ? 'merged' : state === 'CLOSED' ? 'closed' : pr.isDraft ? 'draft' : 'open';
+  const checks = pr.checks || { state: 'none' };
+  const mark = { success: '✓', failure: '✗', pending: '●' }[checks.state] || '';
+  statusPr.className = 'status-pr ' + kind + (mark ? ' checks-' + checks.state : '');
+  statusPr.textContent = '';
+  const num = document.createElement('span');
+  num.className = 'status-pr-num';
+  num.textContent = 'PR #' + pr.number + (kind === 'merged' ? ' merged' : kind === 'closed' ? ' closed' : kind === 'draft' ? ' draft' : '');
+  statusPr.appendChild(num);
+  if (mark && kind !== 'merged' && kind !== 'closed') {
+    const m = document.createElement('span');
+    m.className = 'status-pr-checks';
+    m.textContent = mark;
+    statusPr.appendChild(m);
+  }
+  const checkText = checks.total ? `${checks.pass} passed, ${checks.fail} failed, ${checks.pending} pending` : 'no checks';
+  statusPr.title = `#${pr.number} ${pr.title}\n${checkText}\nClick to open · Ctrl+click: browser`;
+  statusPr.style.display = '';
+  statusPrSep.style.display = '';
+}
+
+async function refreshPrPill(cwd, force = false) {
+  const info = branchInfo;
+  if (!cwd || !info || info.detached || !info.hasRemote || !window.ghApi ||
+      !info.current || info.current === info.defaultBranch) {
+    prReqSeq++; renderPrPill(null); return;
+  }
+  const key = cwd + '|' + info.current;
+  const hit = prCache.get(key);
+  if (hit && !force && Date.now() - hit.at < PR_CACHE_MS) { renderPrPill(hit.data); return; }
+  renderPrPill(hit ? hit.data : null);
+  const seq = ++prReqSeq;
+  let r = null;
+  try { r = await window.ghApi.prForBranch(cwd); } catch (_) { r = null; }
+  const data = r && r.ok ? r.data : r && r.none ? { none: true, cwd } : null;
+  prCache.set(key, { at: Date.now(), data });
+  if (seq !== prReqSeq || branchShownCwd !== cwd) return;
+  renderPrPill(data);
+}
+
+if (statusPr) {
+  statusPr.addEventListener('click', (e) => {
+    const pr = prShown;
+    if (!pr) return;
+    if (pr.none) {
+      const r = statusPr.getBoundingClientRect();
+      const cwd = pr.cwd;
+      showContextMenu(r.left, r.top - 8 - 2 * 30, [
+        { badge: 'C', label: 'Create PR with Claude', hint: 'terminal', action: () => createTab({ cwd, runOnReady:
+          'claude "Create a pull request for the current branch. Compare it with the default branch (git log and git diff), ' +
+          'push the branch if it is not on origin yet, write a clear title and a body that explains what changed and why, then run gh pr create."' }) },
+        { label: 'Create PR on github.com', hint: 'gh --web', action: () => createTab({ cwd, runOnReady: 'gh pr create --web' }) }
+      ]);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || !pr.repo) window.fileApi.openExternal(pr.url);
+    else openGitHub({ repo: pr.repo, number: pr.number, view: 'prs' });
+  });
+}
+setInterval(() => {
+  if (!document.hidden && branchShownCwd) refreshPrPill(branchShownCwd);
+}, PR_CACHE_MS + 5000);
 
 async function switchBranch(cwd, branch) {
   let res = null;
@@ -2246,8 +2363,9 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     }
   });
 
-  // URL links: left-click → default browser, opening the WHOLE url (scheme, host,
-  // path, query and fragment) rather than just the origin.
+  // URL links: left-click → openLink (GitHub links stay in the app, the rest go to the
+  // default browser; Ctrl+click always goes to the browser), opening the WHOLE url
+  // (scheme, host, path, query and fragment) rather than just the origin.
   const URL_LINK_RE = /(?:https?:\/\/|www\.)[^\s]+/gi;
   const URL_TRIM = '.,;:!?\'")]}>';
   term.registerLinkProvider({
@@ -2267,10 +2385,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
         links.push({
           range: { start: block.coord(m.index), end: block.coord(m.index + url.length - 1) },
           text: url,
-          activate(_, linkText) {
-            const href = /^www\./i.test(linkText) ? 'https://' + linkText : linkText;
-            window.fileApi.openExternal(href);
-          }
+          activate(ev, linkText) { openLink(linkText, ev); }
         });
       }
       callback(links.length ? links : undefined);
@@ -2521,6 +2636,7 @@ async function createTab(opts = {}) {
     e.preventDefault(); e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, [
       { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
+      { label: 'Repo notes', shortcut: 'Ctrl+Shift+N', action: () => { setActive(tabId); openNotes(); } },
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
       { separator: true },
@@ -2699,6 +2815,7 @@ function focusMemberSurface(m) {
   if (!m) return;
   if (m.type === 'editor') { try { m.editor?.focus(); } catch (_) {} return; }
   if (m.type === 'chat') { const v = chatTabs.get(m.tabId); if (v) v.focus(); return; }
+  if (m.type === 'github') { if (m.view) m.view.focus(); return; }
   const p = getActivePane(m);
   if (p) p.term.focus();
 }
@@ -2732,7 +2849,7 @@ function addToGrid(tab, memberId) {
   tab.members.push(memberId);
   tab.focusedMember = memberId;
   // A chat member shown in the active grid counts as on-screen.
-  const v = chatTabs.get(memberId);
+  const v = chatTabs.get(memberId) || (m.type === 'github' ? m.view : null);
   if (v && activeId === tab.tabId) v.setActive(true);
   renderGrid(tab);
   renderTree();
@@ -2752,7 +2869,7 @@ function removeFromGrid(tab, memberId, asFull) {
     m.container.classList.remove('in-grid');
     areaEl.appendChild(m.container);       // home — hidden until it (or the grid) is active
     // Back in the pool and off-screen unless it's about to become the active tab.
-    const v = chatTabs.get(memberId);
+    const v = chatTabs.get(memberId) || (m.type === 'github' ? m.view : null);
     if (v && !asFull) v.setActive(false);
   }
   renderGrid(tab);
@@ -2879,6 +2996,270 @@ async function createEditorTab(filePath) {
   });
   return tab;
 }
+
+// ---------- repo notes ----------
+// A local notepad per repository (notesView.js), docked over the right edge of the
+// stage. It follows whatever tab you're in: same repo in any clone or worktree, same
+// notes. The status bar button shows how many items are still open.
+const statusNotes    = document.getElementById('status-notes');
+const statusNotesSep = document.getElementById('status-notes-sep');
+let notesCtx = null;
+let notesCtxSeq = 0;
+const notesPanel = window.repoNotes ? window.repoNotes.createNotesPanel({
+  onToggle: (on) => { if (statusNotes) statusNotes.classList.toggle('on', on); },
+  onClose: () => { const t = activeTab(); if (t) focusMemberSurface(t); }
+}) : null;
+if (notesPanel) areaEl.appendChild(notesPanel.el);
+
+function dirOf(p) {
+  const s = String(p || '');
+  const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+  return i > 0 ? s.slice(0, i) : null;
+}
+
+async function refreshNotesContext() {
+  if (!notesPanel) return;
+  const seq = ++notesCtxSeq;
+  const tab = activeTab();
+  let ctx = null;
+  if (tab && tab.type === 'github' && tab.view) {
+    const st = tab.view.getState();
+    const repo = st.repo || st.detailRepo;
+    if (repo) ctx = { key: 'gh:' + repo.toLowerCase(), name: repo, branch: null };
+  } else if (tab) {
+    const cwd = tab.type === 'editor' ? dirOf(tab.filePath) : tabCwd(tab);
+    if (cwd) {
+      const info = await repoInfoFor(cwd);
+      if (seq !== notesCtxSeq) return;
+      if (info && info.repo) ctx = { key: 'gh:' + info.repo.toLowerCase(), name: info.repo };
+      else if (info && info.mainRoot) ctx = { key: 'dir:' + info.mainRoot.toLowerCase(), name: basename(info.mainRoot) };
+      else ctx = { key: 'dir:' + cwd.toLowerCase(), name: basename(cwd) || cwd };
+      ctx.branch = branchInfo && branchShownCwd === cwd && !branchInfo.detached ? branchInfo.current : null;
+    }
+  }
+  if (seq !== notesCtxSeq) return;
+  notesCtx = ctx;
+  notesPanel.setContext(ctx);
+  renderNotesButton();
+}
+
+function renderNotesButton() {
+  if (!statusNotes) return;
+  if (!notesCtx) { statusNotes.style.display = 'none'; statusNotesSep.style.display = 'none'; return; }
+  const n = window.repoNotes.openCount(notesCtx.key);
+  statusNotes.textContent = '';
+  statusNotes.appendChild(document.createTextNode('Notes'));
+  if (n) {
+    const c = document.createElement('span');
+    c.className = 'status-notes-count';
+    c.textContent = String(n);
+    statusNotes.appendChild(c);
+  }
+  statusNotes.title = 'Notes for ' + notesCtx.name + (n ? ' — ' + n + ' open' : '') + ' (Ctrl+Shift+N)';
+  statusNotes.style.display = '';
+  statusNotesSep.style.display = '';
+}
+
+function openNotes() { if (notesPanel) { refreshNotesContext(); notesPanel.open(); } }
+function toggleNotes() { if (notesPanel) { if (!notesPanel.isOpen()) refreshNotesContext(); notesPanel.toggle(); } }
+
+if (statusNotes) statusNotes.addEventListener('click', toggleNotes);
+if (window.repoNotes) {
+  window.repoNotes.onChange(renderNotesButton);
+  window.repoNotes.ready.then(renderNotesButton);
+}
+
+// ---------- GitHub tab ----------
+// One GitHub dashboard tab per window (opening a link reuses it). The surface lives in
+// githubView.js; this side only owns the tab chrome, the link router and the repo the
+// user is "in" (the GitHub repo behind the last non-GitHub tab's folder).
+let ghHere = null;                 // { repo, root } | null
+const ghContextCache = new Map();  // cwd -> Promise<{ repo, root }>
+
+// Everything git knows about a folder: { repo (GitHub owner/name or null), root, mainRoot }.
+function repoInfoFor(cwd) {
+  if (!cwd || !window.ghApi) return Promise.resolve(null);
+  if (!ghContextCache.has(cwd)) {
+    ghContextCache.set(cwd, window.ghApi.repoForCwd(cwd).then((r) => {
+      if (r && r.repo) rememberClone(r.repo, r.root);
+      return r || null;
+    }).catch(() => null));
+  }
+  return ghContextCache.get(cwd);
+}
+// Same, but only for folders whose origin is on GitHub.
+function ghContextFor(cwd) {
+  return repoInfoFor(cwd).then((r) => (r && r.repo ? r : null));
+}
+
+// Local clones seen so far (repo -> folder), so "Fix with Claude" on any repo you've
+// had a terminal in knows where to put the worktree. Worktree folders are remembered
+// too; git resolves the main clone from any of them.
+const GH_CLONES_KEY = 'ghClones';
+function readClones() {
+  try { return JSON.parse(localStorage.getItem(GH_CLONES_KEY)) || {}; } catch (_) { return {}; }
+}
+function rememberClone(repo, root) {
+  if (!repo || !root) return;
+  const all = readClones();
+  const key = repo.toLowerCase();
+  // Prefer a main clone over a worktree path once we've seen one.
+  if (all[key] && !/[\\/]worktrees[\\/]/i.test(all[key]) && /[\\/]worktrees[\\/]/i.test(root)) return;
+  if (all[key] === root) return;
+  all[key] = root;
+  try { localStorage.setItem(GH_CLONES_KEY, JSON.stringify(all)); } catch (_) {}
+}
+function ghKnownClone(repo) { return repo ? readClones()[repo.toLowerCase()] || null : null; }
+
+function branchSlug(title) {
+  return String(title || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'work';
+}
+
+// Fix an issue / review or check out a PR in its own worktree, then open a terminal
+// there. The Claude prompt only carries the (validated) repo and number — Claude reads
+// the issue/PR itself with gh — so no issue text is ever pasted into a shell line.
+async function startGitHubWork({ action, repo, number, title, root }) {
+  const n = Number(number);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '') || !Number.isInteger(n) || n <= 0) {
+    return { ok: false, error: 'bad item' };
+  }
+  const branch = action === 'fix' ? `issue/${n}-${branchSlug(title)}` : `pr-${n}`;
+  const res = await window.ghApi.worktree({ root, branch, detach: action !== 'fix' });
+  if (!res || !res.ok) return res || { ok: false, error: 'worktree failed' };
+  rememberClone(repo, root);
+  let cmd;
+  if (action === 'fix') {
+    cmd = `claude "Fix GitHub issue ${repo}#${n}. Read it first with: gh issue view ${n} --repo ${repo} --comments. ` +
+      `Work on the current branch, keep the change focused, run the project's checks, and commit when done. Do not push."`;
+  } else if (action === 'review') {
+    cmd = `gh pr checkout ${n} --repo ${repo} --detach; claude "Review pull request ${repo}#${n}, checked out here. ` +
+      `Read it with: gh pr view ${n} --repo ${repo} --comments and gh pr diff ${n} --repo ${repo}. ` +
+      `Report bugs, risks and suggestions with file:line references. Do not push or comment on GitHub."`;
+  } else {
+    cmd = `gh pr checkout ${n} --repo ${repo}`;
+  }
+  const tab = await createTab({ cwd: res.path, runOnReady: cmd });
+  if (tab) {
+    tab.customTitle = (action === 'fix' ? 'Fix #' : action === 'review' ? 'Review #' : 'PR #') + n;
+    setTabTitle(tab, tab.customTitle);
+    scheduleSaveSession();
+  }
+  return { ok: true, path: res.path };
+}
+
+function findGitHubTab() {
+  for (const [, t] of tabs) if (t.type === 'github') return t;
+  return null;
+}
+
+async function openGitHub(target = {}) {
+  let tab = findGitHubTab();
+  if (!tab) tab = createGitHubTab();
+  const fromCwd = tabCwd(activeTab());
+  setActive(tab.tabId);
+  if (fromCwd) ghHere = (await ghContextFor(fromCwd)) || ghHere;
+  if (!tabs.has(tab.tabId)) return tab;
+  tab.view.setHere(ghHere);
+  tab.view.open(target);
+  return tab;
+}
+
+function createGitHubTab() {
+  const tabId = newTabId();
+  const container = document.createElement('div');
+  container.className = 'term-container';
+  areaEl.appendChild(container);
+
+  const tabEl = document.createElement('div');
+  tabEl.className = 'tab';
+  tabEl.innerHTML = tabInnerHtml('github', 'GitHub');
+  tabsEl.appendChild(tabEl);
+  const titleEl = tabEl.querySelector('.tab-title');
+  const closeEl = tabEl.querySelector('.tab-close');
+
+  const tab = {
+    tabId, container, tabEl, titleEl,
+    title: 'GitHub', customTitle: null, color: null,
+    panes: new Map(), activePaneId: null,
+    expandedPaths: new Set(), selectedPath: null,
+    type: 'github', view: null
+  };
+  tabs.set(tabId, tab);
+
+  tab.view = window.createGitHubView({
+    openLink,
+    getClone: (repo) => ghKnownClone(repo),
+    onWork: startGitHubWork,
+    onStateChange: () => {
+      if (!tab.customTitle) setTabTitle(tab, tabAutoName(tab));
+      refreshNotesContext();
+      scheduleSaveSession();
+    }
+  });
+  container.appendChild(tab.view.el);
+
+  wireTabPointer(tabEl, tabId);
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
+  tabEl.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('.tab-rename-input')) return;
+    e.preventDefault(); e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
+      { separator: true },
+      { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      { label: 'Close tab', action: () => closeTab(tabId) }
+    ]);
+  });
+  const autoColor = pickRandomUnusedColor();
+  if (autoColor) setTabColor(tab, autoColor);
+  updateStatus();
+  return tab;
+}
+
+// github.com paths that are site pages, not owner/repo.
+const GH_RESERVED = new Set(['settings', 'orgs', 'organizations', 'notifications', 'login', 'logout', 'sessions',
+  'features', 'marketplace', 'sponsors', 'apps', 'users', 'topics', 'explore', 'search', 'pulls', 'issues',
+  'new', 'enterprise', 'enterprises', 'about', 'pricing', 'codespaces', 'dashboard', 'account', 'collections',
+  'trending', 'security', 'site', 'readme', 'team', 'join', 'contact', 'copilot', 'models', 'stars', 'watching']);
+
+// Classify a URL: null = not github.com; { kind:'item'|'repo'|'web', ... } otherwise.
+function parseGitHubUrl(href) {
+  let u;
+  try { u = new URL(href); } catch (_) { return null; }
+  if (!/^https?:$/.test(u.protocol) || !/^(www\.)?github\.com$/i.test(u.hostname)) return null;
+  const parts = u.pathname.split('/').filter(Boolean);
+  if (parts.length < 2 || GH_RESERVED.has(parts[0].toLowerCase())) return { kind: 'web' };
+  const repo = parts[0] + '/' + parts[1].replace(/\.git$/i, '');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return { kind: 'web' };
+  if (parts.length === 2) return { kind: 'repo', repo };
+  if ((parts[2] === 'pull' || parts[2] === 'issues') && /^\d+$/.test(parts[3] || '')) {
+    return { kind: 'item', repo, number: Number(parts[3]), view: parts[2] === 'pull' ? 'prs' : 'issues' };
+  }
+  if (parts.length === 3) {
+    const view = { pulls: 'prs', issues: 'issues', actions: 'actions' }[parts[2]];
+    if (view) return { kind: 'repo', repo, view };
+  }
+  return { kind: 'web' };
+}
+
+// Every link click in the app lands here. GitHub PRs/issues/repos open in the GitHub
+// tab, other github.com pages in the built-in GitHub window, everything else (and any
+// Ctrl+click) in the default browser.
+function openLink(href, ev) {
+  if (!href) return;
+  const url = /^www\./i.test(href) ? 'https://' + href : String(href);
+  const forceExternal = !!(ev && (ev.ctrlKey || ev.metaKey));
+  const gh = !forceExternal && window.ghApi && window.githubLinksInApp && window.githubLinksInApp()
+    ? parseGitHubUrl(url) : null;
+  if (!gh) { window.fileApi.openExternal(url); return; }
+  if (gh.kind === 'item') openGitHub({ repo: gh.repo, number: gh.number, view: gh.view });
+  else if (gh.kind === 'repo') openGitHub({ repo: gh.repo, view: gh.view || 'prs' });
+  else window.ghApi.openWindow(url);
+}
+window.macOpenLink = openLink;
 
 // ---------- create Claude chat tab ----------
 let chatSeq = 0;
@@ -3192,8 +3573,9 @@ function closeTab(tabId) {
     if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
-  if (tab.type === 'editor') {
+  if (tab.type === 'editor' || tab.type === 'github') {
     try { tab.editor?.dispose(); } catch (_) {}
+    try { tab.view?.dispose(); } catch (_) {}
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
     if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
@@ -3383,6 +3765,11 @@ async function renderTree() {
     return;
   }
   const root = tab.type === 'editor' ? null : tabCwd(tab);
+  if (!root && tab.type === 'github') {
+    treeRootEl.style.display = 'none';
+    treeEl.innerHTML = '<div class="wt-empty">No folder — GitHub tab</div>';
+    return;
+  }
   if (!root) {
     treeRootEl.style.display = 'none';
     treeEl.innerHTML = '<div class="wt-empty">Loading…</div>';
@@ -4374,6 +4761,8 @@ document.getElementById('btn-close').addEventListener('click', () => window.win.
 
 const newGridBtn = document.getElementById('new-grid');
 if (newGridBtn) newGridBtn.addEventListener('click', () => createGridTab());
+const openGhBtn = document.getElementById('open-github');
+if (openGhBtn) openGhBtn.addEventListener('click', () => openGitHub());
 
 const newTabBtn = document.getElementById('new-tab');
 newTabBtn.addEventListener('click', () => createTab());
@@ -4385,7 +4774,9 @@ newTabBtn.addEventListener('contextmenu', (e) => {
     { separator: true },
     { badge: 'C',  label: 'New Claude chat',   hint: 'chat',     action: () => createChatTab({ cwd: cwd || undefined }) },
     { badge: 'C',  label: 'Claude in terminal', hint: 'terminal', action: () => createTab({ cwd: cwd || undefined, runOnReady: 'claude' }) },
-    { badge: 'GH', label: 'Copilot in terminal', hint: 'terminal', action: () => createTab({ cwd: cwd || undefined, runOnReady: 'gh copilot' }) }
+    { badge: 'GH', label: 'Copilot in terminal', hint: 'terminal', action: () => createTab({ cwd: cwd || undefined, runOnReady: 'gh copilot' }) },
+    { separator: true },
+    { label: 'GitHub', shortcut: 'Ctrl+Shift+G', hint: 'PRs, issues', action: () => openGitHub() }
   ]);
 });
 
@@ -4457,6 +4848,18 @@ window.addEventListener('keydown', (e) => {
     e.stopPropagation();
     cycleTab(e.shiftKey ? -1 : 1);
   }
+  // Ctrl+Shift+N toggles the repo notes for the tab you're in, from anywhere.
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.code === 'KeyN') {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleNotes();
+  }
+  // Ctrl+Shift+G opens the GitHub tab from anywhere, terminals and composers included.
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.code === 'KeyG') {
+    e.preventDefault();
+    e.stopPropagation();
+    openGitHub();
+  }
 }, true);
 
 window.addEventListener('keydown', (e) => {
@@ -4526,6 +4929,14 @@ function saveSession() {
     // Grids are a transient layout over other tabs; their members persist on their own,
     // so the grid shell itself is not saved (v1).
     if (t.type === 'grid') continue;
+    if (t.type === 'github') {
+      // Never shown since restore: the view hasn't booted, so keep what was saved.
+      tabsData.push({ type: 'github', github: t.pendingOpen ? (t.savedState || null) : t.view ? t.view.getState() : null,
+        customTitle: t.customTitle || null, color: t.color || null });
+      if (id === activeId) activeIndex = i;
+      i++;
+      continue;
+    }
     const ap = (t.type === 'editor' || t.type === 'chat') ? null : getActivePane(t);
     let scrollback = null;
     if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: 5000 }); } catch (_) {} }
@@ -4619,6 +5030,16 @@ window.shortcuts?.onBeforeClose?.(async () => {
       for (const t of sess.tabs) {
         let tab;
         if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath);
+        else if (t.type === 'github') {
+          if (findGitHubTab()) continue;
+          const g = t.github || {};
+          tab = createGitHubTab();
+          // Opened lazily: the dashboard only boots (and calls gh) when first shown.
+          tab.pendingOpen = g.inbox ? { inbox: g.inbox, view: g.view }
+            : g.repo ? { repo: g.repo, view: g.view } : {};
+          if (g.number && g.detailRepo) Object.assign(tab.pendingOpen, { repo: tab.pendingOpen.repo || g.detailRepo, number: g.number });
+          tab.savedState = g;
+        }
         else if (t.type === 'chat') {
           tab = await createChatTab({
             cwd: t.cwd || undefined,

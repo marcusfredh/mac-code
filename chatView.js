@@ -308,14 +308,17 @@
     stream.appendChild(emptyHint);
     card.appendChild(stream);
 
-    // Links in the transcript open in the default browser; a raw <a href> would try to
+    // Links in the transcript go through the app's link router (GitHub links open in
+    // the GitHub tab, the rest in the default browser); a raw <a href> would try to
     // navigate the whole renderer instead.
     stream.addEventListener('click', (e) => {
       const a = e.target.closest && e.target.closest('a.chat-link');
       if (!a) return;
       e.preventDefault();
       const href = a.dataset.href || a.getAttribute('href');
-      if (href) window.fileApi.openExternal(href);
+      if (!href) return;
+      if (window.macOpenLink) window.macOpenLink(href, e);
+      else window.fileApi.openExternal(href);
     });
 
     // MCP panel lives inside the card so it covers the transcript, not the composer.
