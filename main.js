@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 const { deriveFlow } = require('./flowState');
+const { autoAllowsCommand } = require('./autoMode');
 const github = require('./github');
 
 app.setName('Mac Code');
@@ -1275,73 +1276,7 @@ const READ_ONLY_TOOLS = new Set([
 // Auto-allowed on top of the read-only set when the pane is in acceptEdits mode.
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
-// ----- Auto mode -----
-// Auto mode = accept edits, plus shell commands that only inspect state or run the
-// project's own checks. Everything else still asks. The allowlist is on the command
-// head (plus a second word for subcommand-scoped tools like git), and any command
-// containing a risky token is asked about regardless of its head, so an allowlisted
-// head can't smuggle something through a pipe or a chained `&&`.
-const AUTO_SAFE_COMMANDS = new Set([
-  'ls', 'dir', 'pwd', 'cd', 'echo', 'cat', 'type', 'head', 'tail', 'wc',
-  'find', 'findstr', 'grep', 'rg', 'where', 'which', 'tree', 'stat',
-  'date', 'whoami', 'hostname', 'env', 'printenv', 'set',
-  'node', 'python', 'python3', 'py', 'dotnet', 'go', 'cargo', 'tsc',
-  'eslint', 'prettier', 'pytest', 'jest', 'vitest'
-]);
-
-// Command heads whose safety depends on the subcommand.
-const AUTO_SAFE_SUBCOMMANDS = {
-  git: new Set(['status', 'diff', 'log', 'show', 'branch', 'remote', 'blame',
-                'describe', 'rev-parse', 'ls-files', 'shortlog', 'stash']),
-  npm: new Set(['test', 'run', 'ls', 'list', 'view', 'outdated', 'why', 'audit']),
-  pnpm: new Set(['test', 'run', 'ls', 'list', 'why', 'outdated']),
-  yarn: new Set(['test', 'run', 'list', 'why', 'outdated']),
-  gh: new Set(['pr', 'issue', 'repo', 'run', 'api'])
-};
-
-// Substrings that force a prompt wherever they appear in the command line.
-const AUTO_RISKY = [
-  /\brm\b/i, /\brmdir\b/i, /\bdel\b/i, /\berase\b/i, /remove-item/i,
-  /\bmv\b/i, /\bmove\b/i, /\bformat\b/i, /\bdd\b/i, /\bmkfs/i,
-  /\bsudo\b/i, /\brunas\b/i, /\bicacls\b/i, /\bchmod\b/i, /\bchown\b/i,
-  /\bcurl\b/i, /\bwget\b/i, /invoke-webrequest/i, /invoke-restmethod/i,
-  /\bssh\b/i, /\bscp\b/i, /\bftp\b/i, /\bnc\b/i,
-  /\bshutdown\b/i, /\brestart-computer\b/i, /\breg\b\s/i, /\bschtasks\b/i,
-  /\bsc\b\s/i, /\btaskkill\b/i, /stop-process/i, /\bkill\b/i,
-  /\bnpm\s+(i|install|publish|link|unpublish)\b/i,
-  /\bgit\s+(push|reset|clean|rebase|checkout|switch|restore|filter-branch)\b/i,
-  // gh: only reads ride on the allowlist. Anything that writes to GitHub asks.
-  /\bgh\s+api\b.*\s(-X|--method)[\s=]*(POST|PUT|PATCH|DELETE)\b/i,
-  /\bgh\s+api\b.*\s(-f|-F|--field|--raw-field|--input)\b/,
-  /\bgh\s+(pr|issue)\s+(merge|close|reopen|delete|edit|comment|create|review|ready|lock|transfer|pin|develop|checkout)\b/i,
-  /\bgh\s+repo\s+(delete|archive|rename|edit|create|fork|sync)\b/i,
-  /\bgh\s+run\s+(cancel|delete|rerun)\b/i,
-  />\s*\S/, />>/,               // output redirection writes files
-  /\biex\b/i, /invoke-expression/i, /\beval\b/i,
-  /\|\s*(sh|bash|pwsh|powershell|cmd)\b/i
-];
-
-function autoAllowsCommand(command) {
-  const cmd = String(command || '').trim();
-  if (!cmd) return false;
-  if (AUTO_RISKY.some((re) => re.test(cmd))) return false;
-
-  // Every segment of a chained command has to clear the bar on its own.
-  const segments = cmd.split(/&&|\|\||;|\|/).map((s) => s.trim()).filter(Boolean);
-  if (!segments.length) return false;
-
-  return segments.every((seg) => {
-    const words = seg.split(/\s+/);
-    const head = (words[0] || '').replace(/^["']|["']$/g, '').split(/[\\/]/).pop()
-      .replace(/\.(exe|cmd|bat|ps1)$/i, '').toLowerCase();
-    const subs = AUTO_SAFE_SUBCOMMANDS[head];
-    if (subs) {
-      const sub = (words[1] || '').toLowerCase();
-      return subs.has(sub);
-    }
-    return AUTO_SAFE_COMMANDS.has(head);
-  });
-}
+// Auto-mode command gate lives in autoMode.js (pure, unit-tested).
 
 function resolveClaudeBin() {
   const candidates = [

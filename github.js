@@ -9,7 +9,7 @@
 // own persistent partition (so a GitHub login there survives restarts), with no
 // preload and a sandboxed renderer, so a web page in it can never reach Mac Code's APIs.
 
-const { BrowserWindow, shell } = require('electron');
+const { BrowserWindow, shell, session } = require('electron');
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -169,8 +169,38 @@ function isGitHubHost(u) {
   catch (_) { return false; }
 }
 
+// raw/objects/user-attachments/avatars: GitHub redirects downloads and attachments here.
+function isGitHubContentHost(u) {
+  try { const h = new URL(u).hostname.toLowerCase(); return h === 'githubusercontent.com' || h.endsWith('.githubusercontent.com'); }
+  catch (_) { return false; }
+}
+
+// GitHub pages that hand off to an identity provider (SAML/OIDC SSO, EMU). OAuth app
+// authorization (/login/oauth) is deliberately not one: it redirects to the app's own
+// callback, which may be any site.
+const GH_AUTH_PATH = /^\/(login|session|sessions|sso|saml|(orgs|enterprises)\/[^/]+\/(sso|saml))(\/|$)/i;
+function isGitHubAuthUrl(u) {
+  try {
+    const p = new URL(u);
+    return isGitHubHost(u) && GH_AUTH_PATH.test(p.pathname) && !/^\/login\/oauth(\/|$)/i.test(p.pathname);
+  } catch (_) { return false; }
+}
+
+// Pages in the GitHub window get no device or OS permissions (camera, mic, location,
+// notifications, ...). Copy buttons need clipboard write; video players use fullscreen.
+const GH_ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write', 'fullscreen']);
+let ghSessionHardened = false;
+function hardenGitHubSession() {
+  if (ghSessionHardened) return;
+  ghSessionHardened = true;
+  const ses = session.fromPartition('persist:github');
+  ses.setPermissionRequestHandler((_wc, permission, callback) => callback(GH_ALLOWED_PERMISSIONS.has(permission)));
+  ses.setPermissionCheckHandler((_wc, permission) => GH_ALLOWED_PERMISSIONS.has(permission));
+}
+
 function openGitHubWindow(url, parent) {
   if (!isHttpUrl(url)) return { ok: false, error: 'not a web URL' };
+  if (!isGitHubHost(url)) { shell.openExternal(url); return { ok: true, external: true }; }
   if (ghWindow && !ghWindow.isDestroyed()) {
     ghWindow.loadURL(url);
     if (ghWindow.isMinimized()) ghWindow.restore();
@@ -180,6 +210,7 @@ function openGitHubWindow(url, parent) {
   const bounds = parent && !parent.isDestroyed() ? parent.getBounds() : null;
   const width = bounds ? Math.min(1280, Math.round(bounds.width * 0.8)) : 1200;
   const height = bounds ? Math.min(1000, Math.round(bounds.height * 0.85)) : 900;
+  hardenGitHubSession();
   ghWindow = new BrowserWindow({
     width, height,
     x: bounds ? Math.round(bounds.x + (bounds.width - width) / 2) : undefined,
@@ -196,13 +227,56 @@ function openGitHubWindow(url, parent) {
   });
   const wc = ghWindow.webContents;
   // target=_blank: stay in this window for github.com, hand everything else to the
-  // default browser. Top-level navigation is left alone so SSO/IdP redirects work.
+  // default browser.
   wc.setWindowOpenHandler(({ url: target }) => {
     if (isGitHubHost(target)) { setImmediate(() => wc.loadURL(target)); }
     else if (isHttpUrl(target)) shell.openExternal(target);
     return { action: 'deny' };
   });
-  wc.on('will-navigate', (e, target) => { if (!isHttpUrl(target)) e.preventDefault(); });
+  // Top-level pages stay on GitHub, so a link in an issue or README can't load an
+  // arbitrary site in this address-bar-less window. The one exception is a sign-in
+  // flow: once a GitHub login/SSO page hands off to an identity provider, any host is
+  // allowed (customer IdPs live on their own domains) until the flow lands back on
+  // GitHub. Both link/form navigations and server redirects are checked.
+  let authFlow = false;
+  let navFrom = '';   // URL the current main-frame navigation leg comes from
+  const allowTopLevel = (from, target) => {
+    if (!isHttpUrl(target)) return false;
+    if (isGitHubHost(target) || isGitHubContentHost(target)) return true;
+    if (authFlow) return true;
+    if (from && isGitHubAuthUrl(from)) { authFlow = true; return true; }
+    return false;
+  };
+  const gate = (e, from, target) => {
+    if (allowTopLevel(from, target)) return true;
+    e.preventDefault();
+    if (isHttpUrl(target)) shell.openExternal(target);
+    return false;
+  };
+  wc.on('will-navigate', (e, target) => { gate(e, wc.getURL(), e.url || target); });
+  wc.on('did-start-navigation', (e, target, isInPlace, isMainFrame) => {
+    const main = e.isMainFrame !== undefined ? e.isMainFrame : isMainFrame;
+    if (main && !(e.isSameDocument !== undefined ? e.isSameDocument : isInPlace)) navFrom = e.url || target;
+  });
+  wc.on('will-redirect', (e, target, _isInPlace, isMainFrame) => {
+    const main = e.isMainFrame !== undefined ? e.isMainFrame : isMainFrame;
+    if (!main) return;
+    const to = e.url || target;
+    if (gate(e, navFrom, to)) navFrom = to;
+  });
+  wc.on('did-navigate', (_e, u) => { if (isGitHubHost(u)) authFlow = false; });
+  // No address bar, so prefix the title with the host whenever the page isn't GitHub
+  // (an identity-provider page could otherwise pose as anything).
+  const showHost = () => {
+    if (!ghWindow || ghWindow.isDestroyed()) return;
+    const u = wc.getURL();
+    const title = wc.getTitle() || 'GitHub — Mac Code';
+    let host = '';
+    try { host = new URL(u).hostname; } catch (_) {}
+    ghWindow.setTitle(isGitHubHost(u) || !host ? title : '[' + host + '] ' + title);
+  };
+  wc.on('did-navigate', showHost);
+  wc.on('page-title-updated', (e) => { e.preventDefault(); showHost(); });
   wc.on('before-input-event', (e, input) => {
     if (input.type !== 'keyDown') return;
     const key = (input.key || '').toLowerCase();
