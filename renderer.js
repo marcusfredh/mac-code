@@ -86,6 +86,8 @@ function tabInnerHtml(kind, name) {
     : kind === 'editor' ? editorSvg() : kind === 'grid' ? gridSvg() : shellSvg();
   return `<span class="tab-dot"></span>${lead}` +
     `<span class="tab-title">${escapeHtml(name)}<span class="tab-dirty"></span></span>` +
+    // Flow dot: shown (in the flow's state colour) only while a flow is matched here.
+    '<span class="tab-flow"></span>' +
     `<span class="tab-close" title="Close tab">${closeSvg()}</span>`;
 }
 
@@ -311,6 +313,342 @@ function updateStatusAgents() {
     wrap.appendChild(document.createTextNode(row.label));
     statusAgentsEl.appendChild(wrap);
   });
+
+  // Flow chip: only flows matched to a live pane/chat count (R9).
+  const targets = collectFlowTargets();
+  const needs = targets.filter((t) => t.view.needsYou);
+  const running = targets.filter((t) => !t.view.needsYou && flowOverall(t.view) === 'run');
+  const chip = flowChipInfo(needs.length, running.length);
+  if (chip) {
+    if (statusAgentsEl.childNodes.length) {
+      const sep = document.createElement('span');
+      sep.className = 'status-sep';
+      sep.textContent = '·';
+      statusAgentsEl.appendChild(sep);
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'status-flow s-' + chip.status;
+    btn.title = 'Show flow details';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    btn.appendChild(dot);
+    btn.appendChild(document.createTextNode(chip.text));
+    btn.addEventListener('click', () => {
+      const t = needs[0] || running[0];
+      if (t) revealFlowTarget(t);
+    });
+    statusAgentsEl.appendChild(btn);
+  }
+}
+
+// ---------- Flow tracker ----------
+// Shows where an `/orchestrate` run is (Plan → Skeptic → Build → Verify → Done). Main
+// watches the hook's state files and pushes FlowView[] over window.flowApi; every view
+// carries the MAC_CODE_FLOW_KEY its Claude process was started with, which is matched
+// here against the flowKey each terminal pane / chat tab got at spawn. Only matched
+// views are drawn or counted. `flowViews` is the cached last push, and every surface
+// (pane bar, chat header, grid cell, agent card, status chip, tab dot) renders from it,
+// so a rebuild of any of them keeps its flow UI.
+let flowViews = [];
+// Owner keys ('pane:<paneId>' | 'chat:<tabId>') whose detail drawer is open.
+const flowOpen = new Set();
+// memberTabId -> flow widget living in that member's grid-cell header
+const gridFlowWidgets = new Map();
+
+// ---- flow helpers (pure: no DOM, no app state) ----
+const FLOW_STATUSES = ['wait', 'run', 'done', 'warn', 'fail', 'skip'];
+const FLOW_PHASES = ['Plan', 'Skeptic', 'Build', 'Verify', 'Done'];
+// Status strings end up in class names, so anything unexpected collapses to 'wait'.
+function flowStatus(s) { return FLOW_STATUSES.includes(s) ? s : 'wait'; }
+function flowEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+// Always five phases, whatever the view holds.
+function flowPhases(view) {
+  const src = (view && Array.isArray(view.phases)) ? view.phases : [];
+  return FLOW_PHASES.map((name, i) => {
+    const p = src[i] || {};
+    return { name, status: flowStatus(p.status), count: p.count ? String(p.count) : '' };
+  });
+}
+// One word for a whole flow: needs you (fail) > done > still going (run).
+function flowOverall(view) {
+  if (!view) return null;
+  if (view.needsYou) return 'fail';
+  return flowPhases(view)[4].status === 'done' ? 'done' : 'run';
+}
+// flowKey -> view. Several views for one key (claude restarted in the same pane) →
+// the newest updatedAt wins.
+function pickFlowViews(views) {
+  const byKey = new Map();
+  for (const v of Array.isArray(views) ? views : []) {
+    if (!v || !v.flowKey) continue;
+    const cur = byKey.get(v.flowKey);
+    if (!cur || (v.updatedAt || 0) > (cur.updatedAt || 0)) byKey.set(v.flowKey, v);
+  }
+  return byKey;
+}
+function flowStepperHtml(view) {
+  const ph = flowPhases(view);
+  let h = '';
+  ph.forEach((p, i) => {
+    if (i) {
+      const prev = ph[i - 1].status;
+      const done = prev === 'done' || prev === 'warn' || prev === 'skip';
+      h += `<span class="fs-conn${done ? ' done' : ''}"></span>`;
+    }
+    const cnt = p.count && p.status === 'run' ? ` <span class="fs-cnt">${flowEsc(p.count)}</span>` : '';
+    h += `<span class="fs-step s-${p.status}"><span class="fs-dot"></span><span class="fs-lbl">${p.name}</span>${cnt}</span>`;
+  });
+  return h + '<span class="fs-chev" aria-hidden="true">▾</span>';
+}
+function flowSegsHtml(view) {
+  return flowPhases(view).map((p) => `<i class="s-${p.status}"></i>`).join('');
+}
+const FLOW_GATE_TEXT = {
+  blocked: ['blocked', 'Claude has to finish the reviews before it can stop'],
+  pending: ['review pending', 'code changed since the last review'],
+  open: ['open', 'all reviews are newer than the last edit']
+};
+function flowDrawerHtml(view, whyText) {
+  const cls = view.class ? String(view.class) : '';
+  const chipCls = cls === 'normal' || cls === 'trivial' ? cls : 'risky';
+  const round = Number(view.round) || 1;
+  const top = '<div class="fd-top">' +
+    (cls ? `<span class="fd-chip ${chipCls}">${flowEsc(cls)}</span>` : '') +
+    (whyText ? `<span class="fd-why">${flowEsc(whyText)}</span>` : '') +
+    `<span class="fd-round">round ${round}${round <= 2 ? '/2' : ''}</span></div>`;
+  const rows = (Array.isArray(view.rows) ? view.rows : []).map((r) => {
+    const st = flowStatus(r.status);
+    const grp = r.kind === 'group';
+    return `<div class="fd-row s-${st}${grp ? ' grp' : ''}${r.sub ? ' sub' : ''}">` +
+      '<span class="fd-g"></span>' +
+      `<span class="fd-lbl" title="${flowEsc(r.label)}">${flowEsc(r.label)}</span>` +
+      `<span class="fd-det" title="${flowEsc(r.detail)}">${flowEsc(r.detail)}</span>` +
+      `<span class="fd-meta">${flowEsc(r.meta)}</span></div>`;
+  }).join('');
+  const g = FLOW_GATE_TEXT[view.gate];
+  const gate = g
+    ? `<div class="fd-gate ${view.gate}">Stop gate: <b>${g[0]}</b> · ${g[1]}</div>`
+    : '<div class="fd-gate">Stop gate: no code changed yet</div>';
+  return top + `<div class="fd-rows">${rows}</div>` + gate;
+}
+// Status-bar chip: anything that needs you outranks running flows; nothing → no chip.
+function flowChipInfo(needs, running) {
+  if (needs > 0) return { status: 'fail', text: `${needs} flow${needs === 1 ? ' needs' : 's need'} you` };
+  if (running > 0) return { status: 'run', text: `${running} flow${running === 1 ? '' : 's'} running` };
+  return null;
+}
+// ---- end flow helpers ----
+
+function flowOwnerKeyForPane(pane) { return 'pane:' + pane.paneId; }
+function flowOwnerKeyForChat(tab) { return 'chat:' + tab.tabId; }
+
+// Every live surface that has a matched view: [{ tab, pane|null, ownerKey, view }].
+// A chat tab's own process comes first, then its terminal drawer's panes.
+function flowTargetsForTab(tab, byKey) {
+  const out = [];
+  if (!tab || tab.type === 'grid' || tab.type === 'editor') return out;
+  if (tab.type === 'chat' && tab.flowKey) {
+    const v = byKey.get(tab.flowKey);
+    if (v) out.push({ tab, pane: null, ownerKey: flowOwnerKeyForChat(tab), view: v });
+  }
+  for (const [, pane] of tab.panes) {
+    const v = pane.flowKey ? byKey.get(pane.flowKey) : null;
+    if (v) out.push({ tab, pane, ownerKey: flowOwnerKeyForPane(pane), view: v });
+  }
+  return out;
+}
+function collectFlowTargets(byKey = pickFlowViews(flowViews)) {
+  const out = [];
+  if (!byKey.size) return out;
+  for (const [, tab] of tabs) out.push(...flowTargetsForTab(tab, byKey));
+  return out;
+}
+// The one target a tab-level surface (grid cell, chat header) shows: the active pane's
+// flow if it has one, else the first matched.
+function primaryFlowTarget(tab, byKey) {
+  const all = flowTargetsForTab(tab, byKey);
+  if (!all.length) return null;
+  if (tab.type !== 'chat' && tab.activePaneId) {
+    const hit = all.find((t) => t.pane && t.pane.paneId === tab.activePaneId);
+    if (hit) return hit;
+  }
+  return all[0];
+}
+
+function setFlowDrawer(ownerKey, open) {
+  if (!ownerKey) return;
+  if (open) flowOpen.add(ownerKey); else flowOpen.delete(ownerKey);
+  syncFlowUi();
+}
+
+// Stepper button + drawer pair. The caller places btn and drawer; update() patches
+// both in place and only rewrites markup when the view object or open state changed.
+let flowWidgetSeq = 0;
+function createFlowWidget({ compact = false } = {}) {
+  const id = 'flow-drawer-' + (++flowWidgetSeq);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'flow-stepper' + (compact ? ' compact' : '');
+  btn.setAttribute('aria-controls', id);
+  btn.setAttribute('aria-expanded', 'false');
+  btn.hidden = true;
+  const drawer = document.createElement('div');
+  drawer.className = 'flow-drawer scroll';
+  drawer.id = id;
+  drawer.setAttribute('role', 'region');
+  drawer.setAttribute('aria-label', 'Flow details');
+  drawer.tabIndex = -1;
+  drawer.hidden = true;
+  const w = { btn, drawer, target: null, view: null, drawerView: null, drawerHtml: '', open: false, ownerKey: null };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (w.ownerKey) setFlowDrawer(w.ownerKey, !flowOpen.has(w.ownerKey));
+  });
+  const onKey = (e) => {
+    if (e.key !== 'Escape' || !w.open) return;
+    e.preventDefault(); e.stopPropagation();
+    setFlowDrawer(w.ownerKey, false);
+    btn.focus();
+  };
+  btn.addEventListener('keydown', onKey);
+  drawer.addEventListener('keydown', onKey);
+  // Clicks inside the drawer must not fall through to the pane (which would grab focus
+  // for the terminal) or start a grid-cell drag.
+  drawer.addEventListener('mousedown', (e) => e.stopPropagation());
+  w.update = (target) => {
+    const view = target ? target.view : null;
+    const ownerKey = target ? target.ownerKey : null;
+    const open = !!(ownerKey && flowOpen.has(ownerKey));
+    w.target = target;
+    if (view === w.view && open === w.open && ownerKey === w.ownerKey) return;
+    const viewChanged = view !== w.view;
+    w.view = view; w.open = open; w.ownerKey = ownerKey;
+    if (!view) { btn.hidden = true; drawer.hidden = true; return; }
+    btn.hidden = false;
+    if (viewChanged) {
+      btn.innerHTML = flowStepperHtml(view);
+      btn.title = 'Flow: ' + (view.label || '') + ' — show details';
+      btn.setAttribute('aria-label', 'Flow: ' + (view.label || '') + '. Show details');
+      btn.classList.toggle('needs', !!view.needsYou);
+    }
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    drawer.hidden = !open;
+    // Each IPC push is a new object, so compare the markup rather than the view: an open
+    // drawer is only rewritten when its content really changed (text selection survives
+    // unchanged pushes), and it keeps its scroll position across a real rewrite.
+    if (open && w.drawerView !== view) {
+      w.drawerView = view;
+      const html = flowDrawerHtml(view, view.cwd ? shortPath(view.cwd) : '');
+      if (html !== w.drawerHtml) {
+        const top = drawer.scrollTop;
+        w.drawerHtml = html;
+        drawer.innerHTML = html;
+        drawer.scrollTop = top;
+      }
+    }
+  };
+  return w;
+}
+
+// Terminal panes have no header, so a slim bar is added on top of the pane only while a
+// flow is matched to it, and the pane's xterm is refitted when it comes or goes.
+function syncPaneFlowBar(tab, pane, target) {
+  if (!target) {
+    if (pane.flowBar) {
+      pane.flowBar.bar.remove();
+      pane.flowBar.widget.drawer.remove();
+      pane.flowBar = null;
+      requestAnimationFrame(() => fitPane(pane));
+    }
+    return;
+  }
+  if (!pane.flowBar) {
+    const bar = document.createElement('div');
+    bar.className = 'pane-flowbar';
+    const title = document.createElement('span');
+    title.className = 'pf-title';
+    title.textContent = 'Flow';
+    const label = document.createElement('span');
+    label.className = 'pf-label';
+    const widget = createFlowWidget();
+    bar.append(title, label, widget.btn);
+    pane.el.insertBefore(bar, pane.el.firstChild);
+    pane.el.appendChild(widget.drawer);
+    pane.flowBar = { bar, label, widget };
+    requestAnimationFrame(() => fitPane(pane));
+  }
+  const v = target.view;
+  const fb = pane.flowBar;
+  if (fb.label.textContent !== (v.label || '')) fb.label.textContent = v.label || '';
+  const ov = flowOverall(v);
+  const lcls = 'pf-label' + (ov === 'fail' ? ' fail' : ov === 'done' ? ' done' : '');
+  if (fb.label.className !== lcls) fb.label.className = lcls;
+  fb.widget.update(target);
+}
+
+// Patch every flow surface from the cached views. Cheap when nothing changed (identity
+// checks only), so it runs on each agent-render frame as well as on flow:update.
+function syncFlowUi() {
+  const byKey = pickFlowViews(flowViews);
+  const live = new Set();
+  for (const [, tab] of tabs) {
+    if (tab.type === 'grid' || tab.type === 'editor') continue;
+    const targets = flowTargetsForTab(tab, byKey);
+    for (const t of targets) live.add(t.ownerKey);
+    if (tab.type === 'chat') {
+      if (tab.flowWidget) tab.flowWidget.update(primaryFlowTarget(tab, byKey));
+    } else {
+      for (const [, pane] of tab.panes) {
+        syncPaneFlowBar(tab, pane, targets.find((t) => t.pane === pane) || null);
+      }
+    }
+    // Tab chip dot: the worst state across the tab's matched flows.
+    const rank = { fail: 3, run: 2, done: 1 };
+    let best = null;
+    for (const t of targets) {
+      const o = flowOverall(t.view);
+      if (!best || rank[o] > rank[best]) best = o;
+    }
+    let dot = tab.tabEl.querySelector('.tab-flow');
+    if (dot) {
+      const cls = 'tab-flow' + (best ? ' on s-' + best : '');
+      if (dot.className !== cls) dot.className = cls;
+      dot.title = best ? 'Flow: ' + (primaryFlowTarget(tab, byKey)?.view.label || '') : '';
+    }
+  }
+  for (const [memberId, w] of gridFlowWidgets) {
+    if (!w.btn.isConnected || !tabs.has(memberId)) { gridFlowWidgets.delete(memberId); continue; }
+    const t = primaryFlowTarget(tabs.get(memberId), byKey);
+    w.update(t);
+    if (w.cell) w.cell.classList.toggle('needs', !!(t && t.view.needsYou));
+  }
+  // Forget open drawers whose owner went away, so a reused key never opens by surprise.
+  for (const k of flowOpen) if (!live.has(k)) flowOpen.delete(k);
+}
+
+function setFlowViews(list) {
+  flowViews = Array.isArray(list) ? list.filter((v) => v && typeof v === 'object' && v.flowKey) : [];
+  syncFlowUi();
+  scheduleAgentRender();
+  updateStatusAgents();
+}
+
+// Show a flow's surface: activate its tab (a gridded tab surfaces its grid cell), focus
+// the pane it runs in, and open its drawer.
+function revealFlowTarget(t) {
+  if (!t || !tabs.has(t.tab.tabId)) return;
+  setActive(t.tab.tabId);
+  if (t.pane && t.tab.type !== 'chat' && t.tab.activePaneId !== t.pane.paneId) setActivePane(t.tab, t.pane.paneId);
+  setFlowDrawer(t.ownerKey, true);
+}
+
+if (window.flowApi) {
+  try { window.flowApi.onUpdate((list) => setFlowViews(list)); } catch (_) {}
+  try { Promise.resolve(window.flowApi.list()).then(setFlowViews).catch(() => {}); } catch (_) {}
 }
 
 // ---------- Your commands (user macros) ----------
@@ -952,6 +1290,11 @@ function ensureHybridBar(tab, pane) {
     input.style.height = h + 'px';
   }
 
+  // ↑/↓ recall sent messages, shared with the chat composers (see chatView.js).
+  const history = window.attachComposerHistory
+    ? window.attachComposerHistory(input, autoGrow)
+    : { onKeyDown: () => false, onInput() {}, push() {} };
+
   // ---------- command palette ----------
   let paletteItems = [];
   let paletteIndex = 0;
@@ -1108,6 +1451,9 @@ function ensureHybridBar(tab, pane) {
     const expanded = expandCustomCommand(typed);
     const body = (paths.length ? paths.join('\n') + '\n' : '') + (expanded == null ? typed : expanded);
     if (!body.trim()) return;
+    // Only real messages go to history: in raw mode the text answers whatever the pane is
+    // showing (a prompt, a menu), which is neither worth recalling nor safe to keep on disk.
+    if (pane.masked) history.push(typed);
     input.value = '';
     attachments.length = 0;
     renderAttachments();
@@ -1141,6 +1487,7 @@ function ensureHybridBar(tab, pane) {
   });
 
   input.addEventListener('input', () => {
+    history.onInput();
     autoGrow();
     syncPalette();
   });
@@ -1155,6 +1502,7 @@ function ensureHybridBar(tab, pane) {
       if (e.key === 'Escape') { e.preventDefault(); hidePalette(); return; }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runPalette(paletteIndex, 'send'); return; }
     }
+    if (history.onKeyDown(e)) { e.stopPropagation(); return; }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); submit(); return; }
     // Escape belongs to Claude: it is how a running turn is interrupted.
     if (e.key === 'Escape') { e.preventDefault(); keyTo('\x1b'); return; }
@@ -1752,7 +2100,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     try { term.write(opts.initialContent); } catch (_) {}
   }
 
-  const { id: ptyId, cwd, shell } = await window.term.create({
+  const { id: ptyId, cwd, shell, flowKey } = await window.term.create({
     cols: term.cols, rows: term.rows, cwd: opts.cwd || undefined
   });
   if (shell && statusShell) {
@@ -1772,7 +2120,10 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
     runOnReady: opts.runOnReady || null,
-    undoState: { current: '', stack: [] }
+    undoState: { current: '', stack: [] },
+    // MAC_CODE_FLOW_KEY this pty was spawned with: matches flow views to the pane.
+    // flowBar is the slim stepper bar, present only while a flow is matched.
+    flowKey: flowKey || null, flowBar: null
   };
   tab.panes.set(paneId, pane);
 
@@ -2284,11 +2635,20 @@ function buildGridCell(tab, id) {
   rm.className = 'gc-btn'; rm.title = 'Remove from grid';
   rm.innerHTML = closeSvg();
   rm.addEventListener('click', (e) => { e.stopPropagation(); removeFromGrid(tab, id, false); });
-  hdr.append(dot, title, pop, rm);
+  // Compact flow stepper between the title and the buttons; its drawer overlays the cell
+  // under the header. Filled from the cached views right away so a rebuild keeps it.
+  const flow = createFlowWidget({ compact: true });
+  flow.cell = cell;
+  gridFlowWidgets.set(id, flow);
+  hdr.append(dot, title, flow.btn, pop, rm);
 
   cell.appendChild(hdr);
   m.container.classList.add('in-grid');
   cell.appendChild(m.container);
+  cell.appendChild(flow.drawer);
+  const ft = primaryFlowTarget(m, pickFlowViews(flowViews));
+  flow.update(ft);
+  cell.classList.toggle('needs', !!(ft && ft.view.needsYou));
   cell.addEventListener('mousedown', () => focusGridCell(tab, id));
   return cell;
 }
@@ -2661,6 +3021,13 @@ async function createChatTab(opts = {}) {
   });
   chatTabs.set(tabId, view);
   container.appendChild(view.el);
+  // Flow stepper in the chat header; its drawer overlays the transcript card.
+  const flowHost = typeof view.flowHost === 'function' ? view.flowHost() : null;
+  if (flowHost && flowHost.slot && flowHost.overlay) {
+    tab.flowWidget = createFlowWidget();
+    flowHost.slot.appendChild(tab.flowWidget.btn);
+    flowHost.overlay.appendChild(tab.flowWidget.drawer);
+  }
   view.setActive(true);
   // Seed the pane from the last poll so a new tab isn't blank until the next tick.
   if (planLimits) view.setLimits(planLimits);
@@ -2676,6 +3043,7 @@ async function createChatTab(opts = {}) {
     permissionMode,
     resumeSessionId: opts.resumeSessionId || null
   });
+  if (res && res.flowKey) tab.flowKey = res.flowKey;
   if (res && res.error) view.handleStderr('Could not start Claude: ' + res.error);
   else if (res && res.cwd) { tab.cwd = res.cwd; updateStatus(); renderTree(); }
 
@@ -2760,6 +3128,9 @@ async function restartChat(tab, model) {
     // while the pill still showed the old mode.
     permissionMode: view.getState().permissionMode
   });
+  // The relaunched process gets a fresh flow key; the hook re-stamps the session's state
+  // with it on its next event, so the flow follows the pane across the restart.
+  if (res && res.flowKey) { tab.flowKey = res.flowKey; scheduleAgentRender(); }
   if (res && res.error) view.handleStderr('Could not restart Claude: ' + res.error);
 }
 
@@ -3233,7 +3604,7 @@ resizeEl.addEventListener('dblclick', () => { sidebarEl.style.width = '240px'; l
 let agentRenderQueued = false;
 function scheduleAgentRender() {
   if (agentRenderQueued) return; agentRenderQueued = true;
-  requestAnimationFrame(() => { agentRenderQueued = false; renderAgentPanel(); updateHybrid(); });
+  requestAnimationFrame(() => { agentRenderQueued = false; syncFlowUi(); renderAgentPanel(); updateHybrid(); });
 }
 function formatTokens(n) {
   if (n == null) return '—';
@@ -3382,6 +3753,16 @@ function buildAgentCard(entry) {
   usage.appendChild(usageTop); usage.appendChild(bar);
   card.appendChild(usage);
 
+  // Flow row under the context bar: five phase segments + the current phase label.
+  // Hidden unless a flow is matched to this agent.
+  const flowRow = document.createElement('div'); flowRow.className = 'agent-flow';
+  flowRow.hidden = true;
+  const flowSegs = document.createElement('span'); flowSegs.className = 'af-segs';
+  flowSegs.setAttribute('aria-hidden', 'true');
+  const flowPh = document.createElement('span'); flowPh.className = 'af-ph';
+  flowRow.appendChild(flowSegs); flowRow.appendChild(flowPh);
+  card.appendChild(flowRow);
+
   const foot = document.createElement('div'); foot.className = 'agent-foot';
   const model = document.createElement('span'); model.className = 'agent-model';
   const handoff = document.createElement('span'); handoff.className = 'agent-act handoff';
@@ -3394,7 +3775,8 @@ function buildAgentCard(entry) {
   foot.appendChild(save);
   card.appendChild(foot);
 
-  return { card, badge, name, stateDot, stateText, abs, pctEl, fill, model, handoff, save };
+  return { card, badge, name, stateDot, stateText, abs, pctEl, fill, model, handoff, save,
+    flowRow, flowSegs, flowPh, flowView: null };
 }
 
 function renderAgentPanel() {
@@ -3419,6 +3801,7 @@ function renderAgentPanel() {
 
   const seen = new Set();
   const now = Date.now();
+  const flowByKey = pickFlowViews(flowViews);
 
   for (const entry of entries) {
     seen.add(entry.key);
@@ -3430,9 +3813,15 @@ function renderAgentPanel() {
     }
     c.entry = entry;
 
+    const flowKey = entry.kind === 'chat' ? entry.tab.flowKey : entry.pane.flowKey;
+    const flowView = (flowKey && flowByKey.get(flowKey)) || null;
+    const flowOwner = entry.kind === 'chat' ? flowOwnerKeyForChat(entry.tab) : flowOwnerKeyForPane(entry.pane);
+
     // Re-bind handlers each pass: the entry's tab/pane identity can change.
     c.card.onclick = () => {
       setActive(entry.tab.tabId);
+      // A card with a flow also opens that flow's drawer where it is shown.
+      if (flowView) setFlowDrawer(flowOwner, true);
       if (entry.kind !== 'pane') return;
       // An agent running in a chat pane's drawer: reveal the drawer before focusing.
       if (entry.tab.type === 'chat') {
@@ -3485,8 +3874,21 @@ function renderAgentPanel() {
       sessionId = s.sessionId;
     }
 
-    const cls = 'agent-card agent-' + entry.type + ' ' + (working ? 'working' : 'idle');
+    const cls = 'agent-card agent-' + entry.type + ' ' + (working ? 'working' : 'idle') +
+      (flowView && flowView.needsYou ? ' needs' : '');
     if (c.card.className !== cls) c.card.className = cls;
+
+    if (c.flowView !== flowView) {
+      c.flowView = flowView;
+      c.flowRow.hidden = !flowView;
+      if (flowView) {
+        c.flowSegs.innerHTML = flowSegsHtml(flowView);
+        const ov = flowOverall(flowView);
+        c.flowPh.className = 'af-ph' + (ov === 'fail' ? ' fail' : ov === 'done' ? ' done' : '');
+        c.flowPh.textContent = flowView.label || '';
+        c.flowPh.title = flowView.label || '';
+      }
+    }
 
     const label = (entry.tab.customTitle || tabAutoName(entry.tab)) +
       (entry.kind === 'pane' && entry.tab.panes.size > 1 ? ' [pane]' : '');

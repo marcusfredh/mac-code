@@ -7,6 +7,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
+const { deriveFlow } = require('./flowState');
 
 app.setName('Mac Code');
 app.setAppUserModelId('Mac Code');
@@ -163,6 +164,7 @@ function createWindow() {
     ptys.clear();
     killAllChats();
     stopGateServer();
+    stopFlowWatcher();
     mainWindow = null;
   });
 }
@@ -178,6 +180,7 @@ ipcMain.on('app:close-ready', finishClose);
 
 app.whenReady().then(() => {
   createWindow();
+  startFlowWatcher();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -193,13 +196,16 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
   const cols = opts.cols || 80;
   const rows = opts.rows || 24;
   const cwd = opts.cwd || defaultCwd();
+  // The orchestrate hook stamps this key into its state file, so a flow can be
+  // matched back to the pane whose Claude session produced it.
+  const flowKey = crypto.randomUUID();
 
   const ptyProcess = pty.spawn(shell, shellArgs(shell), {
     name: 'xterm-256color',
     cols,
     rows,
     cwd,
-    env: process.env,
+    env: { ...process.env, MAC_CODE_FLOW_KEY: flowKey },
     useConpty: true
   });
 
@@ -219,7 +225,7 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
     ptys.delete(id);
   });
 
-  return { id, shell, cwd };
+  return { id, shell, cwd, flowKey };
 });
 
 ipcMain.on('terminal:input', (event, id, data) => {
@@ -239,6 +245,90 @@ ipcMain.on('terminal:kill', (event, id) => {
     ptys.delete(id);
   }
 });
+
+// ----- Orchestrate flow tracker -----
+// The global orchestrate-gate hook writes one JSON state file per Claude session.
+// We watch that folder, derive a FlowView per session (flowState.js) and push the
+// full list to the renderer, which matches views to panes by flowKey.
+const FLOW_DIR = path.join(os.homedir(), '.claude', 'state', 'orchestrate');
+const flowStates = new Map(); // sessionId -> parsed state file
+let flowWatcher = null;
+let flowInterval = null;
+let flowDebounce = null;
+const flowDirty = new Set();
+
+function flowFileOk(name) {
+  // Skip the hook's .lock files and per-process .tmp files mid-rename.
+  return typeof name === 'string' && name.endsWith('.json');
+}
+
+function readFlowFile(name) {
+  const id = name.slice(0, -'.json'.length);
+  try {
+    flowStates.set(id, JSON.parse(fs.readFileSync(path.join(FLOW_DIR, name), 'utf8')));
+  } catch (err) {
+    // Gone -> forget it; a partial write -> keep the last good copy.
+    if (err && err.code === 'ENOENT') flowStates.delete(id);
+  }
+}
+
+function currentFlowViews() {
+  const now = Date.now();
+  const views = [];
+  for (const state of flowStates.values()) {
+    try {
+      const v = deriveFlow(state, now);
+      if (v) views.push(v);
+    } catch (_) {}
+  }
+  return views;
+}
+
+function pushFlows() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('flow:update', currentFlowViews());
+  }
+}
+
+function scanFlowDir() {
+  let names = [];
+  try { names = fs.readdirSync(FLOW_DIR); } catch (_) {}
+  flowStates.clear();
+  for (const name of names) if (flowFileOk(name)) readFlowFile(name);
+}
+
+function startFlowWatcher() {
+  try { fs.mkdirSync(FLOW_DIR, { recursive: true }); } catch (_) {}
+  scanFlowDir();
+  try {
+    // Windows fires duplicate and partial events, so batch them for 150 ms.
+    flowWatcher = fs.watch(FLOW_DIR, (_type, name) => {
+      if (name && !flowFileOk(String(name))) return;
+      flowDirty.add(name ? String(name) : '*');
+      clearTimeout(flowDebounce);
+      flowDebounce = setTimeout(() => {
+        if (flowDirty.has('*')) scanFlowDir();
+        else for (const n of flowDirty) readFlowFile(n);
+        flowDirty.clear();
+        pushFlows();
+      }, 150);
+    });
+    flowWatcher.on('error', () => {});
+  } catch (_) {}
+  // Re-derive on a timer too: elapsed times tick and finished flows expire.
+  flowInterval = setInterval(pushFlows, 30000);
+  pushFlows();
+}
+
+function stopFlowWatcher() {
+  clearTimeout(flowDebounce);
+  clearInterval(flowInterval);
+  flowInterval = null;
+  try { if (flowWatcher) flowWatcher.close(); } catch (_) {}
+  flowWatcher = null;
+}
+
+ipcMain.handle('flow:list', () => currentFlowViews());
 
 // ----- IPC: window -----
 ipcMain.on('window:minimize', () => mainWindow && mainWindow.minimize());
@@ -1477,6 +1567,8 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
   ];
   if (opts.model) args.push('--model', opts.model);
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
+  // Same role as in terminal:create: lets the flow tracker find this chat pane.
+  const flowKey = crypto.randomUUID();
 
   let proc;
   try {
@@ -1487,7 +1579,8 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
         ...process.env,
         MAC_CODE_GATE_URL: `http://127.0.0.1:${gatePort}/permission`,
         MAC_CODE_GATE_TOKEN: gateToken,
-        MAC_CODE_CHAT_ID: chatId
+        MAC_CODE_CHAT_ID: chatId,
+        MAC_CODE_FLOW_KEY: flowKey
       },
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -1546,7 +1639,7 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
 
   proc.on('exit', (code) => finish({ code, sessionId: chat.sessionId }));
 
-  return { ok: true, chatId, cwd, bin, pid: proc.pid };
+  return { ok: true, chatId, cwd, bin, pid: proc.pid, flowKey };
 });
 
 ipcMain.handle('chat:send', (_event, args = {}) => {

@@ -279,6 +279,11 @@
     hdr.appendChild(cwdEl);
     hdr.appendChild(el('div', 'chat-hdr-spacer'));
 
+    // The app mounts its flow stepper here (and the stepper's drawer into the card) while
+    // an /orchestrate run is matched to this pane; empty otherwise.
+    const flowSlot = el('span', 'chat-hdr-flow');
+    hdr.appendChild(flowSlot);
+
     const permPill = el('span', 'chat-perm-pill');
     permPill.title = 'Change how tool calls are approved';
     const permDot = el('span', 'dot');
@@ -1809,7 +1814,9 @@
       input.style.height = 'auto';
       input.style.height = Math.min(260, Math.max(44, input.scrollHeight)) + 'px';
     }
+    const history = attachComposerHistory(input, autoGrow);
     input.addEventListener('input', () => {
+      history.onInput();
       autoGrow();
       syncPalette();
     });
@@ -1952,6 +1959,7 @@
           e.preventDefault(); runPalette(paletteIndex, 'send'); return;
         }
       }
+      if (history.onKeyDown(e)) { e.stopPropagation(); return; }
       if (e.key === 'Enter' && e.ctrlKey) {
         const card = newestPermCard();
         if (card && card._macResolve) { e.preventDefault(); card._macResolve('allow'); return; }
@@ -2113,6 +2121,8 @@
         return;
       }
       state.sent++;
+      // What was typed (a /cp shortcut stays /cp), not the expanded body.
+      history.push(text);
       input.value = '';
       autoGrow();
       attachments.length = 0;
@@ -2185,6 +2195,8 @@
       terminalHasFocus: () => drawer.contains(document.activeElement),
       terminalMount: () => drawerBody,
       setTerminalCwd(p) { drawerCwd.textContent = prettyCwd(p); },
+      // flow tracker: where the header stepper and its overlay drawer go
+      flowHost: () => ({ slot: flowSlot, overlay: card }),
       // MCP panel
       openMcp: () => setMcpOpen(true),
       closeMcp: () => setMcpOpen(false),
@@ -2201,6 +2213,84 @@
     };
   }
 
+  // ---------- composer history ----------
+  // Shell-style recall of sent messages: ↑ in an empty composer brings back the last one,
+  // ↑/↓ then walk older/newer, and ↓ past the newest returns to the empty draft. One list
+  // is shared by every composer (chat panes and hybrid terminal panes) and survives a
+  // restart, like a shell's history file. Editing a recalled message ends the walk, so it
+  // is sent as typed.
+  const HISTORY_KEY = 'composerHistory';
+  const HISTORY_MAX = 200;
+  const HISTORY_MAX_CHARS = 20000;
+  let historyList = null;
+
+  function loadHistory() {
+    if (historyList) return historyList;
+    try {
+      const v = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+      historyList = Array.isArray(v) ? v.filter((s) => typeof s === 'string') : [];
+    } catch (_) { historyList = []; }
+    return historyList;
+  }
+
+  function pushHistory(text) {
+    const t = String(text || '');
+    if (!t.trim() || t.length > HISTORY_MAX_CHARS) return;
+    const list = loadHistory();
+    if (list[list.length - 1] === t) return;
+    list.push(t);
+    if (list.length > HISTORY_MAX) list.splice(0, list.length - HISTORY_MAX);
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(list)); } catch (_) {}
+  }
+
+  // `onRecall` runs after the textarea's value was replaced (the caller re-sizes it).
+  // Returns { onKeyDown(e) -> true when the key was used, onInput(), push(text) }.
+  function attachComposerHistory(input, onRecall) {
+    let index = -1;      // -1: not walking; otherwise a position in the list
+    let shown = null;    // the text we put in the box, to tell it from user edits
+
+    function show(i) {
+      const list = loadHistory();
+      index = i;
+      shown = i < 0 ? '' : list[i];
+      input.value = shown;
+      // Caret at the end, as in a shell. The next ↑/↓ keeps walking while the text is unedited.
+      const at = input.value.length;
+      input.setSelectionRange(at, at);
+      if (onRecall) onRecall();
+    }
+
+    return {
+      onKeyDown(e) {
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return false;
+        if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return false;
+        const walking = index >= 0 && input.value === shown;
+        if (!walking && input.value !== '') return false;
+        // In a recalled multi-line message the arrows move between its lines first, and only
+        // walk on from the top line (↑) or the bottom line (↓), as in the Claude CLI.
+        if (walking) {
+          const v = input.value;
+          if (e.key === 'ArrowUp' && v.slice(0, input.selectionStart).includes('\n')) return false;
+          if (e.key === 'ArrowDown' && v.indexOf('\n', input.selectionEnd) !== -1) return false;
+        }
+        const list = loadHistory();
+        if (e.key === 'ArrowUp') {
+          if (!walking && !list.length) return false;          // nothing sent yet
+          const next = walking ? index - 1 : list.length - 1;
+          if (next < 0) { e.preventDefault(); return true; }   // oldest: stay put
+          e.preventDefault(); show(next); return true;
+        }
+        if (!walking) return false;                            // ↓ in an empty box: nothing
+        e.preventDefault();
+        show(index + 1 < list.length ? index + 1 : -1);
+        return true;
+      },
+      onInput() { if (index >= 0 && input.value !== shown) { index = -1; shown = null; } },
+      push(text) { pushHistory(text); index = -1; shown = null; }
+    };
+  }
+
   window.createChatView = createChatView;
   window.CHAT_MODELS = MODELS;
+  window.attachComposerHistory = attachComposerHistory;
 })();

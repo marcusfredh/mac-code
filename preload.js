@@ -99,6 +99,15 @@ contextBridge.exposeInMainWorld('fileApi', {
   openExternal: (p)          => ipcRenderer.invoke('file:openExternal', p)
 });
 
+contextBridge.exposeInMainWorld('flowApi', {
+  list: () => ipcRenderer.invoke('flow:list'),
+  onUpdate: (callback) => {
+    const listener = (_event, views) => callback(views);
+    ipcRenderer.on('flow:update', listener);
+    return () => ipcRenderer.removeListener('flow:update', listener);
+  }
+});
+
 contextBridge.exposeInMainWorld('sessionApi', {
   load: ()        => ipcRenderer.invoke('session:load'),
   save: (data)    => ipcRenderer.send('session:save', data),

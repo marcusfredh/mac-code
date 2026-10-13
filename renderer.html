@@ -1980,6 +1980,177 @@
         #2a2a2a;
     }
     .ctx-swatch.selected { border-color: #fff; }
+
+    /* ---------- Flow tracker (/orchestrate) ---------- */
+    /* One status palette for every flow surface: run = accent (pulsing), done = green,
+       warn = amber, fail = red, wait/skip = faint (skip drawn dashed). */
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-wait { --fc: var(--fg-faint); }
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-run  { --fc: var(--accent); }
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-done { --fc: var(--green); }
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-warn { --fc: var(--amber); }
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-fail { --fc: var(--red); }
+    :is(.fs-step, .fd-row, .af-segs > i, .tab-flow, .status-flow).s-skip { --fc: var(--fg-faint); }
+    @keyframes flowpulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(96, 205, 255, 0.55); }
+      50% { box-shadow: 0 0 0 4px rgba(96, 205, 255, 0); }
+    }
+    .fs-step.s-run .fs-dot, .fd-row.s-run .fd-g, .tab-flow.s-run { animation: flowpulse 1.6s ease-in-out infinite; }
+    /* display rules below would otherwise beat the hidden attribute */
+    .flow-stepper[hidden], .flow-drawer[hidden], .agent-flow[hidden] { display: none !important; }
+
+    /* Stepper: five steps joined by connectors, Build count, chevron. */
+    .flow-stepper {
+      display: flex; align-items: center; flex: 0 0 auto;
+      background: none; border: 1px solid transparent; border-radius: 6px;
+      padding: 3px 6px 3px 8px; cursor: pointer;
+      font: inherit; color: inherit;
+    }
+    .flow-stepper:hover, .flow-stepper[aria-expanded="true"] { background: var(--fill); border-color: var(--line); }
+    .flow-stepper:focus-visible, .status-flow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+    .fs-step { display: flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 12px; white-space: nowrap; }
+    .fs-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fc); flex: none; position: relative; }
+    .fs-step.s-wait .fs-dot { background: transparent; border: 1.5px solid var(--fc); }
+    .fs-step.s-skip .fs-dot { background: transparent; border: 1.5px dashed var(--fc); }
+    .fs-step.s-run { color: var(--fg-strong); }
+    .fs-step.s-fail { color: #ff8a94; }
+    .fs-step.s-warn { color: var(--amber); }
+    .fs-step.s-done .fs-dot::after {
+      content: ''; position: absolute; left: 2.6px; top: 1.2px; width: 2.5px; height: 4.5px;
+      border: solid var(--bg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+    }
+    .fs-cnt { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+    .fs-conn { width: 16px; height: 1.5px; background: var(--line); margin: 0 6px; flex: none; }
+    .fs-conn.done { background: rgba(78, 201, 148, 0.5); }
+    .fs-chev { margin-left: 8px; color: var(--fg-muted); font-size: 11px; transition: transform 0.15s; }
+    .flow-stepper[aria-expanded="true"] .fs-chev { transform: rotate(180deg); }
+    /* Compact: dots only, except the running/failing step keeps its label. Forced in grid
+       cells; pane bars and chat headers fall back to it when they get narrow. */
+    .flow-stepper.compact .fs-lbl { display: none; }
+    .flow-stepper.compact .s-run .fs-lbl, .flow-stepper.compact .s-fail .fs-lbl { display: inline; }
+    .flow-stepper.compact .fs-conn { width: 8px; margin: 0 3px; }
+    .flow-stepper.compact .fs-dot { width: 8px; height: 8px; }
+    .flow-stepper.compact .fs-step.s-done .fs-dot::after { left: 2.2px; top: 0.9px; }
+
+    /* Terminal pane: a slim bar on top of the pane, present only while a flow is
+       matched. The right padding keeps clear of the pane's hover close button. */
+    .pane-flowbar {
+      flex-shrink: 0; height: 28px; margin-bottom: 6px;
+      display: flex; align-items: center; gap: 10px; min-width: 0;
+      padding: 0 36px 0 12px;
+      background: var(--card-hdr); border: 1px solid var(--line); border-radius: 8px;
+      container: flowbar / inline-size;
+    }
+    .pf-title { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-muted); flex-shrink: 0; }
+    .pf-label { font-size: 12px; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pf-label.fail { color: #ff8a94; font-weight: 600; }
+    .pf-label.done { color: var(--green); }
+    .pane-flowbar .flow-stepper { margin-left: auto; padding-block: 1px; }
+    @container flowbar (max-width: 640px) {
+      .flow-stepper .fs-lbl { display: none; }
+      .flow-stepper .s-run .fs-lbl, .flow-stepper .s-fail .fs-lbl { display: inline; }
+      .flow-stepper .fs-conn { width: 8px; margin: 0 3px; }
+    }
+    @container flowbar (max-width: 360px) { .pf-label { display: none; } }
+
+    /* Chat pane: the stepper sits in the header next to the permission pill. */
+    .chat-hdr { container: chathdr / inline-size; }
+    .chat-hdr-flow { display: flex; align-items: center; flex-shrink: 0; min-width: 0; }
+    .chat-hdr-flow:empty { display: none; }
+    @container chathdr (max-width: 900px) {
+      .chat-hdr-flow .fs-lbl { display: none; }
+      .chat-hdr-flow .s-run .fs-lbl, .chat-hdr-flow .s-fail .fs-lbl { display: inline; }
+      .chat-hdr-flow .fs-conn { width: 8px; margin: 0 3px; }
+    }
+
+    /* Detail drawer: overlays the pane under its header. */
+    .flow-drawer {
+      position: absolute; left: 0; right: 0; z-index: 45;
+      display: grid; gap: 10px; align-content: start;
+      padding: 12px 14px; overflow: auto;
+      background: var(--card); border: 1px solid var(--line); border-radius: 0 0 8px 8px;
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.45);
+      font-size: 12px; user-select: text; cursor: default;
+    }
+    .flow-drawer:focus { outline: none; }
+    .pane-container > .flow-drawer { top: 34px; max-height: calc(100% - 34px); }
+    .chat-card > .flow-drawer { top: 44px; max-height: calc(100% - 44px); z-index: 29; border-width: 0 0 1px; border-radius: 0; }
+    .grid-cell > .flow-drawer { top: 24px; max-height: calc(100% - 24px); padding: 10px; z-index: 50; border-width: 0 0 1px; border-radius: 0; }
+    .fd-top { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+    .fd-chip {
+      font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 2px 8px; border-radius: 4px;
+      background: rgba(231, 72, 86, 0.14); color: #ff9aa2;
+    }
+    .fd-chip.normal { background: rgba(96, 205, 255, 0.12); color: var(--accent); }
+    .fd-chip.trivial { background: var(--fill); color: var(--fg-dim); }
+    .fd-why { color: var(--fg-dim); font-family: var(--mono); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fd-round { margin-left: auto; color: var(--fg-muted); font-family: var(--mono); font-size: 11px; }
+    .fd-rows { display: grid; border-top: 1px solid var(--line); }
+    .fd-row {
+      display: grid; grid-template-columns: 16px 140px minmax(0, 1fr) auto;
+      gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line);
+    }
+    .fd-row.sub { padding-left: 16px; grid-template-columns: 16px 124px minmax(0, 1fr) auto; }
+    .fd-g { width: 10px; height: 10px; border-radius: 50%; background: var(--fc); justify-self: center; }
+    .fd-row.s-wait .fd-g { background: transparent; border: 1.5px solid var(--fc); }
+    .fd-row.s-skip .fd-g { background: transparent; border: 1.5px dashed var(--fc); }
+    .fd-lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+    .fd-row.grp .fd-lbl { color: var(--fg-strong); font-weight: 600; }
+    .fd-det { color: var(--fg-dim); font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fd-row.s-fail .fd-det { color: #ff9aa2; }
+    .fd-row.s-warn .fd-det { color: var(--amber); }
+    .fd-row.s-skip .fd-det { color: var(--fg-faint); }
+    .fd-meta { color: var(--fg-muted); font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .fd-gate { color: var(--fg-dim); }
+    .fd-gate b { font-weight: 600; }
+    /* 'blocked' means Claude is auto-continuing into reviews, not waiting on you: accent. */
+    .fd-gate.blocked b { color: var(--accent); }
+    .fd-gate.pending b { color: var(--amber); }
+    .fd-gate.open b { color: var(--green); }
+    .grid-cell .fd-row, .grid-cell .fd-row.sub { grid-template-columns: 16px 110px minmax(0, 1fr); }
+    .grid-cell .fd-meta { display: none; }
+
+    /* Grid: the cell header carries the (compact) stepper and the cell owns the drawer,
+       so the member's own bar / header stepper is hidden while it is borrowed. */
+    .grid-cell-hdr .flow-stepper { padding: 1px 4px; }
+    .grid-cell-hdr .fs-step { font-size: 11px; }
+    .grid-cell.needs { border-color: rgba(231, 72, 86, 0.55); }
+    .term-container.in-grid .pane-flowbar,
+    .term-container.in-grid .pane-container > .flow-drawer,
+    .term-container.in-grid .chat-hdr-flow,
+    .term-container.in-grid .chat-card > .flow-drawer { display: none !important; }
+
+    /* Agent card: flow row under the context bar; red card while the flow needs you. */
+    .agent-flow {
+      display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 8px;
+      padding-top: 8px; border-top: 1px dashed rgba(255, 255, 255, 0.08);
+    }
+    .af-segs { display: flex; gap: 3px; }
+    .af-segs > i { width: 13px; height: 4px; border-radius: 2px; background: var(--fc); }
+    .af-segs > i.s-wait { background: rgba(255, 255, 255, 0.12); }
+    .af-segs > i.s-skip { background: transparent; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18); }
+    .af-ph { font-size: 11px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .af-ph.fail { color: #ff8a94; font-weight: 600; }
+    .af-ph.done { color: var(--green); }
+    .agent-card.needs, .agent-card.needs.agent-copilot { border-color: rgba(231, 72, 86, 0.45); background: rgba(231, 72, 86, 0.06); }
+    .agent-card.needs:hover { background: rgba(231, 72, 86, 0.10); }
+
+    /* Status bar chip next to the agent status, and the tab-chip flow dot. */
+    .status-flow {
+      display: flex; align-items: center; gap: 6px;
+      background: none; border: 0; padding: 1px 6px; border-radius: 4px;
+      cursor: pointer; font: inherit; color: var(--fg-muted);
+    }
+    .status-flow:hover { background: var(--fill-hover); color: var(--fg); }
+    .status-flow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fc); flex-shrink: 0; }
+    .status-flow.s-fail { color: #ff8a94; }
+    .tab-flow { display: none; width: 6px; height: 6px; border-radius: 50%; background: var(--fc); flex-shrink: 0; }
+    .tab-flow.on { display: block; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .fs-step.s-run .fs-dot, .fd-row.s-run .fd-g, .tab-flow.s-run { animation: none; }
+      .fs-chev { transition: none; }
+    }
   </style>
 </head>
 <body>

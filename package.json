@@ -1,13 +1,14 @@
 {
   "name": "mac-code",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Modern PowerShell wrapper for Windows built on Electron + xterm.js + node-pty",
   "main": "main.js",
   "author": "Marcus",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64"
+    "build": "electron-builder --win --x64",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "@fontsource/cascadia-code": "^5.1.0",
@@ -33,6 +34,7 @@
       "renderer.html",
       "renderer.js",
       "chatView.js",
+      "flowState.js",
       "hooks/**/*",
       "assets/**/*",
       "node_modules/**/*"
