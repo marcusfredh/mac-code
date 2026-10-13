@@ -559,6 +559,42 @@
     .pane-container:hover .pane-close-btn { display: flex; }
     .pane-close-btn:hover { background: var(--close-hover); border-color: var(--close-hover); color: #fff; }
 
+    /* One-click resume of the Claude session a pane last ran, shown while the shell sits
+       at a prompt. Top-right, left of the close button: it covers only the right end
+       of the terminal's top rows, and only while the shell is idle. */
+    .pane-resume-bar {
+      position: absolute;
+      top: 6px; right: 40px;
+      display: flex; align-items: center; gap: 6px;
+      padding: 2px;
+      background: var(--menu);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      font-family: var(--ui); font-size: 12px;
+      z-index: 11;
+      pointer-events: auto;
+    }
+    /* Below the flow bar (28px + 6px gap) when one is shown, not over its stepper. */
+    .pane-flowbar ~ .pane-resume-bar { top: 40px; }
+    .term-container.in-grid .pane-flowbar ~ .pane-resume-bar { top: 6px; }
+    .pane-resume-btn {
+      background: var(--accent); color: #000;
+      border: 0; border-radius: 4px;
+      padding: 2px 8px;
+      font: inherit; font-weight: 600;
+      cursor: default;
+    }
+    .pane-resume-btn:hover { background: var(--accent-hi); }
+    .pane-resume-id { color: var(--fg-muted); font-family: 'Cascadia Code', Consolas, monospace; }
+    .pane-resume-dismiss {
+      width: 20px; height: 20px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: transparent; border: 0; border-radius: 4px;
+      color: var(--fg-dim); cursor: default;
+    }
+    .pane-resume-dismiss:hover { background: var(--fill-hover); color: var(--fg-strong); }
+
     /* ---------- Hybrid Claude input ---------- */
     /* An opaque band over Claude's own composer box. The TUI draws that box directly
        after the transcript rather than pinned to the bottom of the screen, so the band

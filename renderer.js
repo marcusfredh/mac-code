@@ -2230,6 +2230,15 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   const pane = {
     paneId, ptyId, term, fit, serialize, el: paneEl, ro: null,
     cwd, claudeRunning: false, claudeBusyUntil: 0, claudeSessionId: null,
+    // { id, cwd } of the last Claude CLI session that exited in this pane, read from the
+    // CLI's own "claude --resume <id>" line. A restored pane starts with the one it had at
+    // close, so the next save keeps it even if the user never resumes.
+    lastClaude: opts.resumeClaude || null, resumeBar: null,
+    // claudeRunGen ticks per Claude start so a late session poll from an earlier run is
+    // dropped; atPrompt is whether the shell is idle at a prompt (gates the resume bar).
+    // resumePending covers the gap between a Resume click and its command line arriving.
+    claudeRunGen: 0, claudeStartedAt: 0, atPrompt: false, sessionPollBusy: false,
+    resumePending: false, resumePendingTimer: null,
     // Hybrid input: the band over Claude's own composer box, whether it is currently
     // drawn, and whether xterm's keyboard is switched off behind it.
     mask: null, masked: false, everMasked: false, stdinOff: false, hybridRaw: false,
@@ -2455,10 +2464,14 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   // OSC 6633: command line capture (claude / copilot detection)
   term.parser.registerOscHandler(6633, (data) => {
     if (typeof data !== 'string') return false;
+    // Fires on every Enter; a bare Enter only redraws the prompt.
+    if (data.trim()) pane.atPrompt = false;
+    clearResumePending(pane);
     const parts = data.trim().split(/\s+/);
     const first = parts[0]?.toLowerCase();
     const second = parts[1]?.toLowerCase();
     if (first === 'claude' || first === 'claude.exe' || first === 'claude.cmd') {
+      markClaudeStart(pane);
       pane.claudeRunning = true;
       pane.claudeBusyUntil = Date.now() + 600;
       scheduleAgentRender();
@@ -2470,6 +2483,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       pane.copilotBusyUntil = Date.now() + 600;
       scheduleAgentRender();
     }
+    updateResumeBar(pane);
     return false;
   });
 
@@ -2478,6 +2492,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (typeof data !== 'string' || !data.startsWith('9;')) return false;
     const cwd = data.substring(2).trim().replace(/^"+|"+$/g, '');
     if (!cwd) return false;
+    pane.atPrompt = true;
     if (pane.cwd !== cwd) {
       pane.cwd = cwd;
       scheduleSaveSession();
@@ -2490,8 +2505,20 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
         if (tab.tabId === activeId) { renderTree(); updateStatus(); }
       }
     }
-    if (pane.claudeRunning) { pane.claudeRunning = false; scheduleAgentRender(); }
+    // A prompt redrawn by the Resume click's Ctrl+C is not Claude exiting: the resume
+    // command may already have marked Claude running before its line was entered.
+    if (pane.claudeRunning && !pane.resumePending) {
+      // Back at the prompt after Claude: its exit line is just above, and the shell's cwd
+      // is the folder that session belongs to.
+      const sid = readClaudeExitId(pane);
+      if (sid) { pane.lastClaude = { id: sid, cwd }; scheduleSaveSession(); }
+      pane.claudeRunning = false; scheduleAgentRender();
+    }
+    // From the first prompt on, the profile and prompt wrapper are in place, so the
+    // resume button's keystrokes land at PSReadLine.
+    pane.shellReady = true;
     if (pane.copilotRunning) { pane.copilotRunning = false; scheduleAgentRender(); }
+    updateResumeBar(pane);
     if (pane.runOnReady) {
       const cmd = pane.runOnReady; pane.runOnReady = null;
       markAgentRunningFromCmd(pane, cmd);
@@ -2644,7 +2671,7 @@ async function createTab(opts = {}) {
     ]);
   });
 
-  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent });
+  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent, resumeClaude: opts.resumeClaude });
   tab.activePaneId = firstPane.paneId;
 
   setActive(tabId);
@@ -4040,10 +4067,122 @@ function shortModelLabel(model) {
   return bare;
 }
 
+// Session ids are typed into the shell, so anything read back from session.json has to
+// be a bare UUID before it gets near a command line.
+function isClaudeSessionId(id) {
+  return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
+function sameCwd(a, b) {
+  const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+  return !!a && norm(a) === norm(b);
+}
+
+// The CLI prints "claude --resume <id>" as it exits. Read from the screen rather than the
+// usage poller: that one picks the newest transcript in the folder, which can belong to
+// another pane or a chat tab in the same repo. Only lines after this run's command line
+// count, so an older exit line or a typed "claude --resume X" is never picked up.
+function readClaudeExitId(pane) {
+  const buf = pane.term.buffer.active;
+  const end = buf.baseY + buf.cursorY;
+  let start = 0;
+  const m = pane.claudeStartMarker;
+  if (m && !m.isDisposed) {
+    start = m.line + 1;
+    while (start <= end && buf.getLine(start)?.isWrapped) start++;
+  }
+  pane.claudeStartMarker = null;
+  if (m) m.dispose();
+  let text = '';
+  for (let y = Math.max(start, end - 20); y <= end; y++) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    text += (line.isWrapped ? '' : '\n') + line.translateToString(true);
+  }
+  const all = [...text.matchAll(/claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi)];
+  return all.length ? all[all.length - 1][1] : null;
+}
+
+// Marks the line the claude command sits on; a marker follows the line when scrollback
+// trims, where a stored row index would drift.
+function markClaudeStart(pane) {
+  if (pane.claudeStartMarker) pane.claudeStartMarker.dispose();
+  pane.claudeStartMarker = pane.term.registerMarker(0) || null;
+  pane.claudeRunGen++;
+  pane.claudeStartedAt = Date.now();
+}
+
+// A terminal pane whose last Claude session is known offers to resume it whenever the
+// shell sits idle at a prompt in that session's folder: Claude looks resume ids up per
+// project folder, so elsewhere it would not work. Dismissing forgets the session.
+function canOfferResume(pane) {
+  const tab = tabs.get(ptyPaneMap.get(pane.ptyId)?.tabId);
+  return !!tab && tab.type !== 'chat' && !!pane.shellReady && pane.atPrompt && !pane.resumePending
+    && !pane.claudeRunning && !pane.copilotRunning
+    && isClaudeSessionId(pane.lastClaude?.id) && sameCwd(pane.lastClaude.cwd, pane.cwd);
+}
+function updateResumeBar(pane) {
+  if (!canOfferResume(pane)) { hideResumeBar(pane); return; }
+  const sid = pane.lastClaude.id;
+  if (pane.resumeBar?.dataset.sid === sid) return;
+  hideResumeBar(pane);
+  const bar = document.createElement('div');
+  bar.className = 'pane-resume-bar';
+  bar.dataset.sid = sid;
+  const btn = document.createElement('button');
+  btn.className = 'pane-resume-btn';
+  btn.textContent = 'Resume Claude session';
+  btn.title = `claude --resume ${sid}`;
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    // A command may have started since the bar was drawn.
+    const ok = canOfferResume(pane) && pane.lastClaude.id === sid;
+    hideResumeBar(pane);
+    if (!ok) return;
+    pane.resumePending = true;
+    clearTimeout(pane.resumePendingTimer);
+    pane.resumePendingTimer = setTimeout(() => { clearResumePending(pane); updateResumeBar(pane); }, 2000);
+    // Ctrl+C first drops anything half-typed at the prompt, so the command runs alone.
+    window.term.input(pane.ptyId, '\x03');
+    await new Promise(r => setTimeout(r, 150));
+    const cmd = `claude --resume ${sid}`;
+    markAgentRunningFromCmd(pane, cmd);
+    window.term.input(pane.ptyId, cmd + '\r');
+    pane.term.focus();
+  });
+  const id = document.createElement('span');
+  id.className = 'pane-resume-id';
+  id.textContent = sid.slice(0, 8);
+  const close = document.createElement('button');
+  close.className = 'pane-resume-dismiss';
+  close.innerHTML = closeSvg();
+  close.title = 'Dismiss';
+  close.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideResumeBar(pane);
+    pane.lastClaude = null;
+    scheduleSaveSession();
+  });
+  bar.append(btn, id, close);
+  pane.el.appendChild(bar);
+  pane.resumeBar = bar;
+}
+function clearResumePending(pane) {
+  clearTimeout(pane.resumePendingTimer);
+  pane.resumePendingTimer = null;
+  pane.resumePending = false;
+}
+function hideResumeBar(pane) {
+  if (!pane.resumeBar) return;
+  pane.resumeBar.remove();
+  pane.resumeBar = null;
+}
+
 function markAgentRunningFromCmd(pane, cmd) {
   if (!cmd) return;
   const lo = cmd.trim().toLowerCase();
   if (lo === 'claude' || lo.startsWith('claude ') || lo.startsWith('claude.')) {
+    markClaudeStart(pane);
     pane.claudeRunning = true;
     pane.claudeBusyUntil = Date.now() + 600;
     scheduleAgentRender();
@@ -4053,6 +4192,7 @@ function markAgentRunningFromCmd(pane, cmd) {
     pane.copilotBusyUntil = Date.now() + 600;
     scheduleAgentRender();
   }
+  updateResumeBar(pane);
 }
 
 function getAllAgentPanes() {
@@ -4570,20 +4710,50 @@ function maybeAutoSaveAgentSession(tab, pane, type) {
   scheduleSaveSession();
 }
 
+let claudeUsageBusy = false;
 async function refreshClaudeUsage() {
+  // A slow usage read can outlast the 2 s tick; don't stack polls behind it.
+  if (claudeUsageBusy) return;
   const items = [];
   for (const [, tab] of tabs)
     for (const [, pane] of tab.panes)
       if (pane.claudeRunning && pane.cwd) items.push({ tab, pane });
   if (!items.length) return;
-  await Promise.all(items.map(async ({ tab, pane }) => {
-    try {
-      pane.usage = await window.claudeApi.usage(pane.cwd);
-      if (pane.usage?.sessionId) pane.claudeSessionId = pane.usage.sessionId;
-      maybeAutoSaveAgentSession(tab, pane, 'claude');
-    } catch (_) {}
-  }));
+  claudeUsageBusy = true;
+  try {
+    await Promise.all(items.map(async ({ tab, pane }) => {
+      try {
+        pane.usage = await window.claudeApi.usage(pane.cwd);
+        if (pane.usage?.sessionId) pane.claudeSessionId = pane.usage.sessionId;
+        maybeAutoSaveAgentSession(tab, pane, 'claude');
+      } catch (_) {}
+      // Not awaited: a process snapshot can take a second or more.
+      if (tab.type !== 'chat') capturePaneClaudeSession(pane);
+    }));
+  } finally {
+    claudeUsageBusy = false;
+  }
   scheduleAgentRender();
+}
+
+// Learns the running session's id from the CLI's session file, so the pane can offer a
+// resume even if the app dies before Claude prints its exit line. The exit line still
+// wins: it is read once claudeRunning is off, and polls that land after that are dropped.
+// A session nothing was sent in has no transcript and can't be resumed, so it doesn't
+// replace the previous one until it does.
+async function capturePaneClaudeSession(pane) {
+  if (pane.sessionPollBusy) return;
+  pane.sessionPollBusy = true;
+  const gen = pane.claudeRunGen;
+  let res = null;
+  try { res = await window.claudeApi.paneSession(pane.ptyId, pane.claudeStartedAt, pane.cwd); } catch (_) {}
+  pane.sessionPollBusy = false;
+  if (!pane.claudeRunning || gen !== pane.claudeRunGen) return;
+  if (!res || res.hasTranscript !== true || !isClaudeSessionId(res.sessionId) || typeof res.cwd !== 'string') return;
+  if (pane.lastClaude?.id === res.sessionId && sameCwd(pane.lastClaude.cwd, res.cwd)) return;
+  pane.lastClaude = { id: res.sessionId, cwd: res.cwd };
+  scheduleSaveSession();
+  updateResumeBar(pane);
 }
 
 async function refreshCopilotUsage() {
@@ -4951,6 +5121,11 @@ function saveSession() {
       chatModel: view ? view.model : null,
       chatPermissionMode: view ? view.getState().permissionMode : null,
       chatTerminalOpen: view ? view.isTerminalOpen() : false,
+      // Last Claude CLI session that exited in this tab, offered as one-click resume on
+      // restore. Only the active pane comes back, so a split sibling's only counts when it
+      // ran in the same folder; otherwise it could never be offered.
+      lastClaude: ap ? (ap.lastClaude || [...t.panes.values()]
+        .find(p => p.lastClaude && sameCwd(p.lastClaude.cwd, ap.cwd))?.lastClaude || null) : null,
       scrollback
     });
     if (id === activeId) activeIndex = i;
@@ -4979,14 +5154,19 @@ window.shortcuts?.onBeforeClose?.(async () => {
     for (const p of panes) window.term.input(p.ptyId, '\x03');
     await new Promise(r => setTimeout(r, 250));
     for (const p of panes) if (p.claudeRunning) window.term.input(p.ptyId, '\x03');
-    // A busy pane spends its first Ctrl+C on the interrupt, so keep nudging stragglers.
+    // A busy pane spends its first Ctrl+C on the interrupt, an open menu or typed input
+    // eats more. The CLI only exits on two presses inside its short "press again" window,
+    // so each nudge is a pair; single presses a second apart would never exit.
     const deadline = Date.now() + 5000;
     let nextNudge = Date.now() + 1000;
     while (panes.some(p => p.claudeRunning) && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 100));
       if (Date.now() >= nextNudge) {
         nextNudge = Date.now() + 1000;
-        for (const p of panes) if (p.claudeRunning) window.term.input(p.ptyId, '\x03');
+        const stragglers = panes.filter(p => p.claudeRunning);
+        for (const p of stragglers) window.term.input(p.ptyId, '\x03');
+        await new Promise(r => setTimeout(r, 150));
+        for (const p of stragglers) if (p.claudeRunning) window.term.input(p.ptyId, '\x03');
       }
     }
     // Let xterm finish parsing the exit output before it is serialized.
@@ -5053,7 +5233,9 @@ window.shortcuts?.onBeforeClose?.(async () => {
             if (v) v.toggleTerminal();
           }
         }
-        else tab = await createTab({ cwd: t.cwd || undefined, initialContent: t.scrollback || null });
+        else tab = await createTab({ cwd: t.cwd || undefined, initialContent: t.scrollback || null,
+          resumeClaude: isClaudeSessionId(t.lastClaude?.id) && typeof t.lastClaude.cwd === 'string'
+            ? { id: t.lastClaude.id, cwd: t.lastClaude.cwd } : null });
         if (t.color) setTabColor(tab, t.color);
         if (t.customTitle) {
           tab.customTitle = t.customTitle;

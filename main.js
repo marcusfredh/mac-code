@@ -9,6 +9,7 @@ const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 const { deriveFlow } = require('./flowState');
 const { autoAllowsCommand } = require('./autoMode');
+const { parseSessionFile, parseProcessSnapshot, PaneSessionTracker } = require('./claudeSessions');
 const github = require('./github');
 
 app.setName('Mac Code');
@@ -226,6 +227,7 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
       mainWindow.webContents.send('terminal:exit', id, exitCode);
     }
     ptys.delete(id);
+    forgetPaneClaude(id);
   });
 
   return { id, shell, cwd, flowKey };
@@ -246,6 +248,7 @@ ipcMain.on('terminal:kill', (event, id) => {
   if (p) {
     try { p.kill(); } catch (_) {}
     ptys.delete(id);
+    forgetPaneClaude(id);
   }
 });
 
@@ -458,8 +461,10 @@ ipcMain.handle('git:switch', async (event, { cwd, branch } = {}) => {
 github.register(ipcMain, () => mainWindow);
 
 // ----- IPC: Claude session usage -----
+// Claude names project folders by turning every non-alphanumeric character into '-',
+// so C:\Users\a.b becomes C--Users-a-b; dots and underscores included.
 function encodeCwdForClaude(cwd) {
-  return cwd.replace(/[:\\/\s]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 // A model's native context window is 1M for every current family except Haiku —
@@ -955,6 +960,79 @@ ipcMain.handle('claude:defaultModel', async () => {
   } catch (err) {
     return { model: null, error: err.code || err.message };
   }
+});
+
+// ----- IPC: which Claude session runs in a terminal pane -----
+// The CLI keeps ~/.claude/sessions/<pid>.json while it runs. Matching one to a pane
+// lets the resume button know the session id before Claude exits, and keeps it if the
+// app is killed mid-session. Several panes (or an external terminal) can run Claude
+// in the same folder, so a file is only taken once a process snapshot shows it
+// descends from the pane's shell.
+const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
+const paneSessions = new PaneSessionTracker();
+let procSnapshot = null;  // { at, promise } shared by every pane
+
+function forgetPaneClaude(ptyId) {
+  paneSessions.forget(ptyId);
+}
+
+async function readClaudeSessionFile(pid) {
+  try {
+    return parseSessionFile(await fs.promises.readFile(path.join(CLAUDE_SESSIONS_DIR, pid + '.json'), 'utf8'));
+  } catch (_) { return null; }
+}
+
+async function readClaudeSessionFiles() {
+  let names;
+  try { names = await fs.promises.readdir(CLAUDE_SESSIONS_DIR); } catch (_) { return []; }
+  const pids = names.map(n => n.match(/^(\d+)\.json$/)).filter(Boolean).map(m => m[1]);
+  return (await Promise.all(pids.map(readClaudeSessionFile))).filter(Boolean);
+}
+
+// One PowerShell for all panes, reused for a few seconds: polls from several panes
+// land in the same tick. windowsHide keeps it from flashing a console.
+function processSnapshot() {
+  if (procSnapshot && Date.now() - procSnapshot.at < 3000) return procSnapshot.promise;
+  const cmd = "Get-CimInstance Win32_Process | ForEach-Object { '{0},{1},{2},{3}' -f $_.ProcessId,$_.ParentProcessId,$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() }),$_.Name }";
+  const promise = new Promise(resolve => {
+    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+      { windowsHide: true, timeout: 10000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout) => resolve(err ? null : parseProcessSnapshot(stdout)));
+  });
+  procSnapshot = { at: Date.now(), promise };
+  // A failed snapshot shouldn't block retries for the full cache window.
+  promise.then(p => { if (!p && procSnapshot?.promise === promise) procSnapshot = null; });
+  return promise;
+}
+
+ipcMain.handle('claude:paneSession', async (_event, ptyId, sinceMs, cwd) => {
+  const shell = ptys.get(ptyId);
+  if (!shell || !Number.isFinite(sinceMs) || typeof cwd !== 'string') return null;
+  let s;
+  const cached = paneSessions.cached(ptyId, sinceMs);
+  if (cached) {
+    s = paneSessions.verifyCached(ptyId, await readClaudeSessionFile(cached.claudePid));
+    if (!s) return null;
+  } else {
+    if (paneSessions.givenUp(ptyId, sinceMs)) return null;
+    const candidates = paneSessions.candidates(ptyId, await readClaudeSessionFiles(), { sinceMs, cwd });
+    // Nothing yet is normal while the CLI starts up; that costs a readdir, so it isn't
+    // counted against the give-up limit.
+    if (!candidates.length) return null;
+    const procs = await processSnapshot();
+    // The pty may have exited while the snapshot ran.
+    if (!ptys.has(ptyId)) return null;
+    s = paneSessions.resolve(ptyId, candidates, procs, { sinceMs, shellPid: shell.pid });
+    if (!s) return null;
+  }
+  // A session with no transcript yet (Claude opened, nothing sent) can't be resumed.
+  // sessionId is a validated UUID, so the path stays inside the project folder.
+  let hasTranscript = false;
+  try {
+    await fs.promises.access(path.join(os.homedir(), '.claude', 'projects', encodeCwdForClaude(s.cwd), s.sessionId + '.jsonl'));
+    hasTranscript = true;
+  } catch (_) {}
+  return { sessionId: s.sessionId, cwd: s.cwd, hasTranscript };
 });
 
 // ----- IPC: Claude → Copilot session handoff -----
