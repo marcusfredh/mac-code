@@ -1,11 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { autoAllowsCommand } = require('../autoMode');
+const { autoAllowsCommand, tokenize } = require('../autoMode');
 
 const ALLOWED = [
   'git status',
   'npm test',
   'ls -la && git diff',
+  'git log --oneline -5 | head -3',
+  'git diff HEAD~1 -- src/app.js',
   'gh pr view 12',
   'gh pr list --state open',
   'gh pr diff 3',
@@ -14,16 +16,48 @@ const ALLOWED = [
   'gh run view 1 --log',
   'gh repo view',
   'gh.exe pr view 1',
+  '"gh" pr view 1',
   'gh api repos/a/b/pulls',
   'gh api repos/a/b --jq .name --paginate',
-  'gh pr view 1 && git status',
   "gh api repos/o/r/pulls/1/comments --jq '.[].body'",
+  "gh api repos/o/r/pulls --jq '.[] | select(.draft) | .title'",
+  'gh pr view 1 && git status',
+  'git branch',
   'git branch -a',
+  'git branch -vv',
   'git branch --show-current',
+  'git branch --list feat/x',
+  'git branch --contains abc123',
   'git stash list',
+  'git stash show',
+  'git remote',
   'git remote -v',
+  'git remote get-url origin',
   'find . -name "*.js"',
-  'node -e "console.log(1)"'
+  "grep -rn 'foo(bar)' src",
+  './node_modules/.bin/jest --watch=false',
+  "node --test --test-name-pattern=x tests/a.test.js",
+  "git stash list -p",
+  "python3 tools/gen.py --out x",
+  "npm test 2>&1",
+  "npm test 2>&1 | tail -20",
+  "git diff --text",
+  "git stash show -p",
+  "git branch --contains abc --merged",
+  "node scripts/check.js",
+  "node --test",
+  "python script.py -c x",
+  "python -m pytest -q",
+  "tree -L 2",
+  "git log --format=\"%h %s\" -5",
+  "grep -rn format src",
+  "rg --pretty foo",
+  "rg -n move src",
+  "git diff --no-ext-diff",
+  "git log --oneline --graph",
+  "git blame src/app.js",
+  "gh api repos/a/b --paginate --slurp",
+  "node_modules/.bin/tsc --noEmit"
 ];
 
 const ASKS = [
@@ -42,7 +76,7 @@ const ASKS = [
   'gh run download 1',
   'gh pr -R x/y merge 1',
   'gh api',
-  // gh api method/body flags, plain, bundled and assembled by the shell
+  // gh api method/body flags: plain, bundled, quoted, or assembled by either shell
   'gh api -XPOST repos/a',
   'gh api repos/a -X DELETE',
   'gh api --method=GET repos/a',
@@ -50,11 +84,17 @@ const ASKS = [
   'gh api graphql -F q=1',
   'gh api repos/a -iXPOST',
   'gh api repos/a --input f.json',
+  'gh api repos/a "-XPOST"',
+  "gh api repos/a --jq '.a' -'F' q=1",
   'gh api repos/o/r/hooks ""-XPOST',
   "gh api repos/o/r/hooks -''X DELETE",
   'gh api repos/o/r ${A:--XDELETE}',
   'gh api repos/o/r -\\X DELETE',
-  // smuggling past the segment split
+  'gh api repos/o/r/git/refs/heads/main {-X,DELETE}',
+  'gh api graphql {-f,query=mutation}',
+  'gh api repos/o/r/hooks x,-XPOST',
+  "gh api repos/o/r/hooks 'a','-XPOST'",
+  // smuggling past the segment split: background, newlines, substitution
   'gh pr view 1 && gh repo deploy-key add k',
   'gh pr view 1 & gh repo deploy-key add k.pub --allow-write',
   'gh pr view 1\ngh secret set X -b y',
@@ -63,29 +103,117 @@ const ASKS = [
   'git log `gh secret set X -b y`',
   'cat <(gh secret set X -b y)',
   'echo ${X}',
-  // PowerShell grouping runs the inner command
+  'echo "$(gh secret set X)"',
+  'echo "`gh secret set X`"',
+  // PowerShell evaluation inside arguments
   'echo (gh secret set X -b y)',
   'ls (gh repo deploy-key add k.pub --allow-write)',
   'echo @(gh secret set X -b y)',
   'ls -Path x,(gh secret set X)',
-  // quoting still cannot assemble a gh api write flag
-  'gh api repos/a "-XPOST"',
-  "gh api repos/a --jq '.a' -'F' q=1",
-  // allowlisted heads that execute or write
+  'echo a(gh secret set X -b y)',
+  'echo a.(gh secret set X)',
+  'echo a+(gh secret set X)',
+  'ls | where { Set-Content a b }',
+  'echo $ExecutionContext.InvokeCommand.InvokeScript("Set-Content f2.txt pwned")',
+  'echo \u2018x\u2019',
+  // globs can pick up attacker-named files like `-delete`
+  'find . -name *.js',
+  // allowlisted heads that execute or write, quoted or not
   'env gh secret set X -b y',
   'cat s.sh | env bash',
-  'find . -exec gh secret set X -b y \;',
+  'find . -exec gh secret set X -b y \\;',
+  "find . -exec gh secret set X ';'",
   'find . -delete',
+  'find . "-delete"',
+  'git branch newbranch',
   'git branch -D main',
+  'git branch "-D" main',
   'git branch --delete main',
+  'git branch -u origin/x',
+  'git stash',
+  'git stash -u',
   'git stash clear',
+  "git stash 'drop'",
   'git stash pop',
   'git remote set-url origin https://evil.example/x.git',
-  // pre-existing risky tokens
+  "git remote 'set-url' origin https://evil/x",
+  'git log --output=C:/x.txt',
+  'git diff --output=out.txt',
+  'npm audit fix --force',
+  'set X=1',
+  'X=1 git status',
+  // options that run programs, write files or read outside the repo
+  "rg --pre ./x.exe foo",
+  "rg --pre=x foo",
+  "rg --pre-glob \"*.js\" foo",
+  "git diff --ext-diff",
+  "git diff --ext",
+  "git show --textconv HEAD",
+  "git diff --no-index C:/Users/x/.ssh/id_rsa a",
+  "git blame --contents C:/secret.txt a.js",
+  "git log --out=x.txt",
+  "gh api repos/a --hostname evil.example",
+  "gh api repos/a -H X-HTTP-Method-Override:POST",
+  "gh api repos/a --method GET",
+  "git status --% & evil",
+  "echo --% x",
+  "./x/git status",
+  "tools/gh pr view 1",
+  "git status\rgh secret set X",
+  "npm audit fix",
+  // round-2 findings
+  "git stash show -p --output=C:/Users/x/.bashrc",
+  "git stash show --ext-diff",
+  "git branch --set-upstream-t=x",
+  "git branch --unset-up",
+  "git branch --edit-desc",
+  "tree -o ../x.txt",
+  "tree -R -H x",
+  "x2>&1",
+  "npm test 2>&1x",
+  "npm test 2>&2",
+  // round-3 findings: stash list, bundled tree flags
+  "git stash list -p --output=../wrote.txt",
+  "git stash list --ext-diff",
+  "tree -ao out.txt",
+  // pre-existing risky tokens and syntax
   'git push',
   'ls > out.txt',
-  'rm -rf x'
+  'rm -rf x',
+  'echo "unterminated',
+  '&& ls',
+  'C:\\tools\\gh.exe pr view 1'
 ];
+
+// Project-code runners are accepted risk (see autoMode.js): any arguments pass.
+const ACCEPTED = [
+  "node -e \"console.log(1)\"",
+  "node -p 1",
+  "node --eval=1",
+  "node",
+  "node -",
+  "python -c \"import os\"",
+  "python -Ic \"import os\"",
+  "python -m http.server",
+  "python",
+  "node -pe \"require(1)\"",
+  "echo 1+1 | node --title x",
+  "node --title x",
+  "node -C x a.js",
+  "node --env-file x a.js",
+  "node --test -e x",
+  "node --test --title x",
+  "python -W ignore -c \"print(1)\"",
+  "python -X dev -c \"print(1)\"",
+  "python -mpip install requests",
+  "python -m pip install requests",
+  "py -3 -c x",
+  "echo \"require(1)\" | node"
+];
+
+test('auto mode allows project-code runners as accepted risk', () => {
+  for (const cmd of ACCEPTED) assert.strictEqual(autoAllowsCommand(cmd), true, cmd);
+});
 
 test('auto mode allows read-only commands', () => {
   for (const cmd of ALLOWED) assert.strictEqual(autoAllowsCommand(cmd), true, cmd);
@@ -93,4 +221,11 @@ test('auto mode allows read-only commands', () => {
 
 test('auto mode asks for writes and anything it cannot see into', () => {
   for (const cmd of ASKS) assert.strictEqual(autoAllowsCommand(cmd), false, cmd);
+});
+
+test('tokenize de-quotes words and splits segments', () => {
+  assert.deepStrictEqual(tokenize(`git log --format="%h %s" | grep 'a b'`),
+    [['git', 'log', '--format=%h %s'], ['grep', 'a b']]);
+  assert.deepStrictEqual(tokenize('a""-X b && c; d || e'), [['a-X', 'b'], ['c'], ['d'], ['e']]);
+  assert.strictEqual(tokenize('a $b'), null);
 });
