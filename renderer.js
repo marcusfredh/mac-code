@@ -180,6 +180,31 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ---------- tab strip wheel scroll ----------
+// The strip hides its scrollbar, so overflowed tabs were unreachable with a mouse.
+// Wheel down scrolls right, up scrolls left; a touchpad's sideways swipe still works.
+tabsEl.addEventListener('wheel', (e) => {
+  if (e.ctrlKey || tabsEl.scrollWidth <= tabsEl.clientWidth) return;   // Ctrl+wheel / pinch = zoom
+  const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  if (!d) return;
+  e.preventDefault();
+  // deltaMode 1 = lines, 2 = pages (some mice/drivers); pixels otherwise.
+  const px = e.deltaMode === 1 ? d * 16 : e.deltaMode === 2 ? d * tabsEl.clientWidth : d;
+  tabsEl.scrollLeft += px;
+}, { passive: false });
+
+// Scroll the strip just enough to show a chip (new tabs are appended off-screen right).
+// Only the strip moves — scrollIntoView could also scroll the window's ancestors.
+function revealTabChip(el) {
+  if (!el || el.parentElement !== tabsEl) return;
+  const r = el.getBoundingClientRect();
+  const s = tabsEl.getBoundingClientRect();
+  const left = r.left - s.left + tabsEl.scrollLeft;
+  const right = left + r.width;
+  if (left < tabsEl.scrollLeft) tabsEl.scrollLeft = left;
+  else if (right > tabsEl.scrollLeft + tabsEl.clientWidth) tabsEl.scrollLeft = right - tabsEl.clientWidth;
+}
+
 // ---------- tab drag-to-reorder ----------
 let tabDrag = null;
 function reorderTabsMap() {
@@ -1694,6 +1719,7 @@ function setActive(tabId) {
     tab.container.classList.toggle('active', tid === tabId);
     for (const [, pane] of tab.panes) pane.suppressBusyUntil = suppressUntil;
   }
+  revealTabChip(target.tabEl);
   const tab = tabs.get(tabId);
   // A chat tab shown inside the active grid is still on-screen and must count as active,
   // or its view would pause as if backgrounded.
