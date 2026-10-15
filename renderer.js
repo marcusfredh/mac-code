@@ -1697,16 +1697,31 @@ function setActivePane(tab, paneId) {
   }
 }
 
-function setActive(tabId) {
+// keepOverlay: a switch the user didn't ask for (a tab closing on its own, session
+// restore). The tab behind the GitHub overlay changes, but the overlay stays up and
+// keeps focus.
+function setActive(tabId, { keepOverlay = false } = {}) {
   if (!tabs.has(tabId)) return;
+  // Showing a tab means leaving the GitHub overlay (the tab it opened, say).
+  if (ghOverlay.open && !keepOverlay) hideGhOverlay({ restoreFocus: false });
+  const behind = ghOverlay.open;   // only still open here with keepOverlay
+  // The element focused before the overlay belongs to the old tab; closing the overlay
+  // should land in the new one instead.
+  if (behind && tabId !== activeId) ghOverlay.returnFocus = null;
   // A tab that lives inside a grid can't be shown on its own — its container is mounted
   // in the grid's cell. Surface the grid and focus that cell instead (covers Ctrl+Tab,
   // openInEditor, history restore, anything that targets a member directly).
   const target = tabs.get(tabId);
   if (target.gridOwner && tabs.has(target.gridOwner)) {
     const g = tabs.get(target.gridOwner);
-    if (activeId !== g.tabId) setActive(g.tabId);
-    focusGridCell(g, tabId);
+    if (activeId !== g.tabId) setActive(g.tabId, { keepOverlay });
+    // Grid already active: setActive(grid) didn't run, so GitHub member views the
+    // overlay paused still need their polling back.
+    else syncGitHubTabPolling();
+    // Already the focused cell: focusGridCell is a no-op, but focus may just have left
+    // with the overlay — put it back in the cell.
+    if (!behind && g.focusedMember === tabId) focusMemberSurface(target);
+    else focusGridCell(g, tabId, { focus: !behind });
     return;
   }
   activeId = tabId;
@@ -1725,22 +1740,21 @@ function setActive(tabId) {
   // or its view would pause as if backgrounded.
   const gridMemberIds = tab && tab.type === 'grid' ? new Set(tab.members) : null;
   for (const [tid, view] of chatTabs) view.setActive(tid === tabId || !!(gridMemberIds && gridMemberIds.has(tid)));
-  for (const [tid, t] of tabs) {
-    if (t.type === 'github' && t.view) t.view.setActive(tid === tabId || !!(gridMemberIds && gridMemberIds.has(tid)));
-  }
+  syncGitHubTabPolling();
   updateHybrid();
+  // Behind the overlay: lay the tab out, but leave focus in the overlay.
   const pane = getActivePane(tab);
   if (pane) {
     requestAnimationFrame(() => {
       try { pane.fit.fit(); } catch (_) {}
-      pane.term.focus();
+      if (!behind) pane.term.focus();
       window.term.resize(pane.ptyId, pane.term.cols, pane.term.rows);
     });
   } else if (tab.type === 'editor' && tab.editor) {
-    requestAnimationFrame(() => { try { tab.editor.focus(); } catch (_) {} });
+    if (!behind) requestAnimationFrame(() => { try { tab.editor.focus(); } catch (_) {} });
   } else if (tab.type === 'chat') {
     const view = chatTabs.get(tabId);
-    if (view) requestAnimationFrame(() => view.focus());
+    if (view && !behind) requestAnimationFrame(() => view.focus());
   } else if (tab.type === 'github' && tab.view) {
     if (tab.pendingOpen) {
       const target = tab.pendingOpen;
@@ -1748,11 +1762,11 @@ function setActive(tabId) {
       tab.view.setHere(ghHere);
       tab.view.open(target);
     }
-    requestAnimationFrame(() => tab.view.focus());
+    if (!behind) requestAnimationFrame(() => tab.view.focus());
   } else if (tab.type === 'grid') {
     requestAnimationFrame(() => {
       for (const id of tab.members) refitMember(tabs.get(id));
-      focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
+      if (!behind) focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
     });
   }
   renderTree();
@@ -1869,6 +1883,7 @@ async function refreshBranch(cwd, force = false) {
       ghHere = here;
       const g = findGitHubTab();
       if (g && g.view) g.view.setHere(here);
+      if (ghOverlay.view) ghOverlay.view.setHere(here);
     });
   }
 }
@@ -2811,7 +2826,7 @@ async function createTab(opts = {}) {
   const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent, resumeClaude: opts.resumeClaude });
   tab.activePaneId = firstPane.paneId;
 
-  setActive(tabId);
+  setActive(tabId, { keepOverlay: !!opts.keepOverlay });
   updateStatus();
   return tab;
 }
@@ -2984,7 +2999,8 @@ function focusMemberSurface(m) {
   if (p) p.term.focus();
 }
 
-function focusGridCell(tab, id) {
+// focus false: mark the cell, but leave keyboard focus where it is (behind the overlay).
+function focusGridCell(tab, id, { focus = true } = {}) {
   if (tab.type !== 'grid' || !tabs.has(id)) return;
   // Every mousedown inside a cell bubbles here; only do the (async, FS-touching) refocus
   // work when the focused cell actually changes.
@@ -2995,7 +3011,7 @@ function focusGridCell(tab, id) {
   }
   renderTree();
   updateStatus();
-  focusMemberSurface(tabs.get(id));
+  if (focus) focusMemberSurface(tabs.get(id));
 }
 
 // Mount a tab into the grid. Non-destructive: only moves the live container node.
@@ -3072,7 +3088,7 @@ function openInEditor(filePath) {
   createEditorTab(filePath);
 }
 
-async function createEditorTab(filePath) {
+async function createEditorTab(filePath, opts = {}) {
   const tabId = newTabId();
   const container = document.createElement('div');
   container.className = 'term-container';
@@ -3107,7 +3123,7 @@ async function createEditorTab(filePath) {
   const editorEl = document.createElement('div');
   editorEl.className = 'editor-pane';
   container.appendChild(editorEl);
-  setActive(tabId);
+  setActive(tabId, { keepOverlay: !!opts.keepOverlay });
   updateStatus();
 
   const result = await window.fileApi.read(filePath);
@@ -3504,7 +3520,12 @@ function findGitHubTab() {
   return null;
 }
 
+// Every way into GitHub (links, the status-bar PR pill, Ctrl+Shift+G, the new-tab menu,
+// the toolbar button) lands here. github.openAs = 'overlay' shows the one overlay view
+// even when a GitHub tab is also open (a tab left over from 'tab' mode keeps working,
+// it just isn't where new opens go); 'tab' is the original one-tab behaviour.
 async function openGitHub(target = {}) {
+  if (ghOpenAsOverlay()) return openGitHubOverlay(target);
   let tab = findGitHubTab();
   if (!tab) tab = createGitHubTab();
   const fromCwd = tabCwd(activeTab());
@@ -3515,6 +3536,138 @@ async function openGitHub(target = {}) {
   tab.view.open(target);
   return tab;
 }
+
+// ---------- GitHub overlay ----------
+// One GitHub view over the whole app, created on first use and kept for the window's
+// life, so selection, scroll and the open detail survive close/reopen. It only polls
+// while shown. Esc peels layers: the view's own modal, then its detail pane (both
+// preventDefault/stopPropagation), then the overlay. Switching tabs (including the new
+// terminal that Review/Fix/Checkout opens, or a file opened from the view) closes it;
+// switches nobody asked for (a tab exiting, session restore) pass keepOverlay and only
+// change the tab behind it.
+const ghOverlay = {
+  el: null, view: null, open: false,
+  returnFocus: null,
+  seed: null        // saved view state from the last session, applied on first show
+};
+function ghOpenAsOverlay() { return appSetting('github', 'openAs') !== 'tab'; }
+function ghOverlayOpen() { return ghOverlay.open; }
+
+// A saved view state ({ repo, inbox, view, number, detailRepo }) as an open() target.
+function ghTargetFromState(g) {
+  g = g && typeof g === 'object' ? g : {};
+  const str = (v) => (typeof v === 'string' && v ? v : null);
+  const inbox = str(g.inbox), repo = str(g.repo), view = str(g.view), detailRepo = str(g.detailRepo);
+  const t = inbox ? { inbox, view } : repo ? { repo, view } : {};
+  if (Number.isInteger(g.number) && g.number > 0 && detailRepo) Object.assign(t, { repo: t.repo || detailRepo, number: g.number });
+  return t;
+}
+
+function ensureGhOverlay() {
+  if (ghOverlay.view) return;
+  const back = document.createElement('div');
+  back.className = 'gh-overlay';
+  back.setAttribute('role', 'dialog');
+  back.setAttribute('aria-modal', 'true');
+  back.setAttribute('aria-label', 'GitHub');
+  const panel = document.createElement('div');
+  panel.className = 'gh-overlay-panel';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'gh-icon-btn gh-overlay-close';
+  closeBtn.title = 'Close (Esc)';
+  closeBtn.setAttribute('aria-label', 'Close GitHub');
+  // Static markup, no values.
+  closeBtn.innerHTML = '<svg class="gh-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  const view = window.createGitHubView({
+    openLink,
+    getClone: (repo) => ghKnownClone(repo),
+    onWork: startGitHubWork,
+    // No tab title to keep in sync; the notes context follows the tab behind it.
+    onStateChange: () => scheduleSaveSession()
+  });
+  panel.append(view.el, closeBtn);
+  back.appendChild(panel);
+  document.body.appendChild(back);
+  closeBtn.addEventListener('click', () => hideGhOverlay());
+  back.addEventListener('mousedown', (e) => { if (e.target === back) hideGhOverlay(); });
+  // Bubble phase: anything inside that handles Esc itself marks it handled.
+  back.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) return;
+    e.preventDefault();
+    hideGhOverlay();
+  });
+  ghOverlay.el = back;
+  ghOverlay.view = view;
+  if (ghOverlay.seed) {
+    const seed = ghOverlay.seed;
+    ghOverlay.seed = null;
+    view.setHere(ghHere);
+    view.open(ghTargetFromState(seed));
+  }
+}
+
+async function openGitHubOverlay(target = {}) {
+  const fromCwd = tabCwd(activeTab());
+  ensureGhOverlay();
+  if (!ghOverlay.open) {
+    hideContextMenu();
+    const a = document.activeElement;
+    ghOverlay.returnFocus = a && a !== document.body ? a : null;
+    ghOverlay.open = true;
+    ghOverlay.el.classList.add('show');
+    // A GitHub tab behind the overlay is hidden now: only the overlay polls.
+    syncGitHubTabPolling();
+    ghOverlay.view.setActive(true);
+    ghOverlay.view.focus();
+  }
+  if (fromCwd) ghHere = (await ghContextFor(fromCwd)) || ghHere;
+  if (!ghOverlay.open) return null;   // closed again while the folder resolved
+  ghOverlay.view.setHere(ghHere);
+  ghOverlay.view.open(target);
+  if (!ghOverlay.el.contains(document.activeElement)) ghOverlay.view.focus();
+  return null;
+}
+
+// restoreFocus false: the caller (setActive) is about to focus something itself.
+function hideGhOverlay({ restoreFocus = true } = {}) {
+  if (!ghOverlay.open) return;
+  // An 'ask' link menu opened from the view must not outlive it.
+  hideContextMenu();
+  ghOverlay.open = false;
+  ghOverlay.el.classList.remove('show');
+  ghOverlay.view.setActive(false);
+  const back = ghOverlay.returnFocus;
+  ghOverlay.returnFocus = null;
+  if (!restoreFocus) return;
+  // The tab behind is visible again; a GitHub tab there resumes polling.
+  syncGitHubTabPolling();
+  if (back && back.isConnected && !ghOverlay.el.contains(back) && typeof back.focus === 'function') back.focus();
+  else window.macFocusActive();
+  scheduleSaveSession();
+}
+// GitHub tab views poll only while on screen: the active tab or a member of the active
+// grid, and never while the overlay covers them.
+function syncGitHubTabPolling() {
+  // The raw active tab: activeTab() resolves a grid to its focused member.
+  const at = activeId ? tabs.get(activeId) : null;
+  const members = at && at.type === 'grid' ? new Set(at.members) : null;
+  for (const [tid, t] of tabs) {
+    if (t.type === 'github' && t.view) t.view.setActive(!ghOverlay.open && (tid === activeId || !!(members && members.has(tid))));
+  }
+}
+function toggleGitHub() {
+  if (ghOverlay.open) hideGhOverlay();
+  else openGitHub();
+}
+// Keep keyboard focus inside the overlay while it is up; the layers above it (menus,
+// the command modal, settings and app dialogs) are allowed.
+document.addEventListener('focusin', (e) => {
+  if (!ghOverlay.open) return;
+  const t = e.target;
+  if (!t || !t.closest || ghOverlay.el.contains(t)) return;
+  if (t.closest('.set-overlay, .ctx-menu, .branch-menu, #cmd-modal, .cmd-modal')) return;
+  ghOverlay.view.focus();
+});
 
 function createGitHubTab() {
   const tabId = newTabId();
@@ -3794,7 +3947,7 @@ async function createChatTab(opts = {}) {
   refreshPlanLimits();
   if (!pinnedModels.length) refreshChatModels();
 
-  setActive(tabId);
+  setActive(tabId, { keepOverlay: !!opts.keepOverlay });
   updateStatus();
 
   const res = await window.chatApi.start({
@@ -3957,7 +4110,7 @@ function closeTab(tabId) {
       areaEl.appendChild(m.container);
     }
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
-    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
+    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
 
@@ -3982,14 +4135,14 @@ function closeTab(tabId) {
     closeChatTerminal(tab);
     window.chatApi.stop(tab.chatId);
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
-    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
+    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   if (tab.type === 'editor' || tab.type === 'github') {
     try { tab.editor?.dispose(); } catch (_) {}
     try { tab.view?.dispose(); } catch (_) {}
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
-    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n); else window.win.close(); }
+    if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
     updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   for (const [, pane] of tab.panes) {
@@ -4004,7 +4157,7 @@ function closeTab(tabId) {
   if (wasActive) {
     activeId = null;
     const next = pickNextActive();
-    if (next) setActive(next);
+    if (next) setActive(next, { keepOverlay: true });
     else window.win.close();
   }
   updateStatus();
@@ -5386,7 +5539,7 @@ syncTextFieldFocus();
 // accelerators and xterm's textarea. Apply chunk-level undo to the active pane.
 // (Only fires when no native-undo text field has focus — main skips it otherwise.)
 window.shortcuts?.onCtrlZ?.(() => {
-  if (appModalOpen()) return;
+  if (appModalOpen() || ghOverlayOpen()) return;
   const tab = activeTab();
   if (!tab || tab.type === 'editor') return;
   if (tab.type === 'chat') {
@@ -5430,26 +5583,32 @@ window.addEventListener('keydown', (e) => {
     openSettings();
     return;
   }
+  // While the GitHub overlay is up the tabs behind it are out of reach: tab and notes
+  // shortcuts do nothing (Ctrl+, above and Ctrl+Shift+G below still work).
+  const overGh = ghOverlayOpen();
   if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'Tab' || e.code === 'Tab')) {
     e.preventDefault();
     e.stopPropagation();
-    cycleTab(e.shiftKey ? -1 : 1);
+    if (!overGh) cycleTab(e.shiftKey ? -1 : 1);
   }
   // Ctrl+Shift+N toggles the repo notes for the tab you're in, from anywhere.
   if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.code === 'KeyN') {
     e.preventDefault();
     e.stopPropagation();
-    toggleNotes();
+    if (!overGh) toggleNotes();
   }
-  // Ctrl+Shift+G opens the GitHub tab from anywhere, terminals and composers included.
+  // Ctrl+Shift+G opens GitHub from anywhere, terminals and composers included; with the
+  // overlay up it closes it again.
   if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.code === 'KeyG') {
     e.preventDefault();
     e.stopPropagation();
-    openGitHub();
+    toggleGitHub();
   }
 }, true);
 
 window.addEventListener('keydown', (e) => {
+  // Every shortcut below acts on the tabs, which sit behind the GitHub overlay.
+  if (ghOverlayOpen()) return;
   // Ctrl+` toggles a chat pane's terminal drawer. Handled before the field guard so
   // it also works from inside the composer and from the drawer's own shell.
   if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === '`' || e.code === 'Backquote')) {
@@ -5499,7 +5658,7 @@ window.addEventListener('keydown', (e) => {
 // block Chromium's force-reload, so the DOM keydown above never fires. Mirror the old
 // field guard: no split while a text field owns focus.
 window.shortcuts?.onSplitH?.(() => {
-  if (appModalOpen()) return;
+  if (appModalOpen() || ghOverlayOpen()) return;
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   const t = activeTab();
@@ -5554,6 +5713,8 @@ function saveSession() {
   }
   window.sessionApi.save({
     tabs: tabsData, activeIndex,
+    // The overlay's view state; a never-shown overlay keeps what the last session saved.
+    githubOverlay: ghOverlay.view ? ghOverlay.view.getState() : (ghOverlay.seed || null),
     claudeSessions: claudeSessionLibrary,
     copilotSessions: copilotSessionLibrary
   });
@@ -5681,19 +5842,34 @@ window.onAppSettingsChanged(applySettings);
     }
     renderClaudeSessions();
     // general.restoreTabs off: a fresh start. The saved-session library above still loads.
+    // A view the user already opened while this loaded has its own state; never seed it.
+    const savedOverlay = sess && sess.githubOverlay && typeof sess.githubOverlay === 'object' ? sess.githubOverlay : null;
+    if (appSetting('general', 'restoreTabs') && savedOverlay && !ghOverlay.view) {
+      // Seeds the overlay view; nothing calls gh until it is first shown.
+      ghOverlay.seed = savedOverlay;
+    }
     if (sess?.tabs?.length && appSetting('general', 'restoreTabs')) {
+      // One slot per saved tab (null = not recreated) so activeIndex still lines up.
+      // keepOverlay: the user may already be in the GitHub overlay; tabs restored
+      // behind it must not close it or take focus.
+      const keepOverlay = true;
       const created = [];
       for (const t of sess.tabs) {
         let tab;
-        if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath);
+        if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath, { keepOverlay });
         else if (t.type === 'github') {
-          if (findGitHubTab()) continue;
+          // Overlay mode: a saved GitHub tab becomes the overlay's starting state instead,
+          // unless the overlay's own saved state (newer) or a live view already covers it.
+          if (ghOpenAsOverlay()) {
+            if (t.github && typeof t.github === 'object' && !savedOverlay && !ghOverlay.view) ghOverlay.seed = t.github;
+            created.push(null);
+            continue;
+          }
+          if (findGitHubTab()) { created.push(null); continue; }
           const g = t.github || {};
           tab = createGitHubTab();
           // Opened lazily: the dashboard only boots (and calls gh) when first shown.
-          tab.pendingOpen = g.inbox ? { inbox: g.inbox, view: g.view }
-            : g.repo ? { repo: g.repo, view: g.view } : {};
-          if (g.number && g.detailRepo) Object.assign(tab.pendingOpen, { repo: tab.pendingOpen.repo || g.detailRepo, number: g.number });
+          tab.pendingOpen = ghTargetFromState(g);
           tab.savedState = g;
         }
         else if (t.type === 'chat') {
@@ -5702,7 +5878,8 @@ window.onAppSettingsChanged(applySettings);
             model: t.chatModel || defaultChatModel(),
             permissionMode: t.chatPermissionMode || undefined,
             resumeSessionId: t.chatSessionId || null,
-            color: t.color || null
+            color: t.color || null,
+            keepOverlay
           });
           if (isClaudeSessionId(t.autosavedSid)) tab.autosavedSid = t.autosavedSid;
           if (t.chatTerminalOpen) {
@@ -5712,7 +5889,7 @@ window.onAppSettingsChanged(applySettings);
         }
         else tab = await createTab({ cwd: t.cwd || undefined, initialContent: t.scrollback || null,
           resumeClaude: isClaudeSessionId(t.lastClaude?.id) && typeof t.lastClaude.cwd === 'string'
-            ? { id: t.lastClaude.id, cwd: t.lastClaude.cwd } : null });
+            ? { id: t.lastClaude.id, cwd: t.lastClaude.cwd } : null, keepOverlay });
         if (t.color) setTabColor(tab, t.color);
         if (t.customTitle) {
           tab.customTitle = t.customTitle;
@@ -5723,11 +5900,12 @@ window.onAppSettingsChanged(applySettings);
         created.push(tab);
       }
       const idx = sess.activeIndex;
-      if (idx >= 0 && idx < created.length) setActive(created[idx].tabId);
-      restored = true;
+      if (idx >= 0 && idx < created.length && created[idx]) setActive(created[idx].tabId, { keepOverlay });
+      // Only a GitHub tab was saved and it went to the overlay: start with a shell.
+      restored = created.some(Boolean);
     }
   } catch (_) {}
-  if (!restored) await createTab();
+  if (!restored) await createTab({ keepOverlay: true });
   _sessionReady = true;
   scheduleSaveSession();
   // claude.autoClearDays: the "Clear old" rule, once per start (after _sessionReady so

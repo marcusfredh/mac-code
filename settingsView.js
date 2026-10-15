@@ -24,7 +24,8 @@
       scrollback: 5000, copyOnSelect: false, rightClickPaste: false },
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
       permissionDefault: null, notify: true, showUsage: true, cliPath: '' },
-    github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60 },
+    github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60,
+      openAs: 'overlay', mergeMethod: 'squash', deleteBranchOnMerge: true },
     editor: { autosave: 'off', wordWrap: false, minimap: false, tabSize: 2 },
     explorer: { showHidden: true }
   };
@@ -287,6 +288,10 @@
         controls: [{ kind: 'text', sec: 'claude', key: 'cliPath', placeholder: 'Automatisk', check: 'cliPath', mono: true }] }
     ] },
     { id: 'github', label: 'GitHub', rows: [
+      { label: 'Öppna GitHub som',
+        desc: 'Popup lägger GitHub över appen (Esc eller Ctrl+Shift+G stänger). Egen flik öppnar den som en vanlig flik. En redan öppen GitHub-flik ligger kvar tills du stänger den.',
+        controls: [{ kind: 'segmented', sec: 'github', key: 'openAs', options: [
+          opt('overlay', 'Popup'), opt('tab', 'Egen flik')] }] },
       { label: 'Öppna GitHub-länkar',
         desc: 'PR, issues och repon från chattar och terminaler. Andra länkar öppnas alltid i webbläsaren.',
         controls: [{ kind: 'segmented', sec: 'github', key: 'links', options: [

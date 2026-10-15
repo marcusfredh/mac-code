@@ -104,11 +104,53 @@ command's head — so an allowlisted head cannot smuggle something through a pip
 - Status bar: cwd, tab count, shell, and live agent state
 - Cascadia Code font (bundled), Consolas fallback
 
+### GitHub
+`Ctrl+Shift+G`, the GitHub button, the status-bar PR pill and GitHub links all open the
+GitHub dashboard (PRs, issues, Actions, repo settings; data via the `gh` CLI).
+
+- **Overlay (default)** — the dashboard opens in a large panel over the app (24px from
+  the window edges, the whole window when it is smaller than about 950×650). There is
+  one overlay view per window; it is kept when closed, so the selected repo, filters and
+  open PR come back as they were, and it only polls GitHub while it is shown. Close it
+  with `Esc`, `Ctrl+Shift+G`, the × button or a click on the dimmed backdrop. `Esc`
+  peels one layer at a time: an open dialog first, then the open PR/issue, then the
+  overlay. While it is up, tab shortcuts (`Ctrl+T`, `Ctrl+Tab`, `Ctrl+Shift+W` …) do
+  nothing; `Ctrl+,` still opens the settings on top. Starting work from it (Review /
+  Fix with Claude, Checkout) closes it so the new terminal tab shows. Its state is
+  saved with the session.
+- **Own tab** — Settings → GitHub → *Öppna GitHub som* → *Egen flik* brings back the
+  single GitHub tab. Switching modes leaves an open GitHub tab alone; new opens follow
+  the setting (in overlay mode, opens go to the overlay even if a GitHub tab is open).
+  In overlay mode a GitHub tab saved by an earlier session is not recreated; its state
+  becomes the overlay's.
+
+#### Merging pull requests
+An open PR shows **Merge…** when you have write access to the repo. The dialog lists the
+checks, the review decision and GitHub's merge state in plain words, and offers:
+
+- the merge methods the repo allows (squash / merge commit / rebase),
+- **Delete branch after merge** (not for branches in a fork),
+- **Auto-merge when all requirements are met** when the repo allows auto-merge
+  (pre-ticked when the PR is blocked or behind),
+- for repos whose base branch requires a **merge queue**: *Add to merge queue* instead
+  (no method, no branch delete — the queue decides).
+
+Drafts and PRs with conflicts can't be merged from here (the dialog says why). The merge
+always passes the head commit the dialog was opened on (`--match-head-commit`), so new
+commits pushed meanwhile stop it. With auto-merge or a merge queue, `gh` can't delete
+the branch; the repo's *Automatically delete head branches* setting applies (shown in
+the dialog). After any attempt the PR is fetched again: the state pill then shows
+*Merged*, *Auto-merge on* or *In merge queue (#n)*, and a failure is explained in the
+dialog. With auto-merge on, the button reads **Auto-merge on…** and lets you turn it
+off. The last method and the delete-branch choice are remembered
+(`github.mergeMethod`, `github.deleteBranchOnMerge`).
+
 ### Settings
 `Ctrl+,` or the gear in the titlebar opens the settings. Every change is saved at once
 (no Save button) to `settings.json` in the app's user-data folder; the search box
 filters across all categories. The defaults are the app's behavior before settings
-existed, so nothing changes until you change it.
+existed, so nothing changes until you change it — except *Öppna GitHub som*, which
+defaults to the overlay.
 
 - **Allmänt** — restore tabs at start, PowerShell 7 or Windows PowerShell for new tabs,
   a start folder for new tabs, and an optional confirm before closing a tab or pane
@@ -124,7 +166,7 @@ existed, so nothing changes until you change it.
   meter, and a custom path to `claude` — used by chat panes and the app's own `claude`
   commands (MCP), not by terminal tabs; it must be a full path to an existing
   `claude.exe` / `.cmd` / `.bat`, otherwise the normal lookup is used.
-- **GitHub** — open GitHub links in the app, the browser, or ask (the GitHub tab's
+- **GitHub** — open GitHub as an overlay or its own tab; open GitHub links in the app, the browser, or ask (the GitHub tab's
   checkbox is the same setting); whether Ctrl+click flips that; a worktree folder
   template with `{repo}` and `{branch}` (a full path that contains `{branch}` and a
   folder named `worktrees`; empty = next to the clone); draft PRs; the GitHub tab's
@@ -149,6 +191,7 @@ the settings file once, on the first start with this version.
 | `Ctrl+Shift+R` / `Ctrl+Shift+D` | Split right / split down |
 | `Ctrl+B` / `Ctrl+Shift+B` | Toggle Explorer / Agents panel |
 | `F2` | Rename tab |
+| `Ctrl+Shift+G` | Open GitHub (overlay: open / close) |
 | `Ctrl+\`` | Toggle a chat pane's terminal drawer |
 | `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` | Undo / redo — native in a composer (like Notepad), chunk-level undo in the terminal |
 | `Enter` / `Shift+Enter` | Send / newline (composer) |

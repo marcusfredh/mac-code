@@ -2107,6 +2107,42 @@
     .gh-import-status { font-size: 11px; }
     .gh-import-status.ok { color: var(--gh-open); } .gh-import-status.fail { color: var(--gh-closed); }
 
+    /* Merge dialog */
+    .gh-badge.merge { color: var(--gh-merged); border-color: rgba(163, 113, 247, 0.4); background: rgba(163, 113, 247, 0.1); }
+    .gh-merge { display: flex; flex-direction: column; gap: 12px; }
+    .gh-merge-status { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--fill); }
+    .gh-merge-line { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.45; color: var(--fg); }
+    .gh-merge-line .gh-ico { margin-top: 1px; }
+    .gh-merge-block { padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; background: rgba(210, 153, 34, 0.12); color: var(--amber); }
+    .gh-merge-methods { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+    .gh-merge-methods legend { padding: 0; margin-bottom: 4px; }
+    .gh-merge-method { align-items: flex-start; }
+    .gh-merge-method input { margin-top: 2px; }
+    .gh-merge-method-name { color: var(--fg-strong); }
+    .gh-check.off { opacity: 0.5; }
+    .gh-modal :is(input, .gh-btn, .gh-icon-btn):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* GitHub overlay (github.openAs = overlay): one view over the whole app. z 900 keeps
+       context menus (1000+), the command modal (1200), settings (1300) and app dialogs
+       (1400) on top. It starts below the 32px titlebar, so the window buttons and the
+       drag area stay usable. no-drag: it still covers the tab bar, a drag region; that
+       carves out its whole box, the panel included. */
+    .gh-overlay {
+      position: fixed; top: 32px; left: 0; right: 0; bottom: 0; z-index: 900; display: none;
+      background: rgba(0, 0, 0, 0.55); -webkit-app-region: no-drag;
+    }
+    .gh-overlay.show { display: block; }
+    .gh-overlay-panel {
+      position: absolute; inset: 24px; display: flex;
+      border-radius: 8px; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+    }
+    /* Below 900x600 of panel the inset goes, so the view keeps its room
+       (height: 600 + 2x24 inset + 32 titlebar). */
+    @media (max-width: 947px) { .gh-overlay-panel { left: 0; right: 0; } }
+    @media (max-height: 679px) { .gh-overlay-panel { top: 0; bottom: 0; } }
+    .gh-overlay-panel .gh-toolbar { padding-right: 46px; }
+    .gh-overlay-close { position: absolute; top: 8px; right: 10px; z-index: 2; }
+
     /* ---------- Settings (settingsView.js) ---------- */
     .set-overlay {
       position: fixed; inset: 0; z-index: 1300;

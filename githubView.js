@@ -1,6 +1,6 @@
 // GitHub dashboard surface.
 //
-// One view per GitHub tab: a sidebar with an inbox (review requests, my PRs, assigned
+// One view per GitHub tab or per GitHub overlay (renderer.js hosts both): a sidebar with an inbox (review requests, my PRs, assigned
 // issues — across every repo) and a list of pinned repos, a list of PRs / issues /
 // Actions runs for the selection, and a detail pane for one PR or issue. All data
 // comes from window.ghApi (the gh CLI in the main process); nothing here holds a token.
@@ -228,6 +228,9 @@
       active: false, disposed: false
     };
     let listSeq = 0, detailSeq = 0, pollTimer = null;
+    let mergeDlg = null;                   // { key, update(d) } while the merge dialog is open
+    let unknownRetryKey = null;            // repo#n already re-fetched for UNKNOWN mergeability
+    let unknownRetryTimer = null;          // that re-fetch, while it is still pending
     let linksCb = null;                    // the sidebar's "Open GitHub links in Mac Code"
 
     // ---- skeleton ----
@@ -320,6 +323,8 @@
       for (const r of st.myRepos || []) { const o = el('option'); o.value = r.nameWithOwner; dl.appendChild(o); }
       input.addEventListener('focus', () => { if (!st.myRepos) loadMyRepos(); });
       input.addEventListener('keydown', (e) => {
+        // Esc leaves the field (like the search box) instead of being swallowed here.
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); input.blur(); root.focus(); return; }
         if (e.key === 'Enter') {
           const v = input.value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '');
           if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v)) { pinRepo(v); select({ kind: 'repo', repo: v }); }
@@ -424,7 +429,8 @@
       searchTimer = setTimeout(() => { st.search = searchEl.value.trim(); st.cursor = -1; loadList(); }, 450);
     });
     searchEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { searchEl.blur(); root.focus(); }
+      // preventDefault: the overlay host (renderer.js) closes on an Esc nobody handled.
+      if (e.key === 'Escape') { e.preventDefault(); searchEl.blur(); root.focus(); }
       if (e.key === 'ArrowDown') { e.preventDefault(); root.focus(); moveCursor(1); }
       e.stopPropagation();
     });
@@ -626,6 +632,27 @@
       }
       st.detailData = r.data;
       renderDetail(r.data);
+      // GitHub computes mergeability lazily: UNKNOWN right after a push. Ask once more.
+      const key = repo + '#' + number;
+      if (!mergeUnknown(r.data)) {
+        // Known now: a later push that makes it UNKNOWN again gets its own retry.
+        if (unknownRetryKey === key) unknownRetryKey = null;
+      } else if (unknownRetryKey !== key) {
+        unknownRetryKey = key;
+        clearTimeout(unknownRetryTimer);
+        unknownRetryTimer = setTimeout(() => {
+          unknownRetryTimer = null;
+          if (!st.disposed && st.detail && st.detail.repo === repo && st.detail.number === number) openDetail(repo, number);
+        }, 2000);
+      }
+    }
+    // A retry that hasn't fired yet is dropped (hidden or disposed); the next load of
+    // that item may schedule it again.
+    function cancelUnknownRetry() {
+      if (!unknownRetryTimer) return;
+      clearTimeout(unknownRetryTimer);
+      unknownRetryTimer = null;
+      unknownRetryKey = null;
     }
 
     function closeDetail() {
@@ -677,6 +704,10 @@
       pill.appendChild(isPr ? prIcon(d) : issueIcon(d));
       pill.appendChild(el('span', null, label));
       stateRow.appendChild(pill);
+      if (isPr && state === 'OPEN' && !d.merged) {
+        if (d.isInMergeQueue) stateRow.appendChild(el('span', 'gh-badge merge', queueLabel(d)));
+        if (d.autoMergeRequest) stateRow.appendChild(el('span', 'gh-badge merge', autoMergeLabel(d)));
+      }
       const by = el('span', 'gh-d-by');
       by.appendChild(el('strong', null, login(d.author)));
       by.appendChild(document.createTextNode(' opened ' + ago(d.createdAt)));
@@ -692,6 +723,13 @@
       head.appendChild(stateRow);
 
       const actions = el('div', 'gh-d-actions');
+      if (isPr && state === 'OPEN' && !d.merged && canMerge(d) && !d.isInMergeQueue) {
+        const auto = !!d.autoMergeRequest;
+        const mb = actionBtn('prMerged', auto ? 'Auto-merge on…' : mergeQueueRequired(d) ? 'Merge queue…' : 'Merge…',
+          () => openMergeDialog(d), auto ? 'Auto-merge is enabled: view or turn it off' : 'Merge this pull request');
+        if (!auto) mb.classList.add('primary');
+        actions.appendChild(mb);
+      }
       actions.appendChild(actionBtn('window', 'Window', () => window.ghApi.openWindow(d.url), 'Open in a Mac Code GitHub window'));
       actions.appendChild(actionBtn('external', 'Browser', () => window.fileApi.openExternal(d.url), 'Open in your default browser'));
       actions.appendChild(actionBtn('copy', 'Copy link', (e) => {
@@ -818,6 +856,8 @@
       detailEl.appendChild(sec);
 
       if (same) detailEl.scrollTop = scrollTop;
+      // An open merge dialog for this PR follows every refresh (poll, retry, refetch).
+      if (mergeDlg && mergeDlg.key === d.repo + '#' + d.number) mergeDlg.update(d);
     }
 
     function checkState(c) {
@@ -855,7 +895,10 @@
     // ---- modal ----
     // In-view dialog (never window.confirm: a native dialog blocks the whole app).
     // actions: [{ label, kind: 'primary'|'danger'|undefined, onClick(close, setError, setBusy) }]
-    function showModal({ title, body, actions, wide }) {
+    // Returns { close, setError, setBusy, buttons } (buttons: the action buttons, in order).
+    // lockWhileBusy: while setBusy(true) is on, Cancel, X, Esc and the backdrop can't
+    // close it (a gh write is running and its result belongs in the dialog).
+    function showModal({ title, body, actions, wide, cancelLabel, onClose, lockWhileBusy }) {
       const overlay = el('div', 'gh-modal-overlay');
       const box = el('div', 'gh-modal' + (wide ? ' wide' : ''));
       const hdr = el('div', 'gh-modal-hdr');
@@ -869,20 +912,29 @@
       box.append(hdr, content, err, foot);
       overlay.appendChild(box);
       root.appendChild(overlay);
-      let closed = false;
+      let closed = false, locked = false;
+      // Idempotent. Focus goes back to the view only if it was in the dialog: a close that
+      // lands later (a gh call finishing) never takes focus from wherever the user went.
       const close = () => {
         if (closed) return;
         closed = true;
+        // body: the focused button was disabled by setBusy, which drops focus there.
+        const a = document.activeElement;
+        const hadFocus = !a || a === document.body || box.contains(a);
         // Drop typed values with the DOM so nothing secret lingers in a detached node.
         for (const f of box.querySelectorAll('input, textarea')) f.value = '';
         overlay.remove();
-        root.focus();
+        if (onClose) onClose();
+        // Not while the view is hidden (overlay closed, tab in the background).
+        if (hadFocus && root.getClientRects().length) root.focus();
       };
+      const userClose = () => { if (!locked) close(); };
       const setError = (m) => { err.classList.remove('busy'); err.textContent = m || ''; err.style.display = m ? '' : 'none'; };
       const buttons = [];
       // Disable the action buttons while a write is in flight; `label` is progress text.
       const setBusy = (on, label) => {
         for (const b of buttons) b.disabled = !!on;
+        if (lockWhileBusy) { locked = !!on; cancel.disabled = !!on; x.disabled = !!on; }
         if (label != null) {
           err.textContent = label;
           err.style.display = label ? '' : 'none';
@@ -890,8 +942,8 @@
         }
       };
       setError('');
-      const cancel = el('button', 'gh-btn', 'Cancel');
-      cancel.addEventListener('click', close);
+      const cancel = el('button', 'gh-btn', cancelLabel || 'Cancel');
+      cancel.addEventListener('click', userClose);
       foot.appendChild(cancel);
       for (const a of actions || []) {
         const b = el('button', 'gh-btn' + (a.kind ? ' ' + a.kind : ''), a.label);
@@ -899,15 +951,21 @@
         buttons.push(b);
         foot.appendChild(b);
       }
-      x.addEventListener('click', close);
-      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+      x.addEventListener('click', userClose);
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) userClose(); });
       box.addEventListener('keydown', (e) => {
         e.stopPropagation();
-        if (e.key === 'Escape') close();
+        if (e.key === 'Escape') { e.preventDefault(); userClose(); }
         if (e.key === 'Enter' && e.ctrlKey && buttons.length) buttons[buttons.length - 1].click();
       });
-      requestAnimationFrame(() => { const f = box.querySelector('input:not([readonly]):not([type=checkbox]), textarea, select'); (f || box).focus(); });
-      return { close, setError };
+      box.tabIndex = -1;
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+      box.setAttribute('aria-label', title);
+      x.title = 'Close (Esc)';
+      x.setAttribute('aria-label', 'Close');
+      requestAnimationFrame(() => { if (closed || !root.getClientRects().length) return; const f = box.querySelector('input:not([readonly]):not([type=checkbox]):not([type=radio]), textarea, select'); (f || box).focus(); });
+      return { close, setError, setBusy, buttons };
     }
     function confirmModal(title, message, label, onYes) {
       const p = el('div', 'gh-modal-text', message);
@@ -928,6 +986,297 @@
     function textInput(value, placeholder) {
       const i = el('input', 'gh-input'); i.value = value || ''; i.placeholder = placeholder || ''; i.spellcheck = false; i.autocomplete = 'off';
       return i;
+    }
+
+    // ---- merge (gh pr merge via ghApi.merge) ----
+    // Direct merge, auto-merge, merge queue and "turn auto-merge off" all go through one
+    // dialog. Whatever gh answers, the PR is fetched again afterwards and that fresh state
+    // decides what the user is told: gh can fail after GitHub already did the work (or
+    // succeed with a warning), so its exit code alone is not the truth.
+    const MERGE_METHODS = [
+      { key: 'squash', label: 'Squash and merge', hint: 'All commits become one commit on the base branch.', allowed: 'squashMergeAllowed' },
+      { key: 'merge',  label: 'Create a merge commit', hint: 'All commits are kept, plus a merge commit.', allowed: 'mergeCommitAllowed' },
+      { key: 'rebase', label: 'Rebase and merge', hint: 'All commits are replayed onto the base branch.', allowed: 'rebaseMergeAllowed' }
+    ];
+    const METHOD_NAME = { MERGE: 'merge commit', SQUASH: 'squash', REBASE: 'rebase' };
+    const MERGE_STATE_TEXT = {
+      CLEAN: ['ok', 'Ready to merge.'],
+      HAS_HOOKS: ['ok', 'Ready to merge (the repository runs pre-receive hooks).'],
+      UNSTABLE: ['pending', 'Can be merged, but some checks that are not required are failing or still running.'],
+      BLOCKED: ['fail', 'Blocked: required reviews or checks are not satisfied yet.'],
+      BEHIND: ['fail', 'The branch is behind the base branch and must be updated before it can be merged.'],
+      DIRTY: ['fail', 'The branch has conflicts with the base branch.'],
+      DRAFT: ['fail', 'This pull request is a draft.'],
+      UNKNOWN: ['pending', 'GitHub is still working out whether this can be merged…']
+    };
+
+    function repoInfo(d) { return (d && d.repoInfo) || {}; }
+    function canMerge(d) {
+      return !!(window.ghApi && window.ghApi.merge) && ['ADMIN', 'MAINTAIN', 'WRITE'].includes(repoInfo(d).viewerPermission);
+    }
+    function mergeQueueRequired(d) { return repoInfo(d).mergeQueueRequired === true; }
+    function mergeUnknown(d) {
+      return !!d && d.__typename === 'PullRequest' && String(d.state).toUpperCase() === 'OPEN' &&
+        (d.mergeStateStatus === 'UNKNOWN' || d.mergeable === 'UNKNOWN');
+    }
+    function queueLabel(d) {
+      const pos = d.mergeQueueEntry && Number.isInteger(d.mergeQueueEntry.position) ? d.mergeQueueEntry.position : null;
+      return 'In merge queue' + (pos != null ? ' (#' + pos + ')' : '');
+    }
+    function autoMergeLabel(d) {
+      const m = d.autoMergeRequest && METHOD_NAME[d.autoMergeRequest.mergeMethod];
+      return 'Auto-merge on' + (m ? ' (' + m + ')' : '');
+    }
+    // Why this PR can't be merged at all right now (null = it may be).
+    function mergeBlock(d) {
+      if (d.isDraft || d.mergeStateStatus === 'DRAFT') return 'This pull request is a draft. Mark it as ready for review on GitHub first.';
+      if (d.mergeable === 'CONFLICTING' || d.mergeStateStatus === 'DIRTY') return 'This branch has conflicts with the base branch. Resolve them first (for example with Checkout and a merge of the base branch).';
+      return null;
+    }
+    function checksSummaryLine(d) {
+      const rollup = d.commits && d.commits.nodes && d.commits.nodes[0] && d.commits.nodes[0].commit.statusCheckRollup;
+      const ctx = (rollup && rollup.contexts && rollup.contexts.nodes) || [];
+      if (!ctx.length) return ['ok', 'No checks on the latest commit.'];
+      let ok = 0, fail = 0, pending = 0;
+      for (const c of ctx) { const s = checkState(c); if (s === 'fail') fail++; else if (s === 'pending') pending++; else ok++; }
+      const parts = [ok + ' passed'];
+      if (fail) parts.push(fail + ' failing');
+      if (pending) parts.push(pending + ' pending');
+      return [fail ? 'fail' : pending ? 'pending' : 'ok', 'Checks: ' + parts.join(', ') + '.'];
+    }
+    function reviewLine(d) {
+      const r = String(d.reviewDecision || '').toUpperCase();
+      if (r === 'APPROVED') return ['ok', 'Review: approved.'];
+      if (r === 'CHANGES_REQUESTED') return ['fail', 'Review: changes requested.'];
+      if (r === 'REVIEW_REQUIRED') return ['pending', 'Review: an approving review is required.'];
+      return ['ok', 'Review: no review required.'];
+    }
+    // gh's message plus a plain explanation where we recognise the cause.
+    function explainMergeError(err, d) {
+      const msg = String(err || 'Merge failed');
+      let why = null;
+      if (/head branch was modified|match-head-commit|head commit/i.test(msg)) {
+        why = 'New commits were pushed to the pull request after this dialog opened. Review them, then merge again.';
+      } else if (d && d.mergeStateStatus === 'BEHIND' || /not up to date|is behind|out-of-date/i.test(msg)) {
+        why = 'The branch is behind the base branch. Update it first (for example "Update branch" on github.com).' +
+          (repoInfo(d).autoMergeAllowed && !mergeQueueRequired(d) ? ' Or turn on auto-merge so it merges once it is up to date.' : '');
+      } else if (/required status|status check|review|protected branch|base branch policy|not mergeable/i.test(msg)) {
+        why = 'Branch protection blocks the merge: required reviews or checks are not satisfied.' +
+          (repoInfo(d).autoMergeAllowed && !mergeQueueRequired(d) ? ' Turn on auto-merge to merge automatically once they are.' : '');
+      } else if (/conflict/i.test(msg)) {
+        why = 'The branch has conflicts with the base branch.';
+      }
+      return why ? why + '\n\ngh: ' + msg : msg;
+    }
+    async function fetchItem(repo, number) {
+      try { return await window.ghApi.item({ repo, number }); } catch (e) { return { ok: false, error: String(e) }; }
+    }
+    // After a merge call: show the fresh state underneath and refresh the list.
+    function applyFresh(repo, number, fresh) {
+      if (st.disposed) return;
+      if (st.detail && st.detail.repo === repo && st.detail.number === number) {
+        if (fresh) { st.detailData = fresh; renderDetail(fresh); }
+        else openDetail(repo, number);
+      }
+      loadList(true);
+    }
+
+    function statusRow(kind, text) {
+      const row = el('div', 'gh-merge-line');
+      row.appendChild(icon(kind === 'ok' ? 'check' : kind === 'fail' ? 'cross' : 'dot', kind));
+      row.appendChild(el('span', null, text));
+      return row;
+    }
+
+    function openMergeDialog(d0) {
+      const key = d0.repo + '#' + d0.number;
+      const repo = d0.repo, number = d0.number;
+      const headOid = d0.headRefOid;                 // what the user is looking at; --match-head-commit
+      if (d0.autoMergeRequest) { openDisableAutoDialog(d0); return; }
+      const info = repoInfo(d0);
+      const queue = mergeQueueRequired(d0);
+      const cross = d0.isCrossRepository === true;
+      const body = el('div', 'gh-merge');
+      const statusBox = el('div', 'gh-merge-status');
+      statusBox.setAttribute('aria-live', 'polite');
+      const blockBox = el('div', 'gh-merge-block');
+      body.append(statusBox, blockBox);
+
+      // Method (not with a merge queue: the queue's own rules decide).
+      let radios = [];
+      if (!queue) {
+        let allowed = MERGE_METHODS.filter((m) => info[m.allowed] === true);
+        if (!allowed.length) allowed = MERGE_METHODS;
+        const want = setting('mergeMethod', 'squash');
+        const pick = allowed.some((m) => m.key === want) ? want : allowed[0].key;
+        const fs = el('fieldset', 'gh-merge-methods');
+        fs.appendChild(el('legend', 'gh-field-label', 'Merge method'));
+        const name = 'gh-merge-m-' + Math.random().toString(36).slice(2, 8);
+        for (const m of allowed) {
+          const lab = el('label', 'gh-check gh-merge-method');
+          const r = el('input'); r.type = 'radio'; r.name = name; r.value = m.key; r.checked = m.key === pick;
+          const txt = el('span');
+          txt.appendChild(el('span', 'gh-merge-method-name', m.label));
+          txt.appendChild(el('span', 'gh-field-hint', ' — ' + m.hint));
+          lab.append(r, txt);
+          fs.appendChild(lab);
+          radios.push(r);
+        }
+        body.appendChild(fs);
+      } else {
+        body.appendChild(el('div', 'gh-modal-text',
+          `${repo} requires a merge queue for ${d0.baseRefName}. The pull request is added to the queue and GitHub merges it after the queue's checks pass, with the method the queue is set up for.`));
+      }
+
+      // Auto-merge (repo must allow it; not with a queue, where adding already waits).
+      let autoCb = null;
+      if (!queue && info.autoMergeAllowed === true) {
+        const lab = el('label', 'gh-check');
+        autoCb = el('input'); autoCb.type = 'checkbox';
+        autoCb.checked = d0.mergeStateStatus === 'BLOCKED' || d0.mergeStateStatus === 'BEHIND';
+        lab.append(autoCb, el('span', null, 'Auto-merge when all requirements are met (gh pr merge --auto)'));
+        body.appendChild(lab);
+      }
+
+      // Delete the head branch (never with auto-merge or a queue: gh can't, the repo setting applies).
+      const delLab = el('label', 'gh-check');
+      const delCb = el('input'); delCb.type = 'checkbox';
+      delCb.checked = setting('deleteBranchOnMerge', true) === true;
+      const delTxt = el('span');
+      delTxt.append(document.createTextNode('Delete branch '), el('span', 'gh-mono', d0.headRefName || ''), document.createTextNode(' after merge'));
+      delLab.append(delCb, delTxt);
+      const delHint = el('div', 'gh-field-hint');
+      body.append(delLab, delHint);
+
+      const repoDeletes = info.deleteBranchOnMerge === true;
+      function syncOptions() {
+        const auto = !!(autoCb && autoCb.checked);
+        const noDelete = queue || auto || cross;
+        delCb.disabled = noDelete;
+        delLab.classList.toggle('off', noDelete);
+        if (cross) delHint.textContent = 'The branch lives in a fork, so it is not deleted from here.';
+        else if (queue || auto) {
+          delHint.textContent = (queue ? 'With the merge queue' : 'With auto-merge') +
+            ', the repository setting "Automatically delete head branches" decides (currently ' + (repoDeletes ? 'on' : 'off') + ').';
+        } else delHint.textContent = repoDeletes ? 'The repository also deletes merged head branches automatically.' : '';
+        delHint.style.display = delHint.textContent ? '' : 'none';
+        if (dlg && dlg.buttons[0]) dlg.buttons[0].textContent = confirmLabel();
+      }
+      function confirmLabel() {
+        if (queue) return 'Add #' + number + ' to merge queue';
+        if (autoCb && autoCb.checked) return 'Enable auto-merge for #' + number;
+        return 'Merge #' + number;
+      }
+
+      let headMoved = false, running = false;
+      function update(d) {
+        statusBox.innerHTML = '';
+        const ms = MERGE_STATE_TEXT[d.mergeStateStatus];
+        statusBox.append(statusRow(...checksSummaryLine(d)), statusRow(...reviewLine(d)));
+        if (ms) statusBox.appendChild(statusRow(ms[0], ms[1]));
+        if (String(d.state).toUpperCase() !== 'OPEN' || d.merged) {
+          blockBox.textContent = d.merged ? 'This pull request has been merged.' : 'This pull request is closed.';
+        } else if (d.headRefOid && d.headRefOid !== headOid) {
+          headMoved = true;
+          blockBox.textContent = 'New commits were pushed after this dialog opened. Close it and review them before merging.';
+        } else blockBox.textContent = mergeBlock(d) || '';
+        blockBox.style.display = blockBox.textContent ? '' : 'none';
+        if (dlg && dlg.buttons[0] && !running) dlg.buttons[0].disabled = !!blockBox.textContent;
+      }
+
+      const dlg = showModal({
+        title: queue ? 'Merge queue: #' + number : 'Merge #' + number, wide: true, body, lockWhileBusy: true,
+        onClose: () => { if (mergeDlg && mergeDlg.key === key) mergeDlg = null; },
+        actions: [{ label: confirmLabel(), kind: 'primary', onClick: async (close, setError, setBusy) => {
+          if (headMoved || running) return;
+          if (!/^[0-9a-f]{40}$/.test(headOid || '')) { setError('The head commit of this pull request is unknown. Refresh and try again.'); return; }
+          const auto = !!(autoCb && autoCb.checked);
+          const radio = radios.find((r) => r.checked);
+          const method = radio ? radio.value : null;
+          const args = { repo, number, matchHead: headOid };
+          if (queue) args.queue = true;
+          else {
+            args.method = method;
+            if (auto) args.auto = true;
+            else if (!cross && delCb.checked) args.deleteBranch = true;
+          }
+          // Remember the choices for next time.
+          if (window.setAppSetting) {
+            if (method && method !== setting('mergeMethod', 'squash')) window.setAppSetting('github', 'mergeMethod', method);
+            if (!delCb.disabled && delCb.checked !== setting('deleteBranchOnMerge', true)) window.setAppSetting('github', 'deleteBranchOnMerge', delCb.checked);
+          }
+          running = true;
+          setError('');
+          setBusy(true, queue ? 'Adding to the merge queue…' : auto ? 'Enabling auto-merge…' : 'Merging…');
+          let r;
+          try { r = await window.ghApi.merge(args); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+          const f = await fetchItem(repo, number);
+          if (st.disposed) return;
+          const fresh = f && f.ok ? f.data : null;
+          const done = !!fresh && (fresh.merged || String(fresh.state).toUpperCase() === 'MERGED' ||
+            (queue && fresh.isInMergeQueue) || (auto && !!fresh.autoMergeRequest));
+          running = false;
+          if (r && r.ok || done) {
+            close();
+            applyFresh(repo, number, fresh);
+            const what = fresh && fresh.merged ? 'Merged #' + number
+              : fresh && fresh.isInMergeQueue ? '#' + number + ': ' + queueLabel(fresh)
+              : fresh && fresh.autoMergeRequest ? '#' + number + ': ' + autoMergeLabel(fresh)
+              : queue ? '#' + number + ' added to the merge queue' : auto ? 'Auto-merge enabled for #' + number : 'Merged #' + number;
+            setStatus(what);
+            if (!(r && r.ok)) {
+              showModal({ title: what, cancelLabel: 'Close', actions: [],
+                body: el('div', 'gh-modal-text', 'GitHub shows the change, but gh reported a problem:\n\n' + ((r && r.error) || 'unknown error')) });
+            }
+            return;
+          }
+          setBusy(false, '');
+          if (fresh) { applyFresh(repo, number, fresh); update(fresh); }
+          setError(explainMergeError(r && r.error, fresh || d0));
+        } }]
+      });
+      mergeDlg = { key, update };
+      if (autoCb) autoCb.addEventListener('change', syncOptions);
+      syncOptions();
+      update(d0);
+    }
+
+    function openDisableAutoDialog(d) {
+      const key = d.repo + '#' + d.number;
+      const repo = d.repo, number = d.number;
+      const body = el('div', 'gh-merge');
+      const text = el('div', 'gh-modal-text');
+      function update(x) {
+        text.textContent = x.autoMergeRequest
+          ? autoMergeLabel(x) + (x.autoMergeRequest.enabledAt ? ', turned on ' + ago(x.autoMergeRequest.enabledAt) : '') +
+            '. GitHub merges #' + number + ' by itself once the required reviews and checks pass.'
+          : 'Auto-merge is no longer on for #' + number + '.';
+      }
+      body.appendChild(text);
+      showModal({
+        title: 'Auto-merge: #' + number, body, lockWhileBusy: true,
+        onClose: () => { if (mergeDlg && mergeDlg.key === key) mergeDlg = null; },
+        actions: [{ label: 'Turn off auto-merge', kind: 'danger', onClick: async (close, setError, setBusy) => {
+          setError('');
+          setBusy(true, 'Turning off auto-merge…');
+          let r;
+          try { r = await window.ghApi.merge({ repo, number, disableAuto: true }); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+          const f = await fetchItem(repo, number);
+          if (st.disposed) return;
+          const fresh = f && f.ok ? f.data : null;
+          if (r && r.ok || (fresh && !fresh.autoMergeRequest)) {
+            close();
+            applyFresh(repo, number, fresh);
+            setStatus('Auto-merge off for #' + number);
+            return;
+          }
+          setBusy(false, '');
+          if (fresh) applyFresh(repo, number, fresh);
+          setError((r && r.error) || 'Failed');
+        } }]
+      });
+      mergeDlg = { key, update };
+      update(d);
     }
 
     // ---- start work in a worktree (Fix / Review with Claude, Checkout) ----
@@ -1316,13 +1665,18 @@
 
     // ---- keyboard ----
     root.addEventListener('keydown', (e) => {
+      // Esc peels the open detail first, from a field too, so it doesn't fall through to
+      // the overlay. A field that handles Esc itself (the search box) has marked it.
+      if (e.key === 'Escape') {
+        if (!e.defaultPrevented && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && st.detail) { e.preventDefault(); closeDetail(); }
+        return;
+      }
       const tag = document.activeElement && document.activeElement.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       if (e.ctrlKey || e.altKey || e.metaKey) { if (!(e.key === 'Enter' && e.ctrlKey)) return; }
       if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); moveCursor(1); }
       else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); moveCursor(-1); }
       else if (e.key === 'Enter') { e.preventDefault(); activateCursor(e); }
-      else if (e.key === 'Escape') { if (st.detail) { e.preventDefault(); closeDetail(); } }
       else if (e.key === '/') { e.preventDefault(); if (searchEl.style.display !== 'none') searchEl.focus(); }
       else if (e.key === 'r') { e.preventDefault(); refresh(true); }
     });
@@ -1428,6 +1782,7 @@
       setActive(on) {
         const was = st.active;
         st.active = !!on;
+        if (!on) cancelUnknownRetry();
         schedulePoll();
         if (on && !was && booted && st.sel && Date.now() - st.loadedAt > 30000) refresh(false);
       },
@@ -1452,6 +1807,7 @@
         clearInterval(pollTimer);
         clearInterval(ageTimer);
         clearTimeout(searchTimer);
+        cancelUnknownRetry();
       }
     };
   }

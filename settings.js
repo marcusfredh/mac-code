@@ -10,7 +10,8 @@ const path = require('path');
 
 const STR_MAX = 1024;
 
-// section -> key -> spec. `def` is the default and must reproduce today's behavior.
+// section -> key -> spec. `def` is the default and must reproduce today's behavior
+// (one deliberate exception: github.openAs defaults to 'overlay', a requested change).
 const SCHEMA = {
   general: {
     restoreTabs:  { type: 'bool', def: true },
@@ -43,7 +44,10 @@ const SCHEMA = {
     ctrlFlips:        { type: 'bool', def: true },
     worktreeTemplate: { type: 'string', def: '', check: (s) => s === '' || isValidWorktreeTemplate(s) },
     draftPr:          { type: 'bool', def: false },
-    pollSeconds:      { type: 'enum', values: [60, 300, 0], def: 60 }
+    pollSeconds:      { type: 'enum', values: [60, 300, 0], def: 60 },
+    openAs:           { type: 'enum', values: ['overlay', 'tab'], def: 'overlay' },
+    mergeMethod:      { type: 'enum', values: ['squash', 'merge', 'rebase'], def: 'squash' },
+    deleteBranchOnMerge: { type: 'bool', def: true }
   },
   editor: {
     autosave: { type: 'enum', values: ['off', 'blur', 'delay'], def: 'off' },

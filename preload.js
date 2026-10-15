@@ -103,6 +103,7 @@ contextBridge.exposeInMainWorld('ghApi', {
   runs:        (args) => ipcRenderer.invoke('gh:runs', args),
   inbox:       (args) => ipcRenderer.invoke('gh:inbox', args),
   item:        (args) => ipcRenderer.invoke('gh:item', args),
+  merge:       (args) => ipcRenderer.invoke('gh:merge', args),
   prForBranch: (cwd)  => ipcRenderer.invoke('gh:prForBranch', cwd),
   openWindow:  (url)  => ipcRenderer.invoke('gh:openWindow', url),
   worktree:    (args) => ipcRenderer.invoke('gh:worktree', args),

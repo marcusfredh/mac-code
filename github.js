@@ -13,7 +13,9 @@ const { BrowserWindow, shell, session } = require('electron');
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { resolveWorktreePath, parseWorktreeList } = require('./settings');
+const { buildMergeArgs } = require('./ghArgs');
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -129,6 +131,8 @@ const DETAIL_QUERY = `
 query($owner: String!, $name: String!, $n: Int!) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
+    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed autoMergeAllowed
+    deleteBranchOnMerge viewerPermission
     issueOrPullRequest(number: $n) {
       __typename
       ... on Issue {
@@ -142,6 +146,9 @@ query($owner: String!, $name: String!, $n: Int!) {
         number title url state isDraft merged createdAt updatedAt bodyHTML
         author { login }
         headRefName baseRefName additions deletions changedFiles mergeable reviewDecision
+        mergeStateStatus headRefOid isCrossRepository isInMergeQueue
+        mergeQueueEntry { position }
+        autoMergeRequest { enabledAt mergeMethod }
         labels(first: 20) { nodes { name color } }
         assignees(first: 10) { nodes { login } }
         reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
@@ -156,6 +163,13 @@ query($owner: String!, $name: String!, $n: Int!) {
       }
     }
   }
+}`;
+
+// Does the base branch require a merge queue? Separate from DETAIL_QUERY because
+// mergeQueue(branch:) needs the PR's baseRefName, which is only known after the first call.
+const MERGE_QUEUE_QUERY = `
+query($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } }
 }`;
 
 // ---------- built-in GitHub browser window ----------
@@ -360,7 +374,38 @@ function register(ipcMain, getMainWindow, getSettings) {
     const item = r.data && r.data.data && r.data.data.repository && r.data.data.repository.issueOrPullRequest;
     if (!item) return { ok: false, error: 'Not found: ' + repo + '#' + n };
     item.repo = repo;
+    // Repository-level merge info rides along on the item; the repository object itself
+    // is not returned.
+    const repoNode = r.data.data.repository;
+    item.repoInfo = {
+      squashMergeAllowed: repoNode.squashMergeAllowed, mergeCommitAllowed: repoNode.mergeCommitAllowed,
+      rebaseMergeAllowed: repoNode.rebaseMergeAllowed, autoMergeAllowed: repoNode.autoMergeAllowed,
+      deleteBranchOnMerge: repoNode.deleteBranchOnMerge, viewerPermission: repoNode.viewerPermission,
+      mergeQueueRequired: false
+    };
+    if (item.__typename === 'PullRequest' && item.state === 'OPEN' && item.baseRefName) {
+      const q = await ghJson(['api', 'graphql', '-f', 'query=' + MERGE_QUEUE_QUERY,
+        '-f', 'owner=' + owner, '-f', 'name=' + name, '-f', 'branch=' + item.baseRefName]);
+      const mq = q.ok && q.data && q.data.data && q.data.data.repository && q.data.data.repository.mergeQueue;
+      item.repoInfo.mergeQueueRequired = !!mq;
+    }
     return { ok: true, data: item };
+  });
+
+  // Merge / queue / auto-merge / disable auto-merge. Args are validated by buildMergeArgs.
+  // Runs in the home directory (not a checkout) so gh can never touch a local branch.
+  // The renderer re-fetches gh:item afterwards, so no state is returned beyond gh's output.
+  ipcMain.handle('gh:merge', async (e, args) => {
+    const win = getMainWindow && getMainWindow();
+    if (!win || win.isDestroyed() || e.sender !== win.webContents ||
+        (e.senderFrame && e.senderFrame !== win.webContents.mainFrame)) return { ok: false, error: 'not allowed' };
+    let argv;
+    try { argv = buildMergeArgs(args || {}); }
+    catch (err) { return { ok: false, error: err.message }; }
+    const r = await runGh(argv, { cwd: os.homedir() });
+    if (r.missing) return { ok: false, error: 'GitHub CLI (gh) is not installed' };
+    if (r.code !== 0) return { ok: false, error: firstErrorLine(r.stderr || r.stdout) };
+    return { ok: true, output: (r.stdout || r.stderr || '').trim() };
   });
 
   // PR for the branch checked out in `cwd` (gh resolves the branch and its upstream).

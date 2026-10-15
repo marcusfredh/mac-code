@@ -18,6 +18,9 @@ test('DEFAULTS: schema v1, reproduces today', () => {
   assert.strictEqual(DEFAULTS.claude.cliPath, '');
   assert.strictEqual(DEFAULTS.github.links, 'app');
   assert.strictEqual(DEFAULTS.github.pollSeconds, 60);
+  assert.strictEqual(DEFAULTS.github.openAs, 'overlay');
+  assert.strictEqual(DEFAULTS.github.mergeMethod, 'squash');
+  assert.strictEqual(DEFAULTS.github.deleteBranchOnMerge, true);
   assert.strictEqual(DEFAULTS.editor.tabSize, 2);
   assert.strictEqual(DEFAULTS.explorer.showHidden, true);
   assert.ok(Object.isFrozen(DEFAULTS) && Object.isFrozen(DEFAULTS.general));
@@ -239,4 +242,15 @@ test('parseWorktreeList: paths and branches, main clone first, CRLF tolerated', 
   assert.strictEqual(w[1].branch, 'refs/heads/feat/x');
   assert.strictEqual(w[2].branch, null);
   assert.deepStrictEqual(parseWorktreeList(''), []);
+});
+
+test('github open/merge settings: valid values kept, invalid fall back', () => {
+  const ok = validate({ github: { openAs: 'tab', mergeMethod: 'rebase', deleteBranchOnMerge: false } });
+  assert.strictEqual(ok.github.openAs, 'tab');
+  assert.strictEqual(ok.github.mergeMethod, 'rebase');
+  assert.strictEqual(ok.github.deleteBranchOnMerge, false);
+  const bad = validate({ github: { openAs: 'window', mergeMethod: 'ff', deleteBranchOnMerge: 'yes' } });
+  assert.strictEqual(bad.github.openAs, 'overlay');
+  assert.strictEqual(bad.github.mergeMethod, 'squash');
+  assert.strictEqual(bad.github.deleteBranchOnMerge, true);
 });
