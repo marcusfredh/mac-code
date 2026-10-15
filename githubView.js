@@ -13,8 +13,6 @@
   'use strict';
 
   const REPOS_KEY = 'ghRepos';
-  const LINKS_KEY = 'ghLinksInApp';
-  const POLL_MS = 60 * 1000;
   const INBOX_POLL_MS = 3 * 60 * 1000;
 
   const INBOXES = [
@@ -52,7 +50,14 @@
   }
   function writeJson(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_) {} }
 
-  function linksInApp() { return readJson(LINKS_KEY, true) !== false; }
+  // github.links / github.pollSeconds live in the app settings (settingsView.js).
+  function setting(key, fallback) {
+    const v = window.getAppSetting ? window.getAppSetting('github', key) : undefined;
+    return v === undefined ? fallback : v;
+  }
+  function linksInApp() { return setting('links', 'app') !== 'browser'; }
+  // 0 = no timer: refresh only when the tab is shown or on R / the refresh button.
+  function pollMs() { return Number(setting('pollSeconds', 60)) * 1000; }
 
   function ago(iso) {
     const t = Date.parse(iso);
@@ -223,6 +228,7 @@
       active: false, disposed: false
     };
     let listSeq = 0, detailSeq = 0, pollTimer = null;
+    let linksCb = null;                    // the sidebar's "Open GitHub links in Mac Code"
 
     // ---- skeleton ----
     const root = el('div', 'gh-root');
@@ -325,11 +331,22 @@
       side.appendChild(add);
 
       const foot = el('label', 'gh-side-foot');
-      const cb = el('input'); cb.type = 'checkbox'; cb.checked = linksInApp();
-      cb.addEventListener('change', () => writeJson(LINKS_KEY, cb.checked));
+      // Same setting as Settings → GitHub → links; "ask" shows as a mixed checkbox.
+      const cb = el('input'); cb.type = 'checkbox';
+      linksCb = cb;
+      syncLinksCb();
+      cb.addEventListener('change', () => {
+        if (window.setAppSetting) window.setAppSetting('github', 'links', cb.checked ? 'app' : 'browser').then(syncLinksCb);
+      });
       foot.append(cb, el('span', null, 'Open GitHub links in Mac Code'));
-      foot.title = 'Clicking a github.com link opens it here (Ctrl+click: default browser)';
+      foot.title = 'Clicking a github.com link opens it here (Ctrl+click: default browser). More choices in Settings (Ctrl+,)';
       side.appendChild(foot);
+    }
+    function syncLinksCb() {
+      if (!linksCb) return;
+      const mode = setting('links', 'app');
+      linksCb.indeterminate = mode === 'ask';
+      linksCb.checked = mode === 'app';
     }
     function sideRow(label, count) {
       const row = el('div', 'gh-side-row');
@@ -934,7 +951,11 @@
       // No clone known for this repo yet: ask where it lives.
       const input = textInput('', 'C:\\dev\\' + d.repo.split('/')[1]);
       const body = el('div');
-      body.appendChild(el('div', 'gh-modal-text', `Where is your local clone of ${d.repo}? A new worktree is created next to it under …\\worktrees\\. (Opening a terminal in the clone once also teaches Mac Code the path.)`));
+      const tpl = setting('worktreeTemplate', '');
+      const where = tpl
+        ? `A new worktree is created at ${tpl} (Settings → GitHub).`
+        : 'A new worktree is created next to it under …\\worktrees\\ (change it in Settings → GitHub).';
+      body.appendChild(el('div', 'gh-modal-text', `Where is your local clone of ${d.repo}? ${where} (Opening a terminal in the clone once also teaches Mac Code the path.)`));
       body.appendChild(field('Local clone', input));
       showModal({ title: 'Local clone', body, actions: [{ label: 'Continue', kind: 'primary', onClick: (close, setError, setBusy) => {
         const v = input.value.trim().replace(/^"|"$/g, '');
@@ -1349,12 +1370,19 @@
     function schedulePoll() {
       clearInterval(pollTimer);
       pollTimer = null;
-      if (!st.active || st.disposed) return;
+      const ms = pollMs();
+      if (!st.active || st.disposed || !(ms > 0)) return;
       pollTimer = setInterval(() => {
         if (document.hidden) return;
         refresh(false);
-      }, POLL_MS);
+      }, ms);
     }
+    // Settings changes apply live: a new poll interval restarts the timer.
+    const offSettings = window.onAppSettingsChanged ? window.onAppSettingsChanged((next, prev) => {
+      const a = (prev && prev.github) || {}, b = (next && next.github) || {};
+      if (a.pollSeconds !== b.pollSeconds) schedulePoll();
+      if (a.links !== b.links) syncLinksCb();
+    }) : null;
     // Keep the "Updated Xm ago" label honest between polls.
     const ageTimer = setInterval(() => { if (st.active && !st.loading) updateAgeStatus(); }, 15000);
 
@@ -1420,6 +1448,7 @@
       },
       dispose() {
         st.disposed = true;
+        if (offSettings) offSettings();
         clearInterval(pollTimer);
         clearInterval(ageTimer);
         clearTimeout(searchTimer);

@@ -124,6 +124,27 @@ contextBridge.exposeInMainWorld('notesApi', {
   path: ()     => ipcRenderer.invoke('notes:path')
 });
 
+// `initial` is read synchronously here so the renderer has settings before its first
+// tab (terminal options, session restore) without awaiting anything.
+contextBridge.exposeInMainWorld('settingsApi', {
+  initial:    ipcRenderer.sendSync('settings:getSync'),
+  get:        ()      => ipcRenderer.invoke('settings:get'),
+  set:        (patch) => ipcRenderer.invoke('settings:set', patch),
+  setSync:    (patch) => ipcRenderer.sendSync('settings:setSync', patch),
+  reset:      ()      => ipcRenderer.invoke('settings:reset'),
+  reload:     ()      => ipcRenderer.invoke('settings:reload'),
+  path:       ()      => ipcRenderer.invoke('settings:path'),
+  check:      ()      => ipcRenderer.invoke('settings:check'),
+  exportFile: ()      => ipcRenderer.invoke('settings:export'),
+  importFile: ()      => ipcRenderer.invoke('settings:import'),
+  version:    ()      => ipcRenderer.invoke('app:version'),
+  onChanged: (callback) => {
+    const listener = (_event, settings) => callback(settings);
+    ipcRenderer.on('settings:changed', listener);
+    return () => ipcRenderer.removeListener('settings:changed', listener);
+  }
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

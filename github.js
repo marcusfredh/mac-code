@@ -13,6 +13,7 @@ const { BrowserWindow, shell, session } = require('electron');
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { resolveWorktreePath, parseWorktreeList } = require('./settings');
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -294,7 +295,7 @@ function openGitHubWindow(url, parent) {
 }
 
 // ---------- IPC ----------
-function register(ipcMain, getMainWindow) {
+function register(ipcMain, getMainWindow, getSettings) {
   ipcMain.handle('gh:status', async () => {
     const r = await ghJson(['api', 'user', '--jq', '{login: .login, name: .name}']);
     if (!r.ok) return { ok: false, error: r.error, missing: !!r.missing };
@@ -380,7 +381,9 @@ function register(ipcMain, getMainWindow) {
   // ---------- worktrees for "Fix with Claude" / "Review with Claude" ----------
   // New work never lands in the user's main checkout: it gets its own worktree at
   // <parent of main clone>\worktrees\<clone name>\<branch with / -> ->, the same layout
-  // Mac Code's own repos use. An existing worktree at that path is reused.
+  // Mac Code's own repos use, or at github.worktreeTemplate when that is set (validated
+  // in settings.js). A worktree that already has the branch checked out (anywhere but
+  // the main clone) is reused, as is an existing worktree at the target path.
   ipcMain.handle('gh:worktree', async (_e, { root, branch, detach } = {}) => {
     if (!root || typeof root !== 'string') return { ok: false, error: 'no local clone' };
     const name = String(branch || '');
@@ -390,10 +393,15 @@ function register(ipcMain, getMainWindow) {
 
     const list = await runGitFull(root, ['worktree', 'list', '--porcelain']);
     if (list.code !== 0) return { ok: false, error: firstErrorLine(list.stderr) };
-    const trees = list.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => path.resolve(l.slice(9).trim()));
+    const entries = parseWorktreeList(list.stdout);
+    const trees = entries.map((w) => w.path);
     const mainRoot = trees[0];
     if (!mainRoot) return { ok: false, error: 'not a git repository' };
-    const target = path.join(path.dirname(mainRoot), 'worktrees', path.basename(mainRoot), name.replace(/[\\/]/g, '-'));
+    const existing = entries.slice(1).find((w) => w.branch === 'refs/heads/' + name);
+    if (existing) return { ok: true, path: existing.path, reused: true };
+    const template = getSettings ? (getSettings().github || {}).worktreeTemplate : '';
+    const target = resolveWorktreePath(template, mainRoot, name) ||
+      path.join(path.dirname(mainRoot), 'worktrees', path.basename(mainRoot), name.replace(/[\\/]/g, '-'));
     if (trees.some((t) => t.toLowerCase() === target.toLowerCase())) return { ok: true, path: target, reused: true };
     if (fs.existsSync(target)) return { ok: false, error: 'folder exists but is not a worktree: ' + target };
 

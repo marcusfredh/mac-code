@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, dialog } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -11,6 +11,7 @@ const { deriveFlow } = require('./flowState');
 const { autoAllowsCommand } = require('./autoMode');
 const { parseSessionFile, parseProcessSnapshot, PaneSessionTracker } = require('./claudeSessions');
 const github = require('./github');
+const appSettings = require('./settings');
 
 app.setName('Mac Code');
 app.setAppUserModelId('Mac Code');
@@ -40,7 +41,25 @@ function resolveShell() {
   return 'powershell.exe';
 }
 
+// general.shell = 'powershell' picks Windows PowerShell 5.1; a missing exe (or 'pwsh')
+// falls back to resolveShell(). Both run PWSH_INIT, so only fixed paths are spawned.
+function shellForSettings() {
+  if (getSettings().general.shell === 'powershell') {
+    const p = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+  }
+  return resolveShell();
+}
+
+function isDirectory(p) {
+  try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
+}
+
 function defaultCwd() {
+  // general.startDir wins when it is an existing folder (full path); else today's choice.
+  // Drive-letter paths only: never a UNC share, a \\?\ prefix or a drive-relative '\x'.
+  const start = getSettings().general.startDir;
+  if (start && appSettings.isDriveAbsolutePath(start) && isDirectory(start)) return start;
   const preferred = 'C:\\dev';
   try {
     if (fs.existsSync(preferred) && fs.statSync(preferred).isDirectory()) return preferred;
@@ -196,7 +215,7 @@ app.on('window-all-closed', () => {
 
 // ----- IPC: terminal -----
 ipcMain.handle('terminal:create', (event, opts = {}) => {
-  const shell = resolveShell();
+  const shell = shellForSettings();
   const cols = opts.cols || 80;
   const rows = opts.rows || 24;
   const cwd = opts.cwd || defaultCwd();
@@ -458,7 +477,7 @@ ipcMain.handle('git:switch', async (event, { cwd, branch } = {}) => {
 });
 
 // ----- IPC: GitHub (via gh CLI) -----
-github.register(ipcMain, () => mainWindow);
+github.register(ipcMain, () => mainWindow, () => getSettings());
 
 // ----- IPC: Claude session usage -----
 // Claude names project folders by turning every non-alphanumeric character into '-',
@@ -1357,6 +1376,9 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 // Auto-mode command gate lives in autoMode.js (pure, unit-tested).
 
 function resolveClaudeBin() {
+  // claude.cliPath is only used when it names an existing claude(.exe|.cmd|.bat).
+  const custom = getSettings().claude.cliPath;
+  if (custom && appSettings.isValidCliPath(custom, isFile)) return custom;
   const candidates = [
     path.join(os.homedir(), '.local', 'bin', 'claude.exe'),
     path.join(os.homedir(), '.local', 'bin', 'claude.cmd'),
@@ -1777,10 +1799,10 @@ ipcMain.on('session:save', (_, data) => {
   atomicWriteJson(sessionFile(), data);
 });
 
-function atomicWriteJson(f, data) {
+function atomicWriteJson(f, data, space) {
   try {
     const tmp = f + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    fs.writeFileSync(tmp, JSON.stringify(data, null, space), 'utf8');
     try { if (fs.existsSync(f)) fs.copyFileSync(f, f + '.bak'); } catch (_) {}
     fs.renameSync(tmp, f);
     return true;
@@ -1804,3 +1826,134 @@ function notesFile() { return path.join(app.getPath('userData'), 'repo-notes.jso
 ipcMain.handle('notes:load', () => readJsonWithBackup(notesFile()));
 ipcMain.on('notes:save', (_, data) => { atomicWriteJson(notesFile(), data); });
 ipcMain.handle('notes:path', () => notesFile());
+
+// ----- IPC: settings -----
+// One JSON file in userData, validated by settings.js and cached here. Every change is
+// written atomically (pretty-printed: the user may open it in the editor) and pushed to
+// the renderer as settings:changed. Only the main window may read or change settings;
+// the GitHub popup loads remote pages and must never reach these.
+function settingsFile() { return path.join(app.getPath('userData'), 'settings.json'); }
+const SETTINGS_MAX_BYTES = 256 * 1024;
+let settingsCache = null;
+
+function isFile(p) {
+  try { return fs.statSync(p).isFile(); } catch (_) { return false; }
+}
+
+function readSettingsFileSync(f) {
+  for (const p of [f, f + '.bak']) {
+    try {
+      const raw = fs.readFileSync(p, 'utf8');
+      if (raw.trim()) return JSON.parse(raw);
+    } catch (_) {}
+  }
+  return null;
+}
+
+function getSettings() {
+  if (!settingsCache) settingsCache = appSettings.validate(readSettingsFileSync(settingsFile()));
+  return settingsCache;
+}
+
+// settings.json.bak is the last-good copy: rewritten after every successful commit
+// (including a reload of a hand-edited file), so a settings.json broken later falls back
+// to the latest working settings rather than to the state before the last change.
+// atomicWriteJson's own pre-rename copy would hold the previous version instead.
+function writeLastGoodSettings(next) {
+  const bak = settingsFile() + '.bak';
+  try {
+    const tmp = bak + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
+    fs.renameSync(tmp, bak);
+  } catch (_) {}
+}
+
+function commitSettings(next, { write = true } = {}) {
+  // A no-op (rejected value, reset while on defaults) must not rewrite the file: it may
+  // hold unparsed hand edits the settings.json editor tab is still waiting to reload.
+  if (settingsCache && JSON.stringify(next) === JSON.stringify(settingsCache)) return next;
+  settingsCache = next;
+  if (!write || atomicWriteJson(settingsFile(), next, 2)) writeLastGoodSettings(next);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('settings:changed', next);
+  return next;
+}
+
+function fromMainWindow(e) {
+  return !!(mainWindow && !mainWindow.isDestroyed() && e.sender === mainWindow.webContents &&
+    (!e.senderFrame || e.senderFrame === mainWindow.webContents.mainFrame));
+}
+
+// fresh = no settings file yet, so the renderer migrates its legacy localStorage keys.
+function settingsSnapshot() {
+  const f = settingsFile();
+  const fresh = !fs.existsSync(f) && !fs.existsSync(f + '.bak');
+  return { settings: getSettings(), fresh };
+}
+
+function readJsonFileLimited(p) {
+  if (fs.statSync(p).size > SETTINGS_MAX_BYTES) throw new Error('file is too large');
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+ipcMain.handle('settings:get', (e) => (fromMainWindow(e) ? settingsSnapshot() : null));
+ipcMain.on('settings:getSync', (e) => { e.returnValue = fromMainWindow(e) ? settingsSnapshot() : null; });
+ipcMain.handle('settings:set', (e, patch) => {
+  if (!fromMainWindow(e)) return null;
+  return commitSettings(appSettings.applyPatch(getSettings(), patch));
+});
+ipcMain.on('settings:setSync', (e, patch) => {
+  e.returnValue = fromMainWindow(e) ? commitSettings(appSettings.applyPatch(getSettings(), patch)) : null;
+});
+ipcMain.handle('settings:reset', (e) => (fromMainWindow(e) ? commitSettings(appSettings.validate(null)) : null));
+// After the user saved settings.json in the editor. A parse error keeps the current
+// settings and never touches the file; a bad key keeps its current value. The file is
+// not rewritten, so the user's own formatting stays.
+ipcMain.handle('settings:reload', (e) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  let parsed;
+  try { parsed = readJsonFileLimited(settingsFile()); } catch (err) { return { ok: false, error: err.message }; }
+  return { ok: true, settings: commitSettings(appSettings.validate(parsed, getSettings()), { write: false }) };
+});
+ipcMain.handle('settings:path', (e) => (fromMainWindow(e) ? settingsFile() : null));
+// Whether the path-like settings point at something real (null = not set), so the
+// settings view can show "hittades inte".
+ipcMain.handle('settings:check', (e) => {
+  if (!fromMainWindow(e)) return null;
+  const s = getSettings();
+  return {
+    cliPath: s.claude.cliPath ? appSettings.isValidCliPath(s.claude.cliPath, isFile) : null,
+    startDir: s.general.startDir ? appSettings.isDriveAbsolutePath(s.general.startDir) && isDirectory(s.general.startDir) : null
+  };
+});
+ipcMain.handle('settings:export', async (e) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  const r = await dialog.showSaveDialog(mainWindow, {
+    title: 'Exportera inställningar',
+    defaultPath: path.join(app.getPath('documents'), 'mac-code-settings.json'),
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+  try {
+    fs.writeFileSync(r.filePath, JSON.stringify(getSettings(), null, 2), 'utf8');
+    return { ok: true, path: r.filePath };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+// Import goes through the same validator, onto the current settings. The keys in
+// settings.js IMPORT_PROTECTED (cliPath, permissionDefault, worktreeTemplate, startDir)
+// are never taken from an imported file: a shared file must not pick the binary we
+// spawn, its permission mode, or where folders are created and shells start. The
+// result's `skipped` lists the ones the file tried to change.
+ipcMain.handle('settings:import', async (e) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: 'Importera inställningar',
+    properties: ['openFile'],
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false, canceled: true };
+  let parsed;
+  try { parsed = readJsonFileLimited(r.filePaths[0]); } catch (err) { return { ok: false, error: err.message }; }
+  const { settings, skipped } = appSettings.filterImport(getSettings(), parsed);
+  return { ok: true, settings: commitSettings(settings), skipped };
+});
+ipcMain.handle('app:version', () => app.getVersion());

@@ -104,6 +104,41 @@ command's head — so an allowlisted head cannot smuggle something through a pip
 - Status bar: cwd, tab count, shell, and live agent state
 - Cascadia Code font (bundled), Consolas fallback
 
+### Settings
+`Ctrl+,` or the gear in the titlebar opens the settings. Every change is saved at once
+(no Save button) to `settings.json` in the app's user-data folder; the search box
+filters across all categories. The defaults are the app's behavior before settings
+existed, so nothing changes until you change it.
+
+- **Allmänt** — restore tabs at start, PowerShell 7 or Windows PowerShell for new tabs,
+  a start folder for new tabs, and an optional confirm before closing a tab or pane
+  while a Claude turn is running (closing the app is not affected).
+- **Terminal** (live in every open terminal) — font and size, color scheme (Windows
+  Terminal, One Half Dark, Solarized Dark), cursor, scrollback (at most 5 000 lines are
+  kept across restarts), copy on select, right-click paste (Shift+right-click still
+  opens the menu).
+- **Claude** — hybrid input (same switch as the status bar), autosave chat sessions to
+  the library (when the tab closes, or after every turn), auto "Clear old" at start,
+  default model / 1M / permission mode for new chat panes (the permission menu's
+  "Use <mode> for new panes" writes the same setting), notifications, the plan-usage
+  meter, and a custom path to `claude` — used by chat panes and the app's own `claude`
+  commands (MCP), not by terminal tabs; it must be a full path to an existing
+  `claude.exe` / `.cmd` / `.bat`, otherwise the normal lookup is used.
+- **GitHub** — open GitHub links in the app, the browser, or ask (the GitHub tab's
+  checkbox is the same setting); whether Ctrl+click flips that; a worktree folder
+  template with `{repo}` and `{branch}` (a full path that contains `{branch}` and a
+  folder named `worktrees`; empty = next to the clone); draft PRs; the GitHub tab's
+  poll interval.
+- **Editor och Explorer** — autosave (on focus change or after 1 s), word wrap, minimap,
+  tab size, and whether the Explorer shows dot files.
+- **Om** — version, and the settings file: open it in the editor (saving it with
+  `Ctrl+S` applies it; a file that doesn't parse keeps the current settings), export,
+  import (bad values are skipped and the `claude` path is never imported).
+
+**Återställ standard** puts every setting back to its default after asking. The old
+per-feature choices (hybrid input, default permission mode, GitHub links) are moved into
+the settings file once, on the first start with this version.
+
 ## Keyboard
 
 | Shortcut | Action |
@@ -118,6 +153,7 @@ command's head — so an allowlisted head cannot smuggle something through a pip
 | `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` | Undo / redo — native in a composer (like Notepad), chunk-level undo in the terminal |
 | `Enter` / `Shift+Enter` | Send / newline (composer) |
 | `Ctrl+Enter` | Allow the newest pending permission request |
+| `Ctrl+,` | Settings |
 | `Esc` | Interrupt the current turn (composer) |
 
 Right-click the `+` button for the full new-tab menu; right-click a folder in the
@@ -156,6 +192,8 @@ preload.js                contextBridge IPC surface
 renderer.html             UI shell + all styling
 renderer.js               tabs, panes, Explorer, agents panel, session persistence
 chatView.js               Claude chat surface — stream rendering, tool cards, composer
+settings.js               settings schema, defaults and validation (pure, unit-tested)
+settingsView.js           settings store in the renderer + the settings modal
 hooks/permission-gate.js  PreToolUse hook: blocks the CLI until the UI approves a tool call
 package.json              deps + electron-builder config
 ```
@@ -255,4 +293,7 @@ rather than letting you wonder why a new server isn't there yet.
 | `claude:defaultPermissionMode` | invoke | Reads `permissions.defaultMode` from the CLI's settings |
 | `mcp:list` / `mcp:get` / `mcp:add` / `mcp:addJson` / `mcp:remove` / `mcp:logout` | invoke | Wrap `claude mcp …` for the `/mcp` panel |
 | `mcp:configured` | invoke | Read-only scan of `~/.claude.json` + `.mcp.json` for which folder owns which server |
+| `settings:get` / `settings:set` / `settings:reset` | invoke | Read, patch and reset the app settings; changes arrive as `settings:changed` |
+| `settings:reload` / `settings:path` / `settings:check` | invoke | Re-read `settings.json` after an edit, its path, and whether the path settings exist |
+| `settings:export` / `settings:import` / `app:version` | invoke | Settings file dialogs, app version |
 | `window:minimize` / `window:maximize` / `window:close` | send | Frame controls |

@@ -13,6 +13,55 @@ const WINDOWS_TERMINAL_THEME = {
   brightYellow: '#f9f1a5', brightBlue: '#3b78ff', brightMagenta: '#b4009e',
   brightCyan: '#61d6d6', brightWhite: '#f2f2f2'
 };
+// The other terminal.theme choices: the schemes of the same name in Windows Terminal.
+const ONE_HALF_DARK_THEME = {
+  background: '#282c34', foreground: '#dcdfe4', cursor: '#a3b3cc',
+  cursorAccent: '#282c34', selectionBackground: '#474e5d',
+  black: '#282c34', red: '#e06c75', green: '#98c379', yellow: '#e5c07b',
+  blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#dcdfe4',
+  brightBlack: '#5a6374', brightRed: '#e06c75', brightGreen: '#98c379',
+  brightYellow: '#e5c07b', brightBlue: '#61afef', brightMagenta: '#c678dd',
+  brightCyan: '#56b6c2', brightWhite: '#dcdfe4'
+};
+const SOLARIZED_DARK_THEME = {
+  background: '#002b36', foreground: '#839496', cursor: '#93a1a1',
+  cursorAccent: '#002b36', selectionBackground: '#0f4b5a',
+  black: '#002b36', red: '#dc322f', green: '#859900', yellow: '#b58900',
+  blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
+  brightBlack: '#073642', brightRed: '#cb4b16', brightGreen: '#586e75',
+  brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4',
+  brightCyan: '#93a1a1', brightWhite: '#fdf6e3'
+};
+const TERMINAL_THEMES = {
+  windowsTerminal: WINDOWS_TERMINAL_THEME, oneHalfDark: ONE_HALF_DARK_THEME, solarizedDark: SOLARIZED_DARK_THEME
+};
+// terminal.fontFamily -> CSS stack. Cascadia Code is bundled; JetBrains Mono only
+// renders when it is installed, else Consolas takes over.
+const TERMINAL_FONTS = {
+  'Cascadia Code': '"Cascadia Code", Consolas, monospace',
+  Consolas: 'Consolas, monospace',
+  'JetBrains Mono': '"JetBrains Mono", Consolas, monospace'
+};
+
+// App settings live in settingsView.js (loaded first); this is the one read path here.
+const appSetting = (section, key) => window.getAppSetting(section, key);
+
+// The xterm options that follow the terminal.* settings, for new panes and live changes.
+function terminalOptions() {
+  return {
+    fontFamily: TERMINAL_FONTS[appSetting('terminal', 'fontFamily')] || TERMINAL_FONTS['Cascadia Code'],
+    fontSize: appSetting('terminal', 'fontSize'),
+    cursorStyle: appSetting('terminal', 'cursorStyle'),
+    scrollback: appSetting('terminal', 'scrollback'),
+    theme: TERMINAL_THEMES[appSetting('terminal', 'theme')] || WINDOWS_TERMINAL_THEME
+  };
+}
+// The frame around each terminal (and the hybrid band over Claude's composer) has to
+// match the scheme's background, so it is a CSS variable.
+function applyTerminalBackground() {
+  document.documentElement.style.setProperty('--term-bg', terminalOptions().theme.background);
+}
+applyTerminalBackground();
 
 // tabs: Map<tabId, Tab>
 // ptyPaneMap: Map<ptyId, {tabId, paneId}> — routes pty events to the right pane
@@ -148,7 +197,7 @@ function reorderTabsMap() {
 function wireTabPointer(tabEl, tabId) {
   tabEl.addEventListener('pointerdown', (e) => {
     if (e.target.closest('.tab-close') || e.target.closest('.tab-rename-input')) return;
-    if (e.button === 1) { closeTab(tabId); return; }
+    if (e.button === 1) { requestCloseTab(tabId); return; }
     if (e.button !== 0) return;
     const t = tabs.get(tabId);
     // While a grid is active, a background chip is a candidate to drag INTO the grid, so
@@ -882,8 +931,8 @@ function fitAll() {
 // The band is driven by a *positive* match on the composer box, so anything we do not
 // recognise — a permission prompt, a /-menu, a plan review — unmasks and hands the
 // keyboard back to the terminal rather than trapping the user behind paint.
-const HYBRID_KEY = 'termHybridInput';
-let hybridEnabled = localStorage.getItem(HYBRID_KEY) === '1';
+// claude.hybridInput; the status-bar checkbox and the settings modal write the same key.
+const hybridEnabled = () => appSetting('claude', 'hybridInput');
 const hybridToggleEl = document.getElementById('hybrid-toggle');
 
 function bufLine(buf, y) {
@@ -988,7 +1037,7 @@ function updatePaneMask(pane) {
   // Mid-scrape the menu is open over the pane and about to be closed again. Leave the
   // band where it is rather than reacting to a screen that is not settled.
   if (pane.hybridScraping && pane.masked) return;
-  const active = hybridEnabled && pane.claudeRunning && !pane.hybridRaw;
+  const active = hybridEnabled() && pane.claudeRunning && !pane.hybridRaw;
   const rows = active ? claudeComposerRows(pane.term) : null;
   const m = rows ? paneRowMetrics(pane) : null;
 
@@ -1558,7 +1607,7 @@ function updateHybrid() {
     if (tab.type === 'chat' || tab.type === 'editor') continue;
     // One composer per pane running Claude, so both halves of a split get their own.
     for (const [, pane] of tab.panes) {
-      if (hybridEnabled && pane.claudeRunning) ensureHybridBar(tab, pane);
+      if (hybridEnabled() && pane.claudeRunning) ensureHybridBar(tab, pane);
       else removeHybridBar(pane);
       updatePaneMask(pane);
       refreshHybridBar(pane);
@@ -1584,11 +1633,11 @@ function maybeLoadHybridCommands(tab) {
 }
 
 if (hybridToggleEl) {
-  hybridToggleEl.checked = hybridEnabled;
-  hybridToggleEl.addEventListener('change', () => {
-    hybridEnabled = !!hybridToggleEl.checked;
-    localStorage.setItem(HYBRID_KEY, hybridEnabled ? '1' : '0');
-    updateHybrid();
+  hybridToggleEl.checked = hybridEnabled();
+  hybridToggleEl.addEventListener('change', async () => {
+    // The settings listener (applySettings) redraws the bands once the write lands.
+    await window.setAppSetting('claude', 'hybridInput', !!hybridToggleEl.checked);
+    hybridToggleEl.checked = hybridEnabled();
     const tab = activeTab();
     if (!tab) return;
     const pane = getActivePane(tab);
@@ -1873,7 +1922,8 @@ if (statusPr) {
       showContextMenu(r.left, r.top - 8 - 2 * 30, [
         { badge: 'C', label: 'Create PR with Claude', hint: 'terminal', action: () => createTab({ cwd, runOnReady:
           'claude "Create a pull request for the current branch. Compare it with the default branch (git log and git diff), ' +
-          'push the branch if it is not on origin yet, write a clear title and a body that explains what changed and why, then run gh pr create."' }) },
+          'push the branch if it is not on origin yet, write a clear title and a body that explains what changed and why, then run ' +
+          (appSetting('github', 'draftPr') ? 'gh pr create --draft' : 'gh pr create') + '."' }) },
         { label: 'Create PR on github.com', hint: 'gh --web', action: () => createTab({ cwd, runOnReady: 'gh pr create --web' }) }
       ]);
       return;
@@ -2195,9 +2245,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   const paneId = newPaneId();
 
   const term = new Terminal({
-    fontFamily: '"Cascadia Code", Consolas, monospace',
-    fontSize: 13, lineHeight: 1.0, cursorBlink: true, cursorStyle: 'bar',
-    scrollback: 5000, allowProposedApi: true, theme: WINDOWS_TERMINAL_THEME
+    lineHeight: 1.0, cursorBlink: true, allowProposedApi: true,
+    ...terminalOptions()
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -2261,6 +2310,12 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     trackUndoInput(pane, data);
   });
   term.onResize(({ cols, rows }) => window.term.resize(ptyId, cols, rows));
+  // terminal.copyOnSelect: whatever is selected goes straight to the clipboard.
+  term.onSelectionChange(() => {
+    if (appSetting('terminal', 'copyOnSelect') && term.hasSelection()) {
+      navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+    }
+  });
 
   // Ctrl+C: copy if selection, else send ^C to pty
   // Ctrl+V: explicit paste (works even if xterm textarea lost focus, e.g. during TUI redraws)
@@ -2406,6 +2461,30 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     e.preventDefault(); e.stopPropagation();
     hideContextMenu();
     setActivePane(tab, paneId);
+    // terminal.rightClickPaste: a right-click on the terminal itself pastes and
+    // Shift+right-click still opens this menu. The pane's composer is not the terminal.
+    // When hybrid mode has switched the terminal's keyboard off, the text goes into this
+    // pane's composer instead; with no composer, the menu opens as usual.
+    if (appSetting('terminal', 'rightClickPaste') && !e.shiftKey && termWrap.contains(e.target)) {
+      if (!term.options.disableStdin) {
+        navigator.clipboard.readText().then((t) => { if (t) term.paste(t); term.focus(); }).catch(() => {});
+        return;
+      }
+      if (pane.hybridBar) {
+        const bar = pane.hybridBar;
+        navigator.clipboard.readText().then((t) => {
+          if (pane.hybridBar !== bar) return;
+          const inp = bar.input;
+          if (t) {
+            inp.setRangeText(t, inp.selectionStart, inp.selectionEnd, 'end');
+            // The composer grows, records history and updates its palette on 'input'.
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          inp.focus();
+        }).catch(() => {});
+        return;
+      }
+    }
     const fileItems = hoveredFilePath ? [
       { separator: true },
       { label: 'Open in Editor',          action: () => openInEditor(hoveredFilePath) },
@@ -2427,7 +2506,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       { separator: true },
       {
         label: tab.panes.size > 1 ? 'Close Pane' : 'Close Tab',
-        action: () => tab.panes.size > 1 ? closePane(tab, paneId) : closeTab(tab.tabId)
+        action: () => tab.panes.size > 1 ? requestClosePane(tab, paneId) : requestCloseTab(tab.tabId)
       },
       ...fileItems
     ]);
@@ -2445,8 +2524,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   closeBtn.title = 'Close pane';
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (tab.panes.size > 1) closePane(tab, paneId);
-    else closeTab(tab.tabId);
+    if (tab.panes.size > 1) requestClosePane(tab, paneId);
+    else requestCloseTab(tab.tabId);
   });
   paneEl.appendChild(closeBtn);
 
@@ -2588,6 +2667,38 @@ async function splitPane(tab, paneId, direction) {
   });
 }
 
+// ---------- confirm before closing busy Claude work ----------
+// general.confirmClose: closing something with a Claude turn in progress asks first.
+// Only the user's own close gestures (tab X, middle click, Close tab / Close pane,
+// Ctrl+Shift+W) go through these; internal callers use closeTab/closePane directly.
+const paneIsBusy = (pane) => Date.now() < (pane.claudeBusyUntil || 0);
+function tabIsBusy(tab) {
+  if (tab.type === 'chat') { const v = chatTabs.get(tab.tabId); return !!(v && v.getState().working); }
+  if (tab.type === 'editor' || tab.type === 'github' || tab.type === 'grid') return false;
+  for (const [, p] of tab.panes) if (paneIsBusy(p)) return true;
+  return false;
+}
+function confirmBusyClose(tab, what) {
+  const name = tab.customTitle || tabAutoName(tab);
+  return window.appConfirm({
+    title: 'Claude arbetar fortfarande',
+    message: `En Claude-tur pågår i ${name}. Stänger du ${what} avbryts den.`,
+    okLabel: 'Stäng ändå', danger: true
+  });
+}
+function requestCloseTab(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  if (!appSetting('general', 'confirmClose') || !tabIsBusy(tab)) { closeTab(tabId); return; }
+  confirmBusyClose(tab, 'fliken').then((ok) => { if (ok && tabs.has(tabId)) closeTab(tabId); });
+}
+function requestClosePane(tab, paneId) {
+  const pane = tab.panes.get(paneId);
+  if (!pane) return;
+  if (!appSetting('general', 'confirmClose') || !paneIsBusy(pane)) { closePane(tab, paneId); return; }
+  confirmBusyClose(tab, 'panelen').then((ok) => { if (ok && tab.panes.has(paneId)) closePane(tab, paneId); });
+}
+
 // ---------- close pane ----------
 function closePane(tab, paneId) {
   const pane = tab.panes.get(paneId);
@@ -2656,7 +2767,7 @@ async function createTab(opts = {}) {
   if (autoColor) setTabColor(tab, autoColor);
 
   wireTabPointer(tabEl, tabId);
-  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
   tabEl.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.tab-rename-input')) return;
@@ -2667,7 +2778,7 @@ async function createTab(opts = {}) {
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
       { separator: true },
-      { label: 'Close tab', action: () => closeTab(tabId) }
+      { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
   });
 
@@ -2721,7 +2832,7 @@ function createGridTab() {
   tabs.set(tabId, tab);
 
   wireTabPointer(tabEl, tabId);
-  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
   tabEl.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.tab-rename-input')) return;
@@ -2961,7 +3072,7 @@ async function createEditorTab(filePath) {
   if (autoColor) setTabColor(tab, autoColor);
 
   wireTabPointer(tabEl, tabId);
-  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, [{ label: 'Close Tab', action: () => closeTab(tabId) }]);
@@ -2998,18 +3109,29 @@ async function createEditorTab(filePath) {
       value: result.content, language,
       theme: 'vs-dark', fontSize: 13,
       fontFamily: '"Cascadia Code", Consolas, monospace',
-      minimap: { enabled: false }, scrollBeyondLastLine: false,
-      automaticLayout: true, tabSize: 2,
-      renderWhitespace: 'selection', wordWrap: 'off',
+      scrollBeyondLastLine: false,
+      automaticLayout: true,
+      renderWhitespace: 'selection',
       lineNumbers: 'on', glyphMargin: false, folding: true,
-      lineDecorationsWidth: 4, renderLineHighlight: 'all'
+      lineDecorationsWidth: 4, renderLineHighlight: 'all',
+      ...editorOptions()
     });
-    tab.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, async () => {
-      const res = await window.fileApi.write(filePath, tab.editor.getValue());
-      if (res.ok) setTabDirty(tab, false);
-    });
+    tab.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveEditorTab(tab, true));
     tab.editor.onDidChangeModelContent(() => {
+      if (tab.suppressDirty) return;
       if (!tab.dirty) setTabDirty(tab, true);
+      // editor.autosave = delay: save a second after the last change. Never for the app's
+      // settings.json: a half-typed edit would sit on disk unapplied (and be replaced by
+      // the next change from the settings modal), so it behaves as autosave 'off' there.
+      clearTimeout(tab.autosaveTimer);
+      tab.autosaveTimer = null;
+      if (appSetting('editor', 'autosave') === 'delay' && !isSettingsFile(tab.filePath)) {
+        tab.autosaveTimer = setTimeout(() => { tab.autosaveTimer = null; saveEditorTab(tab, false); }, 1000);
+      }
+    });
+    // editor.autosave = blur: save when focus leaves the editor.
+    tab.editor.onDidBlurEditorText(() => {
+      if (tab.dirty && appSetting('editor', 'autosave') === 'blur') saveEditorTab(tab, true);
     });
     requestAnimationFrame(() => {
       try {
@@ -3022,6 +3144,105 @@ async function createEditorTab(filePath) {
     editorEl.innerHTML = `<div class="editor-error">Monaco failed to load: ${escapeHtml(String(err))}</div>`;
   });
   return tab;
+}
+
+// Monaco options that follow the editor.* settings, for new tabs and live changes.
+function editorOptions() {
+  return {
+    minimap: { enabled: !!appSetting('editor', 'minimap') },
+    wordWrap: appSetting('editor', 'wordWrap') ? 'on' : 'off',
+    tabSize: appSetting('editor', 'tabSize')
+  };
+}
+function applyEditorSettings() {
+  const o = editorOptions();
+  for (const [, t] of tabs) {
+    if (t.type !== 'editor' || !t.editor) continue;
+    try {
+      t.editor.updateOptions({ minimap: o.minimap, wordWrap: o.wordWrap });
+      // Indentation is a model option; this also overrides what Monaco detected on open.
+      t.editor.getModel()?.updateOptions({ tabSize: o.tabSize });
+    } catch (_) {}
+  }
+}
+
+// The app's own settings.json, so saving it in the editor applies it.
+let settingsFilePath = null;
+window.settingsApi?.path?.().then((p) => { settingsFilePath = p || null; }).catch(() => {});
+const normPathCase = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
+function isSettingsFile(p) {
+  return !!settingsFilePath && !!p && normPathCase(p) === normPathCase(settingsFilePath);
+}
+
+// Writes an editor tab to disk. `reload` (Ctrl+S, save on blur) also re-reads
+// settings.json when that is the file (the delayed autosave never runs for it). A file
+// that does not parse keeps the current settings.
+// tab.settingsPending: settings.json was written from this tab but not yet applied by a
+// successful reload. tab.settingsWritten is the text written, so refreshSettingsEditors
+// can tell whether the file on disk is still that text.
+async function saveEditorTab(tab, reload) {
+  if (!tab.editor || !tabs.has(tab.tabId)) return;
+  clearTimeout(tab.autosaveTimer);
+  tab.autosaveTimer = null;
+  const model = tab.editor.getModel();
+  const version = model ? model.getAlternativeVersionId() : null;
+  const content = tab.editor.getValue();
+  const settings = isSettingsFile(tab.filePath);
+  const prev = { pending: tab.settingsPending, written: tab.settingsWritten };
+  if (settings) { tab.settingsPending = true; tab.settingsWritten = content; }
+  const res = await window.fileApi.write(tab.filePath, content);
+  if (!res || !res.ok) {
+    // Nothing reached the disk, so whatever was pending before still is.
+    if (settings && tab.settingsWritten === content) { tab.settingsPending = prev.pending; tab.settingsWritten = prev.written; }
+    return;
+  }
+  // Typed into while the write was in flight: the file has the older text, stay dirty.
+  let unchanged = true;
+  try { unchanged = !model || model.getAlternativeVersionId() === version; } catch (_) {}
+  if (unchanged) setTabDirty(tab, false);
+  if (!reload || !settings) return;
+  let r = null;
+  try { r = await window.settingsApi.reload(); } catch (_) {}
+  if (r && r.ok) {
+    if (tab.settingsWritten === content) tab.settingsPending = false;
+    return;
+  }
+  window.appAlert({
+    title: 'settings.json kunde inte läsas',
+    message: ((r && r.error) || 'Okänt fel') + '\n\nDe nuvarande inställningarna gäller tills filen går att läsa.'
+  });
+}
+
+// An open, unedited settings.json follows changes made in the settings modal, so saving
+// it later doesn't put old values back. A dirty tab, or one whose saved text has not been
+// applied yet (settingsPending), is never overwritten from disk.
+//
+// Main writes settings.json from its validated cache on every modal change, so a pending
+// tab's text (saved, but it did not parse) is replaced on disk. Main keeps doing that —
+// the modal change must persist, and the file must match what is in effect. The text is
+// still in the editor: the tab is marked dirty again and the user is told, so nothing is
+// lost and a Ctrl+S puts it back (and tries to apply it).
+async function refreshSettingsEditors() {
+  for (const [, t] of tabs) {
+    if (t.type !== 'editor' || !t.editor || t.dirty || !isSettingsFile(t.filePath)) continue;
+    const r = await window.fileApi.read(t.filePath);
+    if (!r || r.error || !t.editor || !tabs.has(t.tabId) || t.dirty) continue;
+    if (t.settingsPending) {
+      // Still the text this tab wrote (e.g. the change event of its own reload).
+      if (r.content === t.settingsWritten) continue;
+      t.settingsPending = false;
+      setTabDirty(t, true);
+      window.appAlert({
+        title: 'settings.json skrevs över',
+        message: 'En ändring i inställningarna sparades till settings.json. Det du senast sparade i filen gick inte att läsa och hade inte tillämpats, så det ersattes på disk.\n\n' +
+          'Din text finns kvar i editorn (markerad som osparad). Spara igen för att skriva tillbaka den.'
+      });
+      continue;
+    }
+    if (r.content === t.editor.getValue()) continue;
+    t.suppressDirty = true;
+    try { t.editor.setValue(r.content); } finally { t.suppressDirty = false; }
+  }
 }
 
 // ---------- repo notes ----------
@@ -3304,7 +3525,7 @@ function createGitHubTab() {
   container.appendChild(tab.view.el);
 
   wireTabPointer(tabEl, tabId);
-  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
   tabEl.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.tab-rename-input')) return;
@@ -3314,7 +3535,7 @@ function createGitHubTab() {
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
       { separator: true },
-      { label: 'Close tab', action: () => closeTab(tabId) }
+      { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
   });
   const autoColor = pickRandomUnusedColor();
@@ -3349,19 +3570,44 @@ function parseGitHubUrl(href) {
   return { kind: 'web' };
 }
 
-// Every link click in the app lands here. GitHub PRs/issues/repos open in the GitHub
-// tab, other github.com pages in the built-in GitHub window, everything else (and any
-// Ctrl+click) in the default browser.
+// Every link click in the app lands here. Anything that is not github.com goes to the
+// default browser. GitHub links follow github.links: 'app' opens PRs/issues/repos in the
+// GitHub tab and other github.com pages in the built-in GitHub window, 'browser' sends
+// them to the default browser, 'ask' offers both. With github.ctrlFlips a Ctrl+click
+// goes the other way (and 'ask' + Ctrl goes to the browser).
 function openLink(href, ev) {
   if (!href) return;
   const url = /^www\./i.test(href) ? 'https://' + href : String(href);
-  const forceExternal = !!(ev && (ev.ctrlKey || ev.metaKey));
-  const gh = !forceExternal && window.ghApi && window.githubLinksInApp && window.githubLinksInApp()
-    ? parseGitHubUrl(url) : null;
+  const gh = window.ghApi ? parseGitHubUrl(url) : null;
   if (!gh) { window.fileApi.openExternal(url); return; }
+  let mode = appSetting('github', 'links');
+  if (ev && (ev.ctrlKey || ev.metaKey) && appSetting('github', 'ctrlFlips')) mode = mode === 'browser' ? 'app' : 'browser';
+  if (mode === 'browser') { window.fileApi.openExternal(url); return; }
+  if (mode === 'ask') {
+    const at = linkMenuPoint(ev);
+    showContextMenu(at.x, at.y, [
+      { badge: 'GH', label: 'Öppna i appen', action: () => openGitHubLinkInApp(gh, url) },
+      { label: 'Öppna i webbläsaren', action: () => window.fileApi.openExternal(url) }
+    ]);
+    return;
+  }
+  openGitHubLinkInApp(gh, url);
+}
+function openGitHubLinkInApp(gh, url) {
   if (gh.kind === 'item') openGitHub({ repo: gh.repo, number: gh.number, view: gh.view });
   else if (gh.kind === 'repo') openGitHub({ repo: gh.repo, view: gh.view || 'prs' });
   else window.ghApi.openWindow(url);
+}
+// Where the 'ask' menu opens: the click point, else the middle of the clicked element,
+// else the middle of the window (a synthetic click carries no coordinates).
+function linkMenuPoint(ev) {
+  if (ev && typeof ev.clientX === 'number' && (ev.clientX || ev.clientY)) return { x: ev.clientX, y: ev.clientY };
+  const t = ev && (ev.currentTarget || ev.target);
+  if (t && typeof t.getBoundingClientRect === 'function') {
+    const r = t.getBoundingClientRect();
+    if (r.width || r.height) return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+  return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
 }
 window.macOpenLink = openLink;
 
@@ -3370,8 +3616,7 @@ let chatSeq = 0;
 
 // Which permission mode a new chat pane starts in. Seeded from the CLI's own
 // permissions.defaultMode so the app agrees with `claude` out of the box, and
-// overridable from the pane's permission menu.
-const PERM_DEFAULT_KEY = 'chatPermissionDefault';
+// overridable with claude.permissionDefault (the pane's permission menu or Settings).
 const PERM_MODE_IDS = new Set(['default', 'auto', 'acceptEdits', 'bypassPermissions']);
 let cliPermissionDefault = 'default';
 
@@ -3380,12 +3625,12 @@ window.claudeApi.defaultPermissionMode()
   .catch(() => {});
 
 function defaultPermissionMode() {
-  const stored = localStorage.getItem(PERM_DEFAULT_KEY);
-  return PERM_MODE_IDS.has(stored) ? stored : cliPermissionDefault;
+  const chosen = appSetting('claude', 'permissionDefault');
+  return PERM_MODE_IDS.has(chosen) ? chosen : cliPermissionDefault;
 }
 function setDefaultPermissionMode(mode) {
   if (!PERM_MODE_IDS.has(mode)) return;
-  localStorage.setItem(PERM_DEFAULT_KEY, mode);
+  window.setAppSetting('claude', 'permissionDefault', mode);
 }
 
 // Same idea for the model: a chat pane always passes --model, so settings.json has to
@@ -3412,8 +3657,12 @@ function normalizeChatModel(raw) {
   return id + (oneM && ONE_M_MODEL_IDS.has(id) ? '[1m]' : '');
 }
 
+// claude.model picks the family for new panes (null = follow the CLI, as before), and
+// claude.oneM adds [1m] where that family has a 1M variant.
 function defaultChatModel() {
-  return cliDefaultModel;
+  const m = appSetting('claude', 'model');
+  if (!m || !CHAT_MODEL_IDS.includes(m)) return cliDefaultModel;
+  return m + (appSetting('claude', 'oneM') && ONE_M_MODEL_IDS.has(m) ? '[1m]' : '');
 }
 
 // Exact model ids the account may use, newest first — the source for the model menu's
@@ -3457,7 +3706,7 @@ async function createChatTab(opts = {}) {
   setTabColor(tab, opts.color || '#4ec994');
 
   wireTabPointer(tabEl, tabId);
-  closeEl.addEventListener('click', (e) => { e.stopPropagation(); closeTab(tabId); });
+  closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   titleEl.addEventListener('dblclick', (e) => { e.stopPropagation(); startRename(tab); });
   tabEl.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.tab-rename-input')) return;
@@ -3467,7 +3716,7 @@ async function createChatTab(opts = {}) {
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
       { separator: true },
-      { label: 'Close tab', action: () => closeTab(tabId) }
+      { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
   });
 
@@ -3515,7 +3764,7 @@ async function createChatTab(opts = {}) {
   }
   view.setActive(true);
   // Seed the pane from the last poll so a new tab isn't blank until the next tick.
-  if (planLimits) view.setLimits(planLimits);
+  if (shownPlanLimits()) view.setLimits(shownPlanLimits());
   refreshPlanLimits();
   if (!pinnedModels.length) refreshChatModels();
 
@@ -3630,10 +3879,42 @@ function saveChatSession(tab) {
   scheduleSaveSession();
 }
 
+// claude.autosaveChats: put a chat tab's session in the library without the Save click.
+// Inserts it when absent, else only refreshes savedAt (a name the user gave stays).
+// tab.autosavedSid is the entry this tab owns, so a relaunch that hands out a new
+// session id moves that entry over instead of adding a second one.
+function autosaveChat(tab) {
+  const view = chatTabs.get(tab.tabId);
+  const sid = view?.sessionId || tab.chatSessionId;
+  // Only a session with a transcript can be resumed from the library.
+  if (!view || !sid || !tab.cwd || !view.getState().canResume) return;
+  let entry = claudeSessionLibrary.find((s) => s.id === sid);
+  if (!entry && tab.autosavedSid && tab.autosavedSid !== sid) {
+    entry = claudeSessionLibrary.find((s) => s.id === tab.autosavedSid);
+    if (entry) entry.id = sid;
+  }
+  if (entry) entry.savedAt = Date.now();
+  else {
+    const name = (tab.customTitle || tabAutoName(tab)) + ' · ' + new Date().toISOString().slice(0, 10);
+    claudeSessionLibrary.push({ id: sid, cwd: tab.cwd, name, savedAt: Date.now(), kind: 'chat' });
+  }
+  tab.autosavedSid = sid;
+  renderClaudeSessions();
+  scheduleSaveSession();
+}
+
 // ---------- close tab ----------
 function closeTab(tabId) {
   const tab = tabs.get(tabId);
   if (!tab) return;
+  // editor.autosave = delay: a save still waiting on its timer is written before the
+  // editor goes away, then the close carries on.
+  if (tab.type === 'editor' && tab.autosaveTimer) {
+    clearTimeout(tab.autosaveTimer);
+    tab.autosaveTimer = null;
+    saveEditorTab(tab, false).catch(() => {}).finally(() => { if (tabs.has(tabId)) closeTab(tabId); });
+    return;
+  }
   const wasActive = activeId === tabId;
   const histIdx = tabHistory.indexOf(tabId);
   if (histIdx !== -1) tabHistory.splice(histIdx, 1);
@@ -3668,6 +3949,7 @@ function closeTab(tabId) {
   }
 
   if (tab.type === 'chat') {
+    if (appSetting('claude', 'autosaveChats') !== 'off') autosaveChat(tab);
     const view = chatTabs.get(tabId);
     if (view) view.dispose();
     chatTabs.delete(tabId);
@@ -3922,12 +4204,16 @@ async function populateChildren(tab, slotEl, dirPath, depth) {
     e.textContent = result.error;
     slotEl.appendChild(e); return null;
   }
-  if (!result.entries?.length) {
+  // explorer.showHidden off drops names starting with '.' (the Windows hidden flag is not read).
+  const entries = appSetting('explorer', 'showHidden')
+    ? (result.entries || [])
+    : (result.entries || []).filter((en) => !en.name.startsWith('.'));
+  if (!entries.length) {
     const e = document.createElement('div'); e.className = 'wt-empty';
     e.textContent = '(empty)';
     slotEl.appendChild(e); return 0;
   }
-  for (const entry of result.entries) {
+  for (const entry of entries) {
     const row = document.createElement('div');
     row.className = 'wt-item' + (isIgnoredName(entry.name) ? ' ignored' : '');
     row.dataset.path = entry.path;
@@ -3962,7 +4248,7 @@ async function populateChildren(tab, slotEl, dirPath, depth) {
       slotEl.appendChild(row);
     }
   }
-  return result.entries.length;
+  return entries.length;
 }
 function selectRow(tab, rowEl, p) {
   tab.selectedPath = p;
@@ -4863,7 +5149,7 @@ function checkAgentNotifications() {
         const busyUntil = type === 'claude' ? pane.claudeBusyUntil : pane.copilotBusyUntil;
         const working = now < busyUntil;
         const wasWorking = paneWorkingState.get(key) ?? false;
-        if (wasWorking && !working && !document.hasFocus()) {
+        if (wasWorking && !working && !document.hasFocus() && appSetting('claude', 'notify')) {
           const name = tab.customTitle || tabAutoName(tab);
           const label = type === 'claude' ? 'Claude' : 'Copilot';
           new Notification(`${label} finished`, { body: `${name} is ready`, silent: false });
@@ -4881,7 +5167,16 @@ function checkAgentNotifications() {
 let planLimits = null;
 let planLimitsAt = 0;
 
+// claude.showUsage off hides the meter in the status bar and every chat pane (they get
+// null, "nothing to show") and stops the poll.
+function shownPlanLimits() { return appSetting('claude', 'showUsage') ? planLimits : null; }
+function pushPlanLimits() {
+  for (const [, view] of chatTabs) view.setLimits(shownPlanLimits());
+  updateStatusLimits();
+}
+
 async function refreshPlanLimits(force = false) {
+  if (!appSetting('claude', 'showUsage')) return;
   const now = Date.now();
   // A rate-limit event or a click can jump the queue, but not spam the endpoint.
   if (now - planLimitsAt < (force ? 20000 : 55000)) return;
@@ -4892,8 +5187,7 @@ async function refreshPlanLimits(force = false) {
     if (res && !res.unavailable && (res.session || res.weekly)) next = res;
   } catch (_) {}
   planLimits = next;
-  for (const [, view] of chatTabs) view.setLimits(planLimits);
-  updateStatusLimits();
+  pushPlanLimits();
 }
 
 function limitLevel(entry) {
@@ -4905,7 +5199,7 @@ function limitLevel(entry) {
 
 function updateStatusLimits() {
   if (!statusLimitsEl) return;
-  const lim = planLimits;
+  const lim = shownPlanLimits();
   if (statusLimitsSepEl) statusLimitsSepEl.style.display = lim ? '' : 'none';
   if (!lim) { statusLimitsEl.textContent = ''; statusLimitsEl.title = ''; return; }
   const parts = [];
@@ -4968,6 +5262,15 @@ function chatViewFor(chatId) {
 window.chatApi.onEvent(({ chatId, event }) => {
   const view = chatViewFor(chatId);
   if (view) view.handleEvent(event);
+  // claude.autosaveChats = continuous: every finished turn refreshes the library entry.
+  if (view && event && event.type === 'result' && appSetting('claude', 'autosaveChats') === 'continuous') {
+    for (const [tabId, v] of chatTabs) {
+      if (v !== view) continue;
+      const t = tabs.get(tabId);
+      if (t) autosaveChat(t);
+      break;
+    }
+  }
 });
 window.chatApi.onStderr(({ chatId, text }) => {
   const view = chatViewFor(chatId);
@@ -4994,7 +5297,7 @@ window.chatApi.onPermissionRequest((req) => {
     return;
   }
   view.handlePermission(req);
-  if (!document.hasFocus()) {
+  if (!document.hasFocus() && appSetting('claude', 'notify')) {
     new Notification('Claude needs permission', {
       body: `${req.toolName} in ${basename(req.cwd || '')}`, silent: false
     });
@@ -5005,6 +5308,7 @@ window.chatApi.onPermissionRequest((req) => {
 document.getElementById('btn-min').addEventListener('click',   () => window.win.minimize());
 document.getElementById('btn-max').addEventListener('click',   () => window.win.maximize());
 document.getElementById('btn-close').addEventListener('click', () => window.win.close());
+document.getElementById('btn-settings')?.addEventListener('click', () => openSettings());
 
 const newGridBtn = document.getElementById('new-grid');
 if (newGridBtn) newGridBtn.addEventListener('click', () => createGridTab());
@@ -5056,6 +5360,7 @@ syncTextFieldFocus();
 // accelerators and xterm's textarea. Apply chunk-level undo to the active pane.
 // (Only fires when no native-undo text field has focus — main skips it otherwise.)
 window.shortcuts?.onCtrlZ?.(() => {
+  if (appModalOpen()) return;
   const tab = activeTab();
   if (!tab || tab.type === 'editor') return;
   if (tab.type === 'chat') {
@@ -5090,6 +5395,15 @@ window.shortcuts?.onCtrlZ?.(() => {
 // textarea and the composer swallow the key — otherwise it only works once, until
 // focus lands back outside a terminal/chat pane.
 window.addEventListener('keydown', (e) => {
+  // The settings modal and its dialogs handle their own keys (Esc closes them).
+  if (appModalOpen()) return;
+  // Ctrl+, opens the settings, from anywhere.
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && (e.key === ',' || e.code === 'Comma')) {
+    e.preventDefault();
+    e.stopPropagation();
+    openSettings();
+    return;
+  }
   if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'Tab' || e.code === 'Tab')) {
     e.preventDefault();
     e.stopPropagation();
@@ -5138,8 +5452,8 @@ window.addEventListener('keydown', (e) => {
     if (!activeId) return;
     const tab = tabs.get(activeId);
     if (!tab) return;
-    if (tab.panes.size > 1) closePane(tab, tab.activePaneId);
-    else closeTab(activeId);
+    if (tab.panes.size > 1) requestClosePane(tab, tab.activePaneId);
+    else requestCloseTab(activeId);
   } else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'b') {
     e.preventDefault(); setAgentsCollapsed(!agentsPanelEl.classList.contains('collapsed'));
   } else if (e.ctrlKey && e.key === 'b') {
@@ -5159,6 +5473,7 @@ window.addEventListener('keydown', (e) => {
 // block Chromium's force-reload, so the DOM keydown above never fires. Mirror the old
 // field guard: no split while a text field owns focus.
 window.shortcuts?.onSplitH?.(() => {
+  if (appModalOpen()) return;
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   const t = activeTab();
@@ -5186,7 +5501,7 @@ function saveSession() {
     }
     const ap = (t.type === 'editor' || t.type === 'chat') ? null : getActivePane(t);
     let scrollback = null;
-    if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: 5000 }); } catch (_) {} }
+    if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: Math.min(appSetting('terminal', 'scrollback'), 5000) }); } catch (_) {} }
     const view = chatTabs.get(id);
     tabsData.push({
       type: t.type === 'editor' ? 'editor' : t.type === 'chat' ? 'chat' : 'terminal',
@@ -5198,6 +5513,9 @@ function saveSession() {
       chatModel: view ? view.model : null,
       chatPermissionMode: view ? view.getState().permissionMode : null,
       chatTerminalOpen: view ? view.isTerminalOpen() : false,
+      // The library entry this chat tab autosaved (claude.autosaveChats), so a relaunch
+      // after restore moves that entry instead of adding a second one.
+      autosavedSid: t.type === 'chat' ? (t.autosavedSid || null) : null,
       // Last Claude CLI session that exited in this tab, offered as one-click resume on
       // restore. Only the active pane comes back, so a split sibling's only counts when it
       // ran in the same folder; otherwise it could never be offered.
@@ -5226,6 +5544,12 @@ window.addEventListener('beforeunload', () => { clearTimeout(saveTimer); saveSes
 // shell prompt (OSC 9;9 flips claudeRunning off) means that line is in the scrollback
 // the final save serializes.
 window.shortcuts?.onBeforeClose?.(async () => {
+  // editor.autosave = delay: flush saves still waiting on their timer.
+  const pendingSaves = [];
+  for (const [, t] of tabs) {
+    if (t.type === 'editor' && t.autosaveTimer) pendingSaves.push(saveEditorTab(t, false).catch(() => {}));
+  }
+  await Promise.all(pendingSaves);
   const panes = getAllClaudePanes().map(x => x.pane);
   if (panes.length) {
     for (const p of panes) window.term.input(p.ptyId, '\x03');
@@ -5249,10 +5573,58 @@ window.shortcuts?.onBeforeClose?.(async () => {
     // Let xterm finish parsing the exit output before it is serialized.
     await new Promise(r => setTimeout(r, 300));
   }
+  // claude.autosaveChats: chat tabs go into the library before the final save.
+  if (appSetting('claude', 'autosaveChats') !== 'off') {
+    for (const [, t] of tabs) if (t.type === 'chat') autosaveChat(t);
+  }
   clearTimeout(saveTimer);
   saveSession();
   window.shortcuts.closeReady();
 });
+
+// ---------- settings ----------
+// settingsView.js owns the store and the modal. Most keys are read where they are used
+// (new tabs, the next click, the next turn); this applies the live ones to what is open.
+function appModalOpen() {
+  return !!(window.isAppSettingsOpen && window.isAppSettingsOpen()) || !!document.querySelector('.set-overlay-top');
+}
+function openSettings(section) {
+  hideContextMenu();
+  if (window.openAppSettings) window.openAppSettings(section ? { section } : {});
+}
+// Hooks the modal calls back into: open settings.json, and where focus goes on close
+// when the element it came from is gone.
+window.macOpenInEditor = (p) => openInEditor(p);
+window.macFocusActive = () => { const t = activeTab(); if (t) focusMemberSurface(t); };
+
+function applyTerminalSettings() {
+  const o = terminalOptions();
+  applyTerminalBackground();
+  for (const [, tab] of tabs) {
+    // tab.panes includes a chat pane's drawer shell.
+    for (const [, pane] of tab.panes) {
+      try { for (const k of Object.keys(o)) pane.term.options[k] = o[k]; } catch (_) {}
+      fitPane(pane);
+    }
+  }
+}
+
+function applySettings(next, prev) {
+  const ch = (sec, key) => !prev || !prev[sec] || !next[sec] || prev[sec][key] !== next[sec][key];
+  if (['fontFamily', 'fontSize', 'theme', 'cursorStyle', 'scrollback'].some((k) => ch('terminal', k))) applyTerminalSettings();
+  if (ch('claude', 'hybridInput')) {
+    if (hybridToggleEl) hybridToggleEl.checked = hybridEnabled();
+    updateHybrid();
+  }
+  if (ch('claude', 'showUsage')) {
+    pushPlanLimits();
+    if (next.claude.showUsage) refreshPlanLimits(true);
+  }
+  if (ch('explorer', 'showHidden')) renderTree();
+  if (['wordWrap', 'minimap', 'tabSize'].some((k) => ch('editor', k))) applyEditorSettings();
+  refreshSettingsEditors();
+}
+window.onAppSettingsChanged(applySettings);
 
 // ---------- boot ----------
 (async () => {
@@ -5282,7 +5654,8 @@ window.shortcuts?.onBeforeClose?.(async () => {
       copilotSessionLibrary.push(...sess.copilotSessions);
     }
     renderClaudeSessions();
-    if (sess?.tabs?.length) {
+    // general.restoreTabs off: a fresh start. The saved-session library above still loads.
+    if (sess?.tabs?.length && appSetting('general', 'restoreTabs')) {
       const created = [];
       for (const t of sess.tabs) {
         let tab;
@@ -5305,6 +5678,7 @@ window.shortcuts?.onBeforeClose?.(async () => {
             resumeSessionId: t.chatSessionId || null,
             color: t.color || null
           });
+          if (isClaudeSessionId(t.autosavedSid)) tab.autosavedSid = t.autosavedSid;
           if (t.chatTerminalOpen) {
             const v = chatTabs.get(tab.tabId);
             if (v) v.toggleTerminal();
@@ -5330,4 +5704,8 @@ window.shortcuts?.onBeforeClose?.(async () => {
   if (!restored) await createTab();
   _sessionReady = true;
   scheduleSaveSession();
+  // claude.autoClearDays: the "Clear old" rule, once per start (after _sessionReady so
+  // its result is saved).
+  const clearDays = appSetting('claude', 'autoClearDays');
+  if (clearDays > 0) clearOldSavedSessions(clearDays).catch(() => {});
 })();
