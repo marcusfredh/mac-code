@@ -3025,18 +3025,81 @@ async function createEditorTab(filePath) {
 }
 
 // ---------- repo notes ----------
-// A local notepad per repository (notesView.js), docked over the right edge of the
-// stage. It follows whatever tab you're in: same repo in any clone or worktree, same
-// notes. The status bar button shows how many items are still open.
+// A local notepad per repository (notesView.js), shown inline at the bottom of the
+// Explorer sidebar (below the file tree, resizable by the split handle). It follows
+// whatever tab you're in: same repo in any clone or worktree, same notes. The status
+// bar button shows how many items are still open.
 const statusNotes    = document.getElementById('status-notes');
 const statusNotesSep = document.getElementById('status-notes-sep');
 let notesCtx = null;
 let notesCtxSeq = 0;
 const notesPanel = window.repoNotes ? window.repoNotes.createNotesPanel({
-  onToggle: (on) => { if (statusNotes) statusNotes.classList.toggle('on', on); },
+  onToggle: (on) => {
+    if (statusNotes) statusNotes.classList.toggle('on', on);
+    sidebarEl.classList.toggle('notes-open', on);
+    if (on) applyNotesHeight();
+  },
   onClose: () => { const t = activeTab(); if (t) focusMemberSurface(t); }
 }) : null;
-if (notesPanel) areaEl.appendChild(notesPanel.el);
+if (notesPanel) sidebarEl.appendChild(notesPanel.el);
+
+// Panel height: stored px (or 40% of the sidebar by default), kept within 200px..half
+// the sidebar so the tree always keeps room; the max wins on short windows, and the
+// panel itself scrolls when that leaves less than its header, add box and footer need.
+const NOTES_H_KEY = 'notesHeight';
+const notesSplitEl = document.getElementById('notes-split');
+function clampNotesH(h) {
+  const maxH = Math.floor(sidebarEl.getBoundingClientRect().height * 0.5);
+  return Math.max(Math.min(200, maxH), Math.min(maxH, Math.round(h)));
+}
+function applyNotesHeight() {
+  if (!notesPanel) return;
+  let h = NaN;
+  try { h = parseInt(localStorage.getItem(NOTES_H_KEY) || '', 10); } catch (_) {}
+  if (!Number.isFinite(h)) h = sidebarEl.getBoundingClientRect().height * 0.4;
+  notesPanel.el.style.height = clampNotesH(h) + 'px';
+}
+window.addEventListener('resize', () => { if (notesPanel && notesPanel.isOpen()) applyNotesHeight(); });
+let notesDrag = null;
+if (notesSplitEl) {
+  notesSplitEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); notesSplitEl.setPointerCapture(e.pointerId);
+    notesDrag = { startY: e.clientY, startH: notesPanel.el.getBoundingClientRect().height };
+    notesSplitEl.classList.add('dragging');
+    document.body.classList.add('resizing-notes');
+  });
+  // The panel is below the handle, so dragging up grows it.
+  notesSplitEl.addEventListener('pointermove', (e) => {
+    if (!notesDrag) return;
+    notesPanel.el.style.height = clampNotesH(notesDrag.startH - (e.clientY - notesDrag.startY)) + 'px';
+  });
+  const endNotesDrag = (e) => {
+    if (!notesDrag) return;
+    try { notesSplitEl.releasePointerCapture(e.pointerId); } catch (_) {}
+    notesDrag = null;
+    notesSplitEl.classList.remove('dragging');
+    document.body.classList.remove('resizing-notes');
+    const h = Math.round(notesPanel.el.getBoundingClientRect().height);
+    try { localStorage.setItem(NOTES_H_KEY, String(h)); } catch (_) {}
+    applyNotesHeight();
+  };
+  notesSplitEl.addEventListener('pointerup', endNotesDrag);
+  notesSplitEl.addEventListener('pointercancel', endNotesDrag);
+  notesSplitEl.addEventListener('dblclick', () => {
+    try { localStorage.removeItem(NOTES_H_KEY); } catch (_) {}
+    applyNotesHeight();
+  });
+}
+// However the sidebar gets collapsed (button, Ctrl+B), don't leave focus in the hidden
+// panel; notes stay open and come back with the sidebar.
+if (notesPanel) {
+  new MutationObserver(() => {
+    if (sidebarEl.classList.contains('collapsed') && notesPanel.el.contains(document.activeElement)) {
+      const t = activeTab(); if (t) focusMemberSurface(t);
+    }
+  }).observe(sidebarEl, { attributes: true, attributeFilter: ['class'] });
+}
 
 function dirOf(p) {
   const s = String(p || '');
@@ -3087,8 +3150,22 @@ function renderNotesButton() {
   statusNotesSep.style.display = '';
 }
 
-function openNotes() { if (notesPanel) { refreshNotesContext(); notesPanel.open(); } }
-function toggleNotes() { if (notesPanel) { if (!notesPanel.isOpen()) refreshNotesContext(); notesPanel.toggle(); } }
+function openNotes() {
+  if (!notesPanel) return;
+  sidebarEl.classList.remove('collapsed');
+  refreshNotesContext(); notesPanel.open();
+}
+function toggleNotes() {
+  if (!notesPanel) return;
+  // Open but hidden with the sidebar: bring it back rather than closing it.
+  if (notesPanel.isOpen() && sidebarEl.classList.contains('collapsed')) {
+    sidebarEl.classList.remove('collapsed');
+    requestAnimationFrame(() => notesPanel.el.focus());
+    return;
+  }
+  if (!notesPanel.isOpen()) { sidebarEl.classList.remove('collapsed'); refreshNotesContext(); }
+  notesPanel.toggle();
+}
 
 if (statusNotes) statusNotes.addEventListener('click', toggleNotes);
 if (window.repoNotes) {

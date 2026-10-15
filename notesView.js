@@ -14,6 +14,7 @@
 
   const DEFAULT_STAGES = ['dev', 'prod'];
   const SAVE_DELAY_MS = 400;
+  const COPY_ICON = '<svg viewBox="0 0 12 12" width="12" height="12"><rect x="4" y="4" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M8 2.5V2.2c0-.6-.5-1-1-1H2.5c-.6 0-1 .4-1 1V7c0 .6.4 1 1 1h.3" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round"/></svg>';
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -72,6 +73,27 @@
     return r ? r.items.filter((i) => !i.done).length : 0;
   }
 
+  // Markdown export of one repo's notes (all items, whatever the panel filter says).
+  // Pure: takes the stored repo record, so it can be tested without a DOM.
+  function notesToMarkdown(repo, name) {
+    const r = repo || {};
+    const stages = Array.isArray(r.stages) ? r.stages : [];
+    const items = Array.isArray(r.items) ? r.items : [];
+    const line = (it, mark) => {
+      const marks = stages.filter((s) => it.stages && it.stages[s]).map((s) => s + ' ✓');
+      let t = String(it.text || '').replace(/\r\n?/g, '\n').split('\n').join('\n  ');
+      if (marks.length) t += ' (' + marks.join(', ') + ')';
+      if (it.branch) t += ' [' + it.branch + ']';
+      return '- [' + mark + '] ' + t;
+    };
+    const out = ['# Notes — ' + (name || r.name || '')];
+    const open = items.filter((i) => !i.done), done = items.filter((i) => i.done);
+    if (open.length) out.push('', '## Open', ...open.map((i) => line(i, ' ')));
+    if (done.length) out.push('', '## Done', ...done.map((i) => line(i, 'x')));
+    if (r.scratch && r.scratch.trim()) out.push('', '## Scratchpad', '', r.scratch);
+    return out.join('\n') + '\n';
+  }
+
   // ---------- panel ----------
   function createNotesPanel(opts = {}) {
     let ctx = null;              // { key, name, branch }
@@ -87,9 +109,12 @@
     const sub = el('div', 'notes-sub');
     titleWrap.append(title, sub);
     const filterEl = el('select', 'notes-filter');
-    const closeBtn = el('button', 'notes-icon-btn', '×');
-    closeBtn.title = 'Close (Esc)';
-    hdr.append(titleWrap, filterEl, closeBtn);
+    const copyBtn = el('button', 'notes-icon-btn notes-copy', 'Copy');
+    copyBtn.title = 'Copy notes as Markdown';
+    const closeBtn = el('button', 'notes-icon-btn', '▾');
+    closeBtn.title = 'Hide notes (Ctrl+Shift+N)';
+    closeBtn.setAttribute('aria-label', 'Hide notes');
+    hdr.append(titleWrap, filterEl, copyBtn, closeBtn);
 
     const add = el('div', 'notes-add');
     const addInput = el('textarea', 'notes-add-input');
@@ -115,6 +140,19 @@
     root.append(hdr, add, body, foot);
 
     closeBtn.addEventListener('click', () => close());
+    let copyTimer = null;
+    const copyLabel = (text) => {
+      copyBtn.textContent = text;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    };
+    copyBtn.addEventListener('click', () => {
+      if (!ctx) return;
+      const md = notesToMarkdown(repoData(ctx.key, ctx.name), ctx.name);
+      let p;
+      try { p = navigator.clipboard.writeText(md); } catch (err) { p = Promise.reject(err); }
+      p.then(() => copyLabel('Copied'), () => copyLabel('Failed'));
+    });
     root.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Escape' && !editingId) { e.preventDefault(); close(); }
@@ -149,9 +187,11 @@
         scratch.innerHTML = '';
         foot.innerHTML = '';
         add.style.display = 'none';
+        copyBtn.disabled = true;
         return;
       }
       add.style.display = '';
+      copyBtn.disabled = false;
       const r = repoData(ctx.key, ctx.name);
       title.textContent = 'Notes';
       sub.textContent = ctx.name;
@@ -242,6 +282,29 @@
       meta.appendChild(el('span', 'notes-time', ago(it.updated || it.created)));
       main.appendChild(meta);
       row.appendChild(main);
+
+      // Copy just this item's text; the icon flips to a check (or ! on failure) briefly.
+      const cp = el('button', 'notes-icon-btn notes-item-copy');
+      cp.title = 'Copy this note';
+      cp.innerHTML = COPY_ICON;
+      if (editingId === it.id) cp.style.visibility = 'hidden';
+      let cpTimer = null;
+      cp.addEventListener('click', () => {
+        let p;
+        try { p = navigator.clipboard.writeText(it.text); } catch (err) { p = Promise.reject(err); }
+        p.then(() => true, () => false).then((ok) => {
+          if (!cp.isConnected) return;
+          cp.classList.add(ok ? 'ok' : 'fail');
+          cp.textContent = ok ? '✓' : '!';
+          cp.title = ok ? 'Copied' : 'Copy failed';
+          clearTimeout(cpTimer);
+          cpTimer = setTimeout(() => {
+            if (!cp.isConnected) return;
+            cp.classList.remove('ok', 'fail'); cp.innerHTML = COPY_ICON; cp.title = 'Copy this note';
+          }, 1200);
+        });
+      });
+      row.appendChild(cp);
 
       const del = el('button', 'notes-icon-btn notes-del', '×');
       del.title = 'Delete';
@@ -342,6 +405,7 @@
 
   window.repoNotes = {
     createNotesPanel,
+    notesToMarkdown,
     openCount,
     ready,
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }

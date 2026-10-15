@@ -324,6 +324,7 @@
 
     .tree {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 0 6px 8px;
       display: flex;
@@ -2131,22 +2132,27 @@
     .status-pr.checks-failure .status-pr-checks { color: #f85149; }
     .status-pr.checks-pending .status-pr-checks { color: #d29922; }
 
-    /* ---------- Repo notes (drawer over the stage's right edge) ---------- */
+    /* ---------- Repo notes (inline section at the bottom of the Explorer) ---------- */
     .notes-panel {
-      position: absolute; top: 8px; right: 8px; bottom: 8px; width: 400px; max-width: calc(100% - 16px);
-      z-index: 15; display: flex; flex-direction: column;
-      background: var(--menu); border: 1px solid var(--line); border-radius: 10px;
-      box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45); font-family: var(--ui); color: var(--fg);
-      transform: translateX(calc(100% + 16px)); opacity: 0; pointer-events: none;
-      transition: transform 0.16s ease, opacity 0.16s ease; outline: none;
+      display: none; flex-direction: column; flex: 0 0 auto; min-height: 0; overflow-y: auto;
+      background: var(--panel); border-top: 1px solid var(--line);
+      font-family: var(--ui); color: var(--fg); outline: none;
     }
-    .notes-panel.open { transform: none; opacity: 1; pointer-events: auto; }
-    .notes-hdr { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--line); }
-    .notes-title-wrap { flex: 1; min-width: 0; }
+    .sidebar.notes-open .notes-panel { display: flex; }
+    .notes-split { display: none; height: 5px; margin: -3px 0 -2px; flex-shrink: 0; cursor: row-resize; background: transparent; z-index: 5; position: relative; transition: background 0.12s; }
+    .sidebar.notes-open .notes-split { display: block; }
+    .notes-split:hover, .notes-split.dragging { background: var(--accent); }
+    body.resizing-notes { cursor: row-resize !important; user-select: none; }
+    body.resizing-notes * { cursor: row-resize !important; pointer-events: none; }
+    body.resizing-notes .notes-split { pointer-events: auto; }
+    .notes-hdr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); }
+    .notes-title-wrap { flex: 1 1 60px; min-width: 0; }
     .notes-title { font-size: 13.5px; font-weight: 600; color: var(--fg-strong); }
     .notes-sub { font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .notes-filter { background: var(--bg); border: 1px solid var(--line); color: var(--fg); border-radius: 5px; font: 11.5px var(--ui); height: 24px; padding: 0 4px; outline: none; }
+    .notes-filter { background: var(--bg); border: 1px solid var(--line); color: var(--fg); border-radius: 5px; font: 11.5px var(--ui); height: 24px; padding: 0 4px; outline: none; flex: 0 1 auto; min-width: 0; max-width: 100%; }
     .notes-icon-btn { border: 0; background: transparent; color: var(--fg-dim); border-radius: 5px; min-width: 24px; height: 24px; font-size: 16px; line-height: 1; cursor: default; }
+    .notes-copy { font-size: 11px; padding: 0 6px; flex-shrink: 0; }
+    .notes-icon-btn:disabled { opacity: 0.4; pointer-events: none; }
     .notes-icon-btn:hover { background: var(--fill-hover); color: var(--fg-strong); }
     .notes-add { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
     .notes-add-input, .notes-edit { overflow: hidden; }
@@ -2158,7 +2164,7 @@
     .notes-add-meta { display: flex; align-items: center; gap: 8px; }
     .notes-branch-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--fg-muted); }
     .notes-branch-toggle input { margin: 0; accent-color: var(--accent); width: 12px; height: 12px; }
-    .notes-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 0 10px; }
+    .notes-body { flex: 1 1 auto; min-height: 96px; overflow-y: auto; padding: 6px 0 10px; }
     .notes-empty { padding: 18px 14px; color: var(--fg-faint); font-size: 12px; text-align: center; }
     .notes-item { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line-soft); }
     .notes-item:hover { background: var(--fill); }
@@ -2177,6 +2183,10 @@
     .notes-time { font-size: 10.5px; color: var(--fg-faint); margin-left: auto; }
     .notes-del { opacity: 0; font-size: 14px; flex-shrink: 0; }
     .notes-item:hover .notes-del, .notes-del.armed { opacity: 1; }
+    .notes-item-copy { opacity: 0; font-size: 12px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .notes-item:hover .notes-item-copy, .notes-item-copy.ok, .notes-item-copy.fail, .notes-item-copy:focus-visible { opacity: 1; }
+    .notes-item-copy.ok { color: var(--green); }
+    .notes-item-copy.fail { color: var(--red); }
     .notes-del.armed { color: #fff; background: #b62324; font-size: 11px; padding: 0 7px; }
     .notes-sec { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-faint); padding: 12px 14px 6px; }
     .notes-sec.clickable, .notes-done summary { cursor: default; user-select: none; }
@@ -2615,6 +2625,7 @@
         <span class="tree-root-count" id="tree-root-count"></span>
       </div>
       <div class="tree scroll" id="tree"></div>
+      <div class="notes-split" id="notes-split" title="Drag to resize · double-click to reset"></div>
     </aside>
     <div class="sidebar-resize" id="sidebar-resize" title="Drag to resize"></div>
     <div class="sidebar-handle" id="sidebar-handle" title="Show Explorer">&rsaquo;</div>
