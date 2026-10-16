@@ -101,8 +101,20 @@ command's head — so an allowlisted head cannot smuggle something through a pip
   they show dimmed with a struck-through Resume). Right-click it for 1 day / 1 week /
   1 month, or to clear the whole library. Hover a row to see when it was last active —
   the name shows when it was *saved*, which can be much earlier.
+- Frequent repos: the folder button after GitHub in the tab bar lists the git repos you
+  open most (see below)
 - Status bar: cwd, tab count, shell, and live agent state
 - Cascadia Code font (bundled), Consolas fallback
+
+### Frequent repos
+The folder button in the tab bar opens a filterable list of the git repos you use most,
+sorted by use count (ties by most recent), 15 shown and the filter searches all stored.
+Click a row or press Enter for a shell tab there; the row buttons open a Claude chat or
+Claude in a terminal instead, and **x** removes the entry. A use is counted when you open
+a terminal tab, `cd` into a different repo, start a chat, or pick from the list
+— never while the last session is restored. Worktrees count toward their main clone,
+which is also what the list opens. A folder that has been deleted is shown dimmed and
+never opened. Counts live in the app's local storage (`repoUsage`, at most 60 repos).
 
 ### GitHub
 `Ctrl+Shift+G`, the GitHub button, the status-bar PR pill and GitHub links all open the
@@ -234,6 +246,7 @@ main.js                   Electron main — pty spawn, chat processes, permissio
 preload.js                contextBridge IPC surface
 renderer.html             UI shell + all styling
 renderer.js               tabs, panes, Explorer, agents panel, session persistence
+repoUsage.js              frequent-repos counter (pure, unit-tested)
 chatView.js               Claude chat surface — stream rendering, tool cards, composer
 settings.js               settings schema, defaults and validation (pure, unit-tested)
 settingsView.js           settings store in the renderer + the settings modal

@@ -2193,6 +2193,252 @@ document.addEventListener('mousedown', (e) => {
 window.addEventListener('blur', closeBranchMenu);
 window.addEventListener('resize', closeBranchMenu);
 
+// ---------- frequent repos ----------
+// Counts how often you open tabs in each git repo (repoUsage.js, localStorage) and lists
+// the most used ones under the tab bar's folder button. A repo is keyed by its main
+// clone, so worktrees add to the clone they belong to. Panes resolve their repo once
+// (pane.usageRoot: undefined while resolving, null outside a repo); only a new pane, a
+// cd into a different repo, a chat tab or the menu itself counts, and never while the
+// session is being restored.
+const REPO_USAGE_KEY = 'repoUsage';
+const REPOS_MENU_LIMIT = 15;
+const REPOS_FOLDER_ICON = '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.4 1.5h5.6c.7 0 1.2.5 1.2 1.2v6.6c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>';
+const REPOS_TERM_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5l3 3-3 3M8 11.5h5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function readRepoUsage() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(REPO_USAGE_KEY)); } catch (_) { raw = null; }
+  return window.repoUsage.normalize(raw);
+}
+function writeRepoUsage(state) {
+  try { localStorage.setItem(REPO_USAGE_KEY, JSON.stringify(state)); } catch (_) {}
+}
+const repoKeyOf = (info) => (info ? (info.mainRoot || info.root || null) : null);
+function recordRepoUse(info) {
+  const path = repoKeyOf(info);
+  if (!path || !window.repoUsage) return;
+  writeRepoUsage(window.repoUsage.recordUse(readRepoUsage(), { path, repo: info.repo || null }, Date.now()));
+}
+
+// Resolve a new pane's repo. inherit (a split's parent) skips the lookup and the count.
+function trackPaneRepo(tab, pane, count, inherit) {
+  if (inherit !== undefined) { pane.usageRoot = inherit; return; }
+  pane.usageRoot = undefined;
+  repoInfoFor(pane.cwd).then((info) => {
+    if (tab.panes.get(pane.paneId) !== pane) return;   // closed meanwhile
+    pane.usageRoot = repoKeyOf(info);
+    if (count && pane.usageRoot) recordRepoUse(info);
+  });
+}
+// A pane's prompt reported a new folder: count it only when that is a different repo.
+function trackPaneCd(tab, pane, cwd) {
+  repoInfoFor(cwd).then((info) => {
+    if (tab.panes.get(pane.paneId) !== pane) return;
+    const key = repoKeyOf(info);
+    if ((key || '').toLowerCase() === (pane.usageRoot || '').toLowerCase()) return;
+    pane.usageRoot = key;
+    if (key) recordRepoUse(info);
+  });
+}
+function trackCwdUse(cwd) {
+  repoInfoFor(cwd).then((info) => recordRepoUse(info));
+}
+
+let reposMenuEl = null;
+let reposMenuState = null;   // { filtered[], index, missing: Set<lowercased path> }
+const reposBtn = document.getElementById('open-repos');
+
+function ensureReposMenu() {
+  if (reposMenuEl) return reposMenuEl;
+  const el = document.createElement('div');
+  el.className = 'repos-menu';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Frequent repos');
+  el.innerHTML =
+    '<input class="repos-search" type="text" placeholder="Filter repos…" aria-label="Filter repos" spellcheck="false" autocomplete="off">' +
+    '<div class="repos-list"></div>' +
+    '<div class="repos-foot"><span>Sorted by how often you open them</span><span>Enter: shell · ↑↓ · Esc</span></div>';
+  document.body.appendChild(el);
+  const input = el.querySelector('.repos-search');
+  input.addEventListener('input', () => refreshReposMenu(true));
+  el.addEventListener('keydown', onReposMenuKey);
+  reposMenuEl = el;
+  return el;
+}
+
+function openReposMenu() {
+  if (!window.repoUsage || !reposBtn) return;
+  closeBranchMenu();
+  hideContextMenu();
+  const el = ensureReposMenu();
+  reposMenuState = { filtered: [], index: 0, missing: new Set() };
+  const input = el.querySelector('.repos-search');
+  input.value = '';
+  refreshReposMenu(true);
+  el.classList.add('show');
+  reposBtn.classList.add('active');
+  reposBtn.setAttribute('aria-expanded', 'true');
+  // Right-aligned under the button.
+  const rect = reposBtn.getBoundingClientRect();
+  el.style.top = (rect.bottom + 4) + 'px';
+  el.style.right = Math.max(6, window.innerWidth - rect.right) + 'px';
+  input.focus();
+}
+
+function closeReposMenu({ restoreFocus = false } = {}) {
+  if (!reposMenuState) return;
+  reposMenuState = null;
+  reposMenuEl.classList.remove('show');
+  reposBtn.classList.remove('active');
+  reposBtn.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) window.macFocusActive();
+}
+
+function toggleReposMenu() {
+  if (reposMenuState) closeReposMenu({ restoreFocus: true });
+  else openReposMenu();
+}
+
+// reset: back to the first row (filter changed); otherwise keep the selection in range.
+function refreshReposMenu(reset) {
+  if (!reposMenuState) return;
+  const q = reposMenuEl.querySelector('.repos-search').value;
+  reposMenuState.filtered = window.repoUsage.topUses(readRepoUsage(), { filter: q, limit: q.trim() ? Infinity : REPOS_MENU_LIMIT });
+  const n = reposMenuState.filtered.length;
+  reposMenuState.index = reset ? 0 : Math.min(reposMenuState.index, Math.max(0, n - 1));
+  renderReposMenuList(q.trim() !== '');
+}
+
+function shortRepoPath(p) {
+  let s = p;
+  if (homeDir && s.toLowerCase().startsWith(homeDir.toLowerCase())) s = '~' + s.slice(homeDir.length);
+  return s.length > 46 ? '…' + s.slice(-45) : s;
+}
+
+function renderReposMenuList(filtering) {
+  const list = reposMenuEl.querySelector('.repos-list');
+  list.textContent = '';
+  const { filtered, index, missing } = reposMenuState;
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'repos-empty';
+    empty.textContent = filtering ? 'No matching repo' : 'Repos you open tabs in show up here.';
+    list.appendChild(empty);
+    return;
+  }
+  const mkBtn = (cls, label, html, text) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ri-btn ' + cls;
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    if (html) b.innerHTML = html; else b.textContent = text;   // html is static markup
+    return b;
+  };
+  filtered.forEach((it, i) => {
+    const isMissing = missing.has(it.path.toLowerCase());
+    const row = document.createElement('div');
+    row.className = 'repos-item' + (i === index ? ' sel' : '') + (isMissing ? ' missing' : '');
+    row.title = it.path;
+    const ic = document.createElement('span');
+    ic.className = 'ri-ic';
+    ic.innerHTML = REPOS_FOLDER_ICON;
+    const text = document.createElement('span');
+    text.className = 'ri-text';
+    const name = document.createElement('span');
+    name.className = 'ri-name';
+    name.textContent = window.repoUsage.baseName(it.path);
+    const sub = document.createElement('span');
+    sub.className = 'ri-sub';
+    sub.textContent = isMissing ? 'Folder not found — remove it from the list?' : (it.repo || shortRepoPath(it.path));
+    text.append(name, sub);
+    const count = document.createElement('span');
+    count.className = 'ri-count';
+    count.textContent = it.count + '×';
+    const chat = mkBtn('claude', 'Open as Claude chat', null, 'C');
+    const term = mkBtn('', 'Open with Claude in terminal', REPOS_TERM_ICON);
+    const rm = mkBtn('ri-x', 'Remove from list', null, '×');
+    row.append(ic, text, count, chat, term, rm);
+    row.addEventListener('mouseenter', () => { reposMenuState.index = i; markReposSel(); });
+    row.addEventListener('click', () => pickRepo(it, 'shell'));
+    chat.addEventListener('click', (e) => { e.stopPropagation(); pickRepo(it, 'chat'); });
+    term.addEventListener('click', (e) => { e.stopPropagation(); pickRepo(it, 'claude'); });
+    rm.addEventListener('click', (e) => { e.stopPropagation(); removeRepoUse(it); });
+    list.appendChild(row);
+  });
+  scrollReposSelIntoView();
+}
+
+function markReposSel() {
+  if (!reposMenuEl || !reposMenuState) return;
+  Array.from(reposMenuEl.querySelectorAll('.repos-item'))
+    .forEach((n, i) => n.classList.toggle('sel', i === reposMenuState.index));
+}
+function scrollReposSelIntoView() {
+  const node = reposMenuEl && reposMenuEl.querySelectorAll('.repos-item')[reposMenuState ? reposMenuState.index : 0];
+  if (node) node.scrollIntoView({ block: 'nearest' });
+}
+
+function onReposMenuKey(e) {
+  if (!reposMenuState) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeReposMenu({ restoreFocus: true });
+    return;
+  }
+  // Arrows and Enter drive the list from the filter box; on a row's own buttons
+  // Enter/Space keep their normal meaning.
+  if (e.target !== reposMenuEl.querySelector('.repos-search')) return;
+  const n = reposMenuState.filtered.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!n) return;
+    const d = e.key === 'ArrowDown' ? 1 : -1;
+    reposMenuState.index = (reposMenuState.index + d + n) % n;
+    markReposSel();
+    scrollReposSelIntoView();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const it = reposMenuState.filtered[reposMenuState.index];
+    if (it) pickRepo(it, 'shell');
+  }
+}
+
+// kind: 'shell' | 'chat' | 'claude'. The folder is checked first so a tab never starts
+// in a path that is gone; the new tab counts the use itself.
+async function pickRepo(it, kind) {
+  const st = reposMenuState;
+  if (!st) return;
+  let res = null;
+  try { res = await window.fs.list(it.path); } catch (_) { res = { error: 'unreadable' }; }
+  if (reposMenuState !== st) return;   // menu closed while checking
+  if (!res || res.error) {
+    st.missing.add(it.path.toLowerCase());
+    renderReposMenuList(reposMenuEl.querySelector('.repos-search').value.trim() !== '');
+    return;
+  }
+  closeReposMenu();
+  if (kind === 'chat') createChatTab({ cwd: it.path });
+  else createTab({ cwd: it.path, runOnReady: kind === 'claude' ? 'claude' : undefined });
+}
+
+function removeRepoUse(it) {
+  writeRepoUsage(window.repoUsage.removeUse(readRepoUsage(), it.path));
+  if (reposMenuState) { reposMenuState.missing.delete(it.path.toLowerCase()); refreshReposMenu(false); }
+}
+
+if (reposBtn) {
+  reposBtn.addEventListener('click', toggleReposMenu);
+  reposBtn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleReposMenu(); }
+  });
+}
+document.addEventListener('mousedown', (e) => {
+  if (reposMenuState && !e.target.closest('.repos-menu') && !e.target.closest('#open-repos')) closeReposMenu();
+});
+window.addEventListener('blur', () => closeReposMenu());
+window.addEventListener('resize', () => closeReposMenu());
+
 // ---------- pane resizer drag ----------
 function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
   let drag = null;
@@ -2342,6 +2588,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     flowKey: flowKey || null, flowBar: null
   };
   tab.panes.set(paneId, pane);
+  // Restored panes, splits and a chat's drawer shell don't count as a new use.
+  trackPaneRepo(tab, pane, _sessionReady && !opts.noCount, opts.usageRoot);
 
   // Input — extend suppressBusyUntil so PTY echo of keystrokes
   // doesn't trigger the working indicator
@@ -2616,6 +2864,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (pane.cwd !== cwd) {
       pane.cwd = cwd;
       scheduleSaveSession();
+      if (_sessionReady && pane.usageRoot !== undefined) trackPaneCd(tab, pane, cwd);
       if (tab.type === 'chat') {
         // The drawer can wander with `cd` without moving the chat's own folder.
         const view = chatTabs.get(tab.tabId);
@@ -2697,7 +2946,7 @@ async function splitPane(tab, paneId, direction) {
 
   setupResizerDrag(resizerEl, pane.el, newPaneEl, direction);
 
-  const newPane = await createPaneProcess(tab, newPaneEl, { cwd: pane.cwd });
+  const newPane = await createPaneProcess(tab, newPaneEl, { cwd: pane.cwd, usageRoot: pane.usageRoot, noCount: true });
   setActivePane(tab, newPane.paneId);
   // Both panes just changed width/height; xterm cols/rows only follow if we refit. The
   // ResizeObserver is debounced and can miss the mid-surgery reflow, so refit explicitly
@@ -3525,6 +3774,7 @@ function findGitHubTab() {
 // even when a GitHub tab is also open (a tab left over from 'tab' mode keeps working,
 // it just isn't where new opens go); 'tab' is the original one-tab behaviour.
 async function openGitHub(target = {}) {
+  closeReposMenu();
   if (ghOpenAsOverlay()) return openGitHubOverlay(target);
   let tab = findGitHubTab();
   if (!tab) tab = createGitHubTab();
@@ -3861,6 +4111,7 @@ async function createChatTab(opts = {}) {
   const tabId = newTabId();
   const chatId = 'chat-' + (++chatSeq);
   const cwd = opts.cwd || tabCwd(activeTab()) || undefined;
+  if (_sessionReady && cwd) trackCwdUse(cwd);   // not for restored chats
 
   const container = document.createElement('div');
   container.className = 'term-container';
@@ -3972,7 +4223,8 @@ async function createChatTab(opts = {}) {
 async function openChatTerminal(tab, mount) {
   if (tab.termPane) return tab.termPane;
   mount.innerHTML = '';
-  const pane = await createPaneProcess(tab, mount, { cwd: tab.cwd || undefined });
+  // The chat tab itself counted its folder; the drawer shell only resolves its repo.
+  const pane = await createPaneProcess(tab, mount, { cwd: tab.cwd || undefined, noCount: true });
   tab.termPane = pane;
   requestAnimationFrame(() => { fitPane(pane); pane.term.focus(); });
   scheduleAgentRender();
@@ -5777,6 +6029,7 @@ function appModalOpen() {
 }
 function openSettings(section) {
   hideContextMenu();
+  closeReposMenu();
   if (window.openAppSettings) window.openAppSettings(section ? { section } : {});
 }
 // Hooks the modal calls back into: open settings.json, and where focus goes on close

@@ -43,6 +43,7 @@
       "notesView.js",
       "settings.js",
       "settingsView.js",
+      "repoUsage.js",
       "hooks/**/*",
       "assets/**/*",
       "node_modules/**/*"
