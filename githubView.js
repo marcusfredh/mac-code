@@ -259,8 +259,26 @@
     main.append(toolbar, body);
 
     // ---- sidebar ----
+    // Rebuilt wholesale on every change (polls included) — except the open-tabs picker,
+    // which sits between the two rebuilt parts so a rebuild never closes its popup or
+    // drops its focus. The parts are display: contents, so the sidebar's flex layout
+    // sees their children directly.
+    const sideTop = el('div', 'gh-side-part');
+    const sideBottom = el('div', 'gh-side-part');
+    let tabsPick = null, tabsPickSeq = 0;
+    if (opts.getOpenTabRepos) tabsPick = openTabsPicker();
+    side.append(sideTop);
+    if (tabsPick) side.append(tabsPick);
+    side.append(sideBottom);
+
     function renderSide() {
-      side.innerHTML = '';
+      sideTop.innerHTML = '';
+      sideBottom.innerHTML = '';
+      renderSideTop(sideTop);
+      renderSideBottom(sideBottom);
+      fillTabsPicker();
+    }
+    function renderSideTop(side) {
       const hdr = el('div', 'gh-side-hdr');
       hdr.appendChild(el('span', 'gh-side-brand', 'GitHub'));
       hdr.appendChild(el('span', 'gh-side-user', st.user ? '@' + st.user : st.authError ? 'not signed in' : '…'));
@@ -284,6 +302,8 @@
       }
 
       side.appendChild(el('div', 'gh-side-sec', 'Repositories'));
+    }
+    function renderSideBottom(side) {
       const list = [];
       if (st.here && st.here.repo) list.push({ repo: st.here.repo, here: true });
       for (const r of st.repos) if (!list.some((x) => x.repo.toLowerCase() === r.toLowerCase())) list.push({ repo: r });
@@ -352,6 +372,61 @@
       const mode = setting('links', 'app');
       linksCb.indeterminate = mode === 'ask';
       linksCb.checked = mode === 'app';
+    }
+    // "Open tabs" picker: jump to the repo behind any open tab without leaving GitHub.
+    // Created once; refilled when the sidebar renders, when the view is shown, and on
+    // hover/press so a tab that changed folder shows up before the popup opens.
+    function openTabsPicker() {
+      const sel = el('select', 'gh-select gh-tabs-pick');
+      sel.title = 'Switch to the repo of an open tab';
+      sel.setAttribute('aria-label', 'Repo of an open tab');
+      sel.addEventListener('change', () => {
+        const v = sel.value;
+        if (!v || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v)) return;
+        // Back to the view, so j/k/Esc work at once (and a stray letter can't type-ahead
+        // into the picker and jump again).
+        root.focus();
+        select({ kind: 'repo', repo: v });
+      });
+      // On a closed select, arrows, Home/End/PageUp/PageDown and type-ahead letters change
+      // the value at once — each a repo jump. Swallow them; navigation keys open the list
+      // instead so it can be browsed (Alt+Down, F4 and Space open it natively).
+      const NAV = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageUp', 'PageDown']);
+      sel.addEventListener('keydown', (e) => {
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        if (NAV.has(e.key)) {
+          e.preventDefault();
+          if (typeof sel.showPicker === 'function') { try { sel.showPicker(); } catch (_) {} }
+        } else if (e.key.length === 1 && e.key !== ' ') e.preventDefault();
+      });
+      // Cached lookups resolve within the same task, and fillTabsPicker leaves the options
+      // alone when nothing changed; hovering first gives a new folder's lookup time.
+      sel.addEventListener('mouseenter', () => fillTabsPicker());
+      sel.addEventListener('mousedown', () => fillTabsPicker());
+      return sel;
+    }
+    async function fillTabsPicker() {
+      const sel = tabsPick;
+      if (!sel || !opts.getOpenTabRepos) return;
+      const seq = ++tabsPickSeq;
+      let list = [];
+      try { list = (await opts.getOpenTabRepos()) || []; } catch (_) { list = []; }
+      if (st.disposed || seq !== tabsPickSeq) return;
+      const cur0 = st.sel && st.sel.kind === 'repo' ? st.sel.repo.toLowerCase() : '';
+      const sig = cur0 + '|' + list.map((r) => r.repo + ':' + (r.tabs || []).join(',')).join('|');
+      if (sel.dataset.sig === sig) return;
+      sel.dataset.sig = sig;
+      sel.textContent = '';
+      const ph = el('option', null, list.length ? 'Open tabs…' : 'No open tab is in a GitHub repo');
+      ph.value = '';
+      sel.appendChild(ph);
+      const cur = st.sel && st.sel.kind === 'repo' ? st.sel.repo.toLowerCase() : null;
+      for (const r of list) {
+        const o = el('option', null, r.repo + (r.tabs && r.tabs.length ? '  ·  ' + r.tabs.join(', ') : ''));
+        o.value = r.repo;
+        if (cur && r.repo.toLowerCase() === cur) o.selected = true;
+        sel.appendChild(o);
+      }
     }
     function sideRow(label, count) {
       const row = el('div', 'gh-side-row');
@@ -1783,6 +1858,7 @@
         const was = st.active;
         st.active = !!on;
         if (!on) cancelUnknownRetry();
+        if (on && !was) fillTabsPicker();
         schedulePoll();
         if (on && !was && booted && st.sel && Date.now() - st.loadedAt > 30000) refresh(false);
       },
