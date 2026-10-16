@@ -3708,6 +3708,30 @@ function ghContextFor(cwd) {
   return repoInfoFor(cwd).then((r) => (r && r.repo ? r : null));
 }
 
+// The GitHub repos behind the open tabs, for the GitHub sidebar's "open tabs" picker:
+// [{ repo, root, tabs: [title, …] }], one entry per repo, in tab-strip order. Every pane
+// of a split counts; an editor tab counts by its file's folder.
+async function ghOpenTabRepos() {
+  const jobs = [];
+  for (const [, t] of tabs) {
+    if (t.type === 'github' || t.type === 'grid') continue;
+    const title = t.customTitle || t.title || '';
+    const dirs = new Set();
+    if (t.type === 'editor') { if (t.filePath) dirs.add(t.filePath.replace(/[\\/][^\\/]*$/, '')); }
+    else if (t.type === 'chat') { if (t.cwd) dirs.add(t.cwd); }
+    else for (const [, p] of t.panes) if (p.cwd) dirs.add(p.cwd);
+    for (const d of dirs) jobs.push(ghContextFor(d).then((r) => (r ? { repo: r.repo, root: r.root, title } : null)));
+  }
+  const out = [];
+  for (const r of await Promise.all(jobs)) {
+    if (!r) continue;
+    const hit = out.find((x) => x.repo.toLowerCase() === r.repo.toLowerCase());
+    if (!hit) out.push({ repo: r.repo, root: r.root, tabs: r.title ? [r.title] : [] });
+    else if (r.title && !hit.tabs.includes(r.title)) hit.tabs.push(r.title);
+  }
+  return out;
+}
+
 // Local clones seen so far (repo -> folder), so "Fix with Claude" on any repo you've
 // had a terminal in knows where to put the worktree. Worktree folders are remembered
 // too; git resolves the main clone from any of them.
@@ -3831,6 +3855,7 @@ function ensureGhOverlay() {
   const view = window.createGitHubView({
     openLink,
     getClone: (repo) => ghKnownClone(repo),
+    getOpenTabRepos: ghOpenTabRepos,
     onWork: startGitHubWork,
     // No tab title to keep in sync; the notes context follows the tab behind it.
     onStateChange: () => scheduleSaveSession()
@@ -3944,6 +3969,7 @@ function createGitHubTab() {
   tab.view = window.createGitHubView({
     openLink,
     getClone: (repo) => ghKnownClone(repo),
+    getOpenTabRepos: ghOpenTabRepos,
     onWork: startGitHubWork,
     onStateChange: () => {
       if (!tab.customTitle) setTabTitle(tab, tabAutoName(tab));
