@@ -14,7 +14,9 @@ const github = require('./github');
 const appSettings = require('./settings');
 
 app.setName('Mac Code');
-app.setAppUserModelId('Mac Code');
+// Must equal build.appId: the installer's Start-menu shortcut carries that id, and
+// Windows silently drops toasts from an id no shortcut is registered for.
+app.setAppUserModelId('com.marcus.mac-code');
 let mainWindow = null;
 const ptys = new Map();
 

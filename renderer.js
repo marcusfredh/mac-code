@@ -5043,9 +5043,6 @@ function getAllAgentPanes() {
 function getAllClaudePanes() {
   return getAllAgentPanes().filter(x => x.type === 'claude');
 }
-function getAllCopilotPanes() {
-  return getAllAgentPanes().filter(x => x.type === 'copilot');
-}
 
 function shortCopilotModelLabel(model) {
   if (!model) return '';
