@@ -96,6 +96,9 @@ command's head — so an allowlisted head cannot smuggle something through a pip
 - Frameless window, custom titlebar with min/max/close
 - Explorer (260px) with root folder header, entry count, and indent guides
 - Agents panel (300px) with per-agent context meters, hand-off, and save
+- "Done 10:42" — when Claude last finished a turn (date added if not today): under the
+  composer of chat and hybrid terminal panes and on the agent card. Hidden while a turn
+  runs; for terminal panes it is read from the Claude transcript, not the screen.
 - Saved sessions list with **Clear old** — drops entries whose transcript was last
   active over a week ago, plus any whose transcript is gone (those can't be resumed;
   they show dimmed with a struck-through Resume). Right-click it for 1 day / 1 week /
@@ -172,7 +175,7 @@ defaults to the overlay.
   Terminal, One Half Dark, Solarized Dark), cursor, scrollback (at most 5 000 lines are
   kept across restarts), copy on select, right-click paste (Shift+right-click still
   opens the menu).
-- **Claude** — hybrid input (same switch as the status bar), autosave chat sessions to
+- **Claude** — hybrid input, autosave chat sessions to
   the library (when the tab closes, or after every turn), auto "Clear old" at start,
   default model / 1M / permission mode for new chat panes (the permission menu's
   "Use <mode> for new panes" writes the same setting), notifications, the plan-usage

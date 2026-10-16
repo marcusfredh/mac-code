@@ -645,6 +645,10 @@
     .hybrid-row { display: flex; align-items: flex-end; gap: 8px; }
     .hybrid-foot { display: flex; align-items: center; gap: 6px; }
     .hybrid-status { font-size: 11px; color: var(--fg-faint); margin-left: auto; white-space: nowrap; }
+    .hybrid-done { font-size: 11px; color: var(--fg-faint); margin-left: 10px; white-space: nowrap; }
+    .hybrid-done:empty { display: none; }
+    .done-time { font-size: 11.5px; color: var(--fg-faint); flex-shrink: 0; }
+    .done-time:empty { display: none; }
     .palette-hdr.hybrid { display: flex; align-items: center; justify-content: space-between; }
     .palette-refresh { cursor: default; color: var(--fg-muted); padding: 0 6px; font-size: 13px; }
     .palette-refresh:hover { color: var(--fg-strong); }
@@ -2425,9 +2429,6 @@
     .status-branch:hover { color: #fff; }
     .status-branch.error { color: var(--red, #e57373); }
     .status-shell { font-family: var(--mono); }
-    .status-toggle { display: flex; align-items: center; gap: 5px; cursor: default; }
-    .status-toggle input { margin: 0; accent-color: var(--accent); width: 12px; height: 12px; }
-    .status-toggle:hover { color: var(--fg-strong); }
 
     /* ---------- Context menu ---------- */
     .ctx-menu {
@@ -2936,12 +2937,6 @@
       <span class="status-shell" id="status-shell">pwsh</span>
       <span class="status-sep" id="status-limits-sep" style="display:none">&middot;</span>
       <span class="status-limits" id="status-limits" title="Plan usage"></span>
-      <span class="status-sep">&middot;</span>
-      <label class="status-toggle" id="hybrid-toggle-wrap"
-             title="Hide Claude's own input box in terminal panes and drive it from a composer here instead">
-        <input type="checkbox" id="hybrid-toggle">
-        <span>Hybrid input</span>
-      </label>
     </div>
     <div class="statusbar-right" id="status-agents"></div>
   </div>

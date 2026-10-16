@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  filetimeToMs, parseSessionFile, filterCandidates, parseProcessSnapshot, pickByAncestry
+  filetimeToMs, parseSessionFile, filterCandidates, parseProcessSnapshot, pickByAncestry, lastTurnEnd
 } = require('../claudeSessions');
 
 const T0 = 1_791_901_428_950;
@@ -205,4 +205,68 @@ test('tracker cache: verified by pid+procStart, dropped on change or new run', (
   // A claimed pid is excluded from other panes' candidates.
   t.resolve('p', [a], procs, { sinceMs: T0, shellPid: 10 });
   assert.deepStrictEqual(t.candidates('q', [a], { sinceMs: T0, cwd: 'C:\\dev\\repo' }), []);
+});
+
+const iso = (ms) => new Date(ms).toISOString();
+const asst = (ms, stop, extra) => JSON.stringify({ type: 'assistant', timestamp: iso(ms), message: { stop_reason: stop, content: [] }, ...extra });
+const usr = (ms, content, extra) => JSON.stringify({ type: 'user', timestamp: iso(ms), message: { role: 'user', content }, ...extra });
+const toolResult = (ms) => usr(ms, [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }]);
+
+test('lastTurnEnd: end_turn last gives its time', () => {
+  const r = lastTurnEnd([usr(T0, 'hi'), asst(T0 + 1000, 'tool_use'), toolResult(T0 + 2000), asst(T0 + 3000, 'end_turn')]);
+  assert.deepStrictEqual(r, { endedAt: T0 + 3000, active: false });
+});
+
+test('lastTurnEnd: tool_use or tool_result last means still active', () => {
+  assert.deepStrictEqual(lastTurnEnd([asst(T0, 'end_turn'), usr(T0 + 1, 'again'), asst(T0 + 2, 'tool_use')]), { endedAt: null, active: true });
+  assert.deepStrictEqual(lastTurnEnd([asst(T0, 'end_turn'), usr(T0 + 1, [{ type: 'text', text: 'again' }]), toolResult(T0 + 2)]), { endedAt: null, active: true });
+});
+
+test('lastTurnEnd: a user prompt after end_turn starts a new turn', () => {
+  assert.deepStrictEqual(lastTurnEnd([asst(T0, 'end_turn'), usr(T0 + 5, 'next')]), { endedAt: null, active: true });
+  assert.deepStrictEqual(lastTurnEnd([asst(T0, 'end_turn'), usr(T0 + 5, '<task-notification>done</task-notification>')]), { endedAt: null, active: true });
+});
+
+test('lastTurnEnd: API error and Esc interrupt end the turn', () => {
+  assert.deepStrictEqual(lastTurnEnd([usr(T0, 'hi'), asst(T0 + 9, null, { isApiErrorMessage: true })]), { endedAt: T0 + 9, active: false });
+  assert.deepStrictEqual(lastTurnEnd([usr(T0, 'hi'), usr(T0 + 7, [{ type: 'text', text: '[Request interrupted by user]' }])]), { endedAt: T0 + 7, active: false });
+  assert.deepStrictEqual(lastTurnEnd([usr(T0, 'hi'), usr(T0 + 7, '[Request interrupted by user for tool use]')]), { endedAt: T0 + 7, active: false });
+});
+
+test('lastTurnEnd: a turn started by bash mode, a hand-back or a command is active once Claude answers', () => {
+  const done = asst(T0, 'end_turn');
+  assert.deepStrictEqual(lastTurnEnd([done, usr(T0 + 1, '<bash-input>ls</bash-input>'), usr(T0 + 2, '<bash-stdout>a</bash-stdout>'), asst(T0 + 3, 'tool_use')]),
+    { endedAt: null, active: true });
+  assert.deepStrictEqual(lastTurnEnd([done, usr(T0 + 1, 'Another Claude session sent a message: x', { isMeta: true }), asst(T0 + 3, 'tool_use')]),
+    { endedAt: null, active: true });
+  assert.deepStrictEqual(lastTurnEnd([done, usr(T0 + 1, '<command-name>/review</command-name>'), asst(T0 + 3, null)]),
+    { endedAt: null, active: true });
+});
+
+test('lastTurnEnd: stop_sequence and refusal end the turn', () => {
+  assert.deepStrictEqual(lastTurnEnd([usr(T0, 'hi'), asst(T0 + 4, 'stop_sequence')]), { endedAt: T0 + 4, active: false });
+  assert.deepStrictEqual(lastTurnEnd([usr(T0, 'hi'), asst(T0 + 4, 'refusal')]), { endedAt: T0 + 4, active: false });
+});
+
+test('lastTurnEnd: slash commands, bash mode, meta and caveats do not start a turn', () => {
+  const done = asst(T0, 'end_turn');
+  for (const text of ['<command-name>/model</command-name>', '<command-message>x</command-message>', '<local-command-stdout>Set model</local-command-stdout>',
+    '<local-command-caveat>Caveat</local-command-caveat>', '<bash-input>ls</bash-input>', '<bash-stdout>a</bash-stdout>', '<bash-stderr></bash-stderr>',
+    '<system-reminder>x</system-reminder>']) {
+    assert.deepStrictEqual(lastTurnEnd([done, usr(T0 + 1, text)]), { endedAt: T0, active: false }, text);
+  }
+  assert.deepStrictEqual(lastTurnEnd([done, usr(T0 + 1, 'injected', { isMeta: true })]), { endedAt: T0, active: false });
+});
+
+test('lastTurnEnd: ignores sidechain entries, noise entries and malformed lines', () => {
+  const r = lastTurnEnd([asst(T0, 'end_turn'), asst(T0 + 50, 'end_turn', { isSidechain: true }),
+    usr(T0 + 60, 'sub prompt', { isSidechain: true }), '{broken', '', JSON.stringify({ type: 'system', subtype: 'turn_duration', timestamp: iso(T0 + 70) }),
+    JSON.stringify({ type: 'attachment', timestamp: iso(T0 + 80) })]);
+  assert.deepStrictEqual(r, { endedAt: T0, active: false });
+});
+
+test('lastTurnEnd: empty input or missing timestamp', () => {
+  assert.deepStrictEqual(lastTurnEnd([]), { endedAt: null, active: false });
+  assert.deepStrictEqual(lastTurnEnd(['', 'nope']), { endedAt: null, active: false });
+  assert.deepStrictEqual(lastTurnEnd([JSON.stringify({ type: 'assistant', message: { stop_reason: 'end_turn' } })]), { endedAt: null, active: false });
 });

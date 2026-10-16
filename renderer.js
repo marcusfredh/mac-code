@@ -949,9 +949,8 @@ function fitAll() {
 // The band is driven by a *positive* match on the composer box, so anything we do not
 // recognise — a permission prompt, a /-menu, a plan review — unmasks and hands the
 // keyboard back to the terminal rather than trapping the user behind paint.
-// claude.hybridInput; the status-bar checkbox and the settings modal write the same key.
+// claude.hybridInput, switched in Settings (Ctrl+, > Claude).
 const hybridEnabled = () => appSetting('claude', 'hybridInput');
-const hybridToggleEl = document.getElementById('hybrid-toggle');
 
 function bufLine(buf, y) {
   const line = buf.getLine(y);
@@ -1280,6 +1279,16 @@ function ensureHybridBar(tab, pane) {
   status.className = 'hybrid-status';
   foot.appendChild(status);
   const setStatus = (t) => { status.textContent = t || ''; };
+
+  // Own element, so the time never competes with the status messages above.
+  const doneEl = document.createElement('span');
+  doneEl.className = 'hybrid-done';
+  foot.appendChild(doneEl);
+  const refreshDone = () => {
+    const d = pane.claudeRunning && !pane.turnActive ? window.formatDoneTime(pane.turnEndedAt) : null;
+    doneEl.textContent = d ? 'Done ' + d.label : '';
+    doneEl.title = d ? d.title : '';
+  };
 
   const keyTo = (bytes) => {
     window.term.input(pane.ptyId, bytes);
@@ -1614,9 +1623,10 @@ function ensureHybridBar(tab, pane) {
   // The composer lives inside its own pane, below that pane's terminal.
   pane.el.appendChild(wrap);
   pane.hybridBar = {
-    el: wrap, input, submit, undo: doUndo, loadCommands,
+    el: wrap, input, submit, undo: doUndo, loadCommands, refreshDone,
     focus: () => input.focus()
   };
+  refreshDone();
   renderAttachments();
   autoGrow();
   // The terminal just lost height to the bar; refit so the PTY matches.
@@ -1673,20 +1683,6 @@ function maybeLoadHybridCommands(tab) {
     pane.hybridBar.loadCommands(false);
     return;
   }
-}
-
-if (hybridToggleEl) {
-  hybridToggleEl.checked = hybridEnabled();
-  hybridToggleEl.addEventListener('change', async () => {
-    // The settings listener (applySettings) redraws the bands once the write lands.
-    await window.setAppSetting('claude', 'hybridInput', !!hybridToggleEl.checked);
-    hybridToggleEl.checked = hybridEnabled();
-    const tab = activeTab();
-    if (!tab) return;
-    const pane = getActivePane(tab);
-    if (pane && pane.hybridBar) pane.hybridBar.input.focus();
-    else if (pane) pane.term.focus();
-  });
 }
 
 // ---------- active tab/pane ----------
@@ -2217,7 +2213,8 @@ window.addEventListener('resize', closeBranchMenu);
 // clone, so worktrees add to the clone they belong to. Panes resolve their repo once
 // (pane.usageRoot: undefined while resolving, null outside a repo); only a new pane, a
 // cd into a different repo, a chat tab or the menu itself counts, and never while the
-// session is being restored.
+// session is being restored. A restored tab counts later, once it is used: Claude started
+// in the pane (incl. Resume) or a first turn in a chat (pane/tab.usageCounted).
 const REPO_USAGE_KEY = 'repoUsage';
 const REPOS_MENU_LIMIT = 15;
 const REPOS_FOLDER_ICON = '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.4 1.5h5.6c.7 0 1.2.5 1.2 1.2v6.6c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>';
@@ -2245,7 +2242,7 @@ function trackPaneRepo(tab, pane, count, inherit) {
   repoInfoFor(pane.cwd).then((info) => {
     if (tab.panes.get(pane.paneId) !== pane) return;   // closed meanwhile
     pane.usageRoot = repoKeyOf(info);
-    if (count && pane.usageRoot) recordRepoUse(info);
+    if (count && pane.usageRoot) { pane.usageCounted = pane.usageRoot; recordRepoUse(info); }
   });
 }
 // A pane's prompt reported a new folder: count it only when that is a different repo.
@@ -2255,11 +2252,19 @@ function trackPaneCd(tab, pane, cwd) {
     const key = repoKeyOf(info);
     if ((key || '').toLowerCase() === (pane.usageRoot || '').toLowerCase()) return;
     pane.usageRoot = key;
-    if (key) recordRepoUse(info);
+    if (key) { pane.usageCounted = key; recordRepoUse(info); }
   });
 }
 function trackCwdUse(cwd) {
   repoInfoFor(cwd).then((info) => recordRepoUse(info));
+}
+// Starting Claude in a pane (typing claude, the Resume button) uses its repo too, once
+// per pane and repo — so a tab restored from the last session counts once it is used.
+function countPaneClaudeUse(pane) {
+  if (!_sessionReady || !pane.usageRoot) return;
+  if ((pane.usageCounted || '').toLowerCase() === pane.usageRoot.toLowerCase()) return;
+  pane.usageCounted = pane.usageRoot;
+  repoInfoFor(pane.cwd).then((info) => { if (repoKeyOf(info)) recordRepoUse(info); });
 }
 
 let reposMenuEl = null;
@@ -4153,7 +4158,8 @@ async function createChatTab(opts = {}) {
   const tabId = newTabId();
   const chatId = 'chat-' + (++chatSeq);
   const cwd = opts.cwd || tabCwd(activeTab()) || undefined;
-  if (_sessionReady && cwd) trackCwdUse(cwd);   // not for restored chats
+  const countedNow = !!(_sessionReady && cwd);
+  if (countedNow) trackCwdUse(cwd);   // a restored chat counts on its first turn instead
 
   const container = document.createElement('div');
   container.className = 'term-container';
@@ -4172,7 +4178,7 @@ async function createChatTab(opts = {}) {
     title: name, customTitle: null, color: null,
     panes: new Map(), activePaneId: null,
     expandedPaths: new Set(), selectedPath: null,
-    type: 'chat', chatId, cwd: cwd || null
+    type: 'chat', chatId, cwd: cwd || null, usageCounted: countedNow
   };
   tabs.set(tabId, tab);
   setTabColor(tab, opts.color || '#4ec994');
@@ -4219,7 +4225,14 @@ async function createChatTab(opts = {}) {
     onTerminalFit: () => { const p = tab.termPane; if (p) requestAnimationFrame(() => fitPane(p)); },
     onTerminalFocus: () => { const p = tab.termPane; if (p) p.term.focus(); },
     onTerminalInput: (data) => { const p = tab.termPane; if (p) window.term.input(p.ptyId, data); },
-    onStateChange: () => { scheduleAgentRender(); updateStatusAgents(); },
+    onStateChange: () => {
+      // A restored chat counts toward frequent repos the first time a turn runs in it.
+      if (!tab.usageCounted && tab.cwd && _sessionReady && view.getState().working) {
+        tab.usageCounted = true;
+        trackCwdUse(tab.cwd);
+      }
+      scheduleAgentRender(); updateStatusAgents();
+    },
     onSessionId: (id) => { tab.chatSessionId = id; scheduleSaveSession(); },
     onModelChange: (model) => restartChat(tab, model),
     onRestart: () => restartChat(tab, view.model),
@@ -4946,6 +4959,7 @@ function markClaudeStart(pane) {
   pane.claudeStartMarker = pane.term.registerMarker(0) || null;
   pane.claudeRunGen++;
   pane.claudeStartedAt = Date.now();
+  countPaneClaudeUse(pane);
 }
 
 // A terminal pane whose last Claude session is known offers to resume it whenever the
@@ -5254,8 +5268,17 @@ function renderAgentPanel() {
       (entry.kind === 'pane' && entry.tab.panes.size > 1 ? ' [pane]' : '');
     if (c.name.textContent !== label) c.name.textContent = label;
 
-    const stateLabel = note || (working ? 'Working' : 'Idle');
+    // Time of the last finished turn: from the chat view, or the CLI transcript.
+    let doneAt = null;
+    if (!working) {
+      if (entry.kind === 'chat') doneAt = entry.view.getState().lastDoneAt;
+      else if (entry.type === 'claude' && !entry.pane.turnActive) doneAt = entry.pane.turnEndedAt;
+    }
+    const done = doneAt ? window.formatDoneTime(doneAt) : null;
+    const stateLabel = note || (working ? 'Working' : 'Idle' + (done ? ' · done ' + done.label : ''));
     if (c.stateText.textContent !== stateLabel) c.stateText.textContent = stateLabel;
+    const stateTitle = !note && done ? 'Last finished ' + done.title : '';
+    if (c.stateText.title !== stateTitle) c.stateText.title = stateTitle;
 
     const pct = ctx != null && max ? Math.min(100, Math.round((ctx / max) * 100)) : null;
     const absText = ctx != null
@@ -5556,7 +5579,12 @@ async function refreshClaudeUsage() {
   try {
     await Promise.all(items.map(async ({ tab, pane }) => {
       try {
-        pane.usage = await window.claudeApi.usage(pane.cwd);
+        const res = await window.claudeApi.usage(pane.cwd);
+        // The turn fields can arrive without any usage yet; keep pane.usage as it was.
+        pane.turnEndedAt = res?.turnEndedAt ?? null;
+        pane.turnActive = !!res?.turnActive;
+        pane.usage = (res && res.contextTokens != null) || res?.error ? res : null;
+        if (pane.hybridBar) pane.hybridBar.refreshDone();
         if (pane.usage?.sessionId) pane.claudeSessionId = pane.usage.sessionId;
         maybeAutoSaveAgentSession(tab, pane, 'claude');
       } catch (_) {}
@@ -6071,10 +6099,7 @@ function applyTerminalSettings() {
 function applySettings(next, prev) {
   const ch = (sec, key) => !prev || !prev[sec] || !next[sec] || prev[sec][key] !== next[sec][key];
   if (['fontFamily', 'fontSize', 'theme', 'cursorStyle', 'scrollback'].some((k) => ch('terminal', k))) applyTerminalSettings();
-  if (ch('claude', 'hybridInput')) {
-    if (hybridToggleEl) hybridToggleEl.checked = hybridEnabled();
-    updateHybrid();
-  }
+  if (ch('claude', 'hybridInput')) updateHybrid();
   if (ch('claude', 'showUsage')) {
     pushPlanLimits();
     if (next.claude.showUsage) refreshPlanLimits(true);

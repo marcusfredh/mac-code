@@ -97,6 +97,46 @@ function pickByAncestry(candidates, procs, shellPid) {
   return tie ? null : best;
 }
 
+// When the CLI last finished a turn, from the transcript's JSONL lines. Scans from the
+// end for the newest decisive entry: an assistant entry that ended the turn (end_turn,
+// stop_sequence, refusal, API error) or an Esc interrupt means the turn is over (endedAt
+// = that entry's time); any other assistant entry (tool_use, still streaming), a tool
+// result or a real user prompt means a turn is running. Turns can also start from meta
+// entries (agent hand-backs, stop-hook feedback), ! bash mode or slash commands; those
+// are skipped, and the assistant entry they lead to decides.
+const TURN_END_REASONS = new Set(['end_turn', 'stop_sequence', 'refusal']);
+const NON_PROMPT_RE = /^\s*<(command-name|command-message|local-command-|bash-input|bash-stdout|bash-stderr|system-reminder)/;
+
+function userText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('\n');
+}
+
+function lastTurnEnd(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]) continue;
+    let o;
+    try { o = JSON.parse(lines[i]); } catch (_) { continue; }
+    if (!o || typeof o !== 'object' || o.isSidechain) continue;
+    const m = o.message;
+    const ts = Date.parse(o.timestamp);
+    const endedAt = Number.isFinite(ts) ? ts : null;
+    if (o.type === 'assistant') {
+      if (o.isApiErrorMessage === true || (m && TURN_END_REASONS.has(m.stop_reason))) return { endedAt, active: false };
+      return { endedAt: null, active: true };
+    } else if (o.type === 'user' && m) {
+      if (o.isMeta) continue;
+      const text = userText(m.content);
+      if (/^\s*\[Request interrupted by user/.test(text)) return { endedAt, active: false };
+      if (Array.isArray(m.content) && m.content.length && m.content.every(b => b && b.type === 'tool_result')) return { endedAt: null, active: true };
+      if (NON_PROMPT_RE.test(text)) continue;
+      return { endedAt: null, active: true };
+    }
+  }
+  return { endedAt: null, active: false };
+}
+
 const MAX_FAILS = 5;
 
 // Per-pty bookkeeping for main's claude:paneSession: which Claude process a pane has
@@ -157,5 +197,5 @@ class PaneSessionTracker {
 
 module.exports = {
   normCwd, filetimeToMs, parseSessionFile, filterCandidates, parseProcessSnapshot, pickByAncestry,
-  PaneSessionTracker, MAX_FAILS, UUID_RE
+  lastTurnEnd, PaneSessionTracker, MAX_FAILS, UUID_RE
 };

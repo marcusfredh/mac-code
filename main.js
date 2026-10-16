@@ -9,7 +9,7 @@ const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 const { deriveFlow } = require('./flowState');
 const { autoAllowsCommand } = require('./autoMode');
-const { parseSessionFile, parseProcessSnapshot, PaneSessionTracker } = require('./claudeSessions');
+const { parseSessionFile, parseProcessSnapshot, lastTurnEnd, PaneSessionTracker } = require('./claudeSessions');
 const github = require('./github');
 const appSettings = require('./settings');
 
@@ -523,6 +523,9 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
     const content = await fs.promises.readFile(target.p, 'utf8');
     const lines = content.split('\n');
 
+    // Turn info first: it must come back even when no usage entry exists yet.
+    const { endedAt: turnEndedAt, active: turnActive } = lastTurnEnd(lines);
+
     let lastUsage = null;
     let model = null;
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -538,7 +541,7 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
         }
       } catch (_) {}
     }
-    if (!lastUsage) return null;
+    if (!lastUsage) return { turnEndedAt, turnActive };
 
     const input = lastUsage.input_tokens || 0;
     const cacheRead = lastUsage.cache_read_input_tokens || 0;
@@ -596,7 +599,9 @@ ipcMain.handle('claude:usage', async (event, cwd) => {
       contextWindow,
       sessionFile: path.basename(target.p),
       sessionId: path.basename(target.p, '.jsonl'),
-      mtime: target.mtime
+      mtime: target.mtime,
+      turnEndedAt,
+      turnActive
     };
   } catch (err) {
     return { error: err.code || err.message };

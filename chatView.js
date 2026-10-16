@@ -228,6 +228,8 @@
       working: false,
       // Wall-clock start of the current turn, for the "how long Claude worked" timer.
       turnStartedAt: 0,
+      // Wall-clock end of the last finished turn (null until one ends).
+      lastDoneAt: null,
       exited: false,
       interrupting: false,
       contextTokens: null,
@@ -509,6 +511,10 @@
     // been working. Idle until the first turn runs, then keeps the last duration.
     const workEl = el('span', 'work-timer');
     foot.appendChild(workEl);
+
+    // When the last turn finished; hidden while one runs and before the first ends.
+    const doneEl = el('span', 'done-time');
+    foot.appendChild(doneEl);
 
     const sendBtn = el('button', 'send-btn');
     sendBtn.type = 'button';
@@ -928,6 +934,10 @@
         (pct == null ? '' : pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '');
       ctxFill.className = pct == null ? '' : pct >= 85 ? 'danger' : pct >= 70 ? 'warn' : '';
 
+      const done = !state.working && state.lastDoneAt ? formatDoneTime(state.lastDoneAt) : null;
+      doneEl.textContent = done ? 'Done ' + done.label : '';
+      doneEl.title = done ? done.title : '';
+
       sendLabel.textContent = state.working ? 'Stop' : 'Send';
       sendKbd.textContent = state.working ? '⎋' : '↵';
       sendBtn.className = 'send-btn' + (state.working ? ' stop' : '');
@@ -1007,6 +1017,7 @@
         apiModel: state.apiModel,
         permissionMode: state.permissionMode,
         working: state.working,
+        lastDoneAt: state.lastDoneAt,
         exited: state.exited,
         canResume: state.sent > 0,
         contextTokens: state.contextTokens,
@@ -1050,7 +1061,7 @@
       if (state.working === v) return;
       state.working = v;
       if (v) startWorkTimer();
-      else stopWorkTimer(true);
+      else { stopWorkTimer(true); state.lastDoneAt = Date.now(); }
       refreshStats();
     }
 
@@ -2293,7 +2304,18 @@
     };
   }
 
+  // "10:42", or "16/10 10:42" when not today; title is the full local date and time.
+  // Shared with renderer.js (agent cards, hybrid footer): this script loads first.
+  function formatDoneTime(ms) {
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms), now = new Date();
+    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const today = d.toDateString() === now.toDateString();
+    return { label: today ? hm : d.getDate() + '/' + (d.getMonth() + 1) + ' ' + hm, title: d.toLocaleString() };
+  }
+
   window.createChatView = createChatView;
+  window.formatDoneTime = formatDoneTime;
   window.CHAT_MODELS = MODELS;
   window.attachComposerHistory = attachComposerHistory;
 })();
