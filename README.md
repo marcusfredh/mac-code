@@ -103,7 +103,8 @@ command's head — so an allowlisted head cannot smuggle something through a pip
   the name shows when it was *saved*, which can be much earlier.
 - Frequent repos: the folder button after GitHub in the tab bar lists the git repos you
   open most (see below)
-- Status bar: cwd, tab count, shell, and live agent state
+- Status bar: cwd, tab count, shell, and the orchestrate flow chip (agent working/idle
+  state lives in the agents panel)
 - Cascadia Code font (bundled), Consolas fallback
 
 ### Frequent repos

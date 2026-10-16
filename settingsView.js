@@ -277,8 +277,8 @@
         controls: [{ kind: 'select', sec: 'claude', key: 'permissionDefault', options: [
           opt(null, 'Följ CLI (defaultMode)'), opt('default', 'Ask'), opt('auto', 'Auto (lokala regler)'),
           opt('acceptEdits', 'Accept edits'), opt('bypassPermissions', 'Bypass')] }] },
-      { label: 'Notis när Claude är klar eller väntar',
-        desc: 'Windows-notis, bara när fönstret saknar fokus. Gäller även Copilot-paneler.',
+      { label: 'Notis när ett flöde är klart eller behöver dig',
+        desc: 'Windows-notis från orchestrate-flödet, och när en chatt väntar på godkännande. Bara när fönstret saknar fokus.',
         controls: [{ kind: 'toggle', sec: 'claude', key: 'notify' }] },
       { label: 'Visa planförbrukning',
         desc: '5-timmars- och veckofönstret i statusraden och i chattarnas sidfot.',

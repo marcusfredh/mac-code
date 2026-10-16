@@ -360,41 +360,11 @@ function updateStatus() {
   refreshNotesContext();
 }
 
-// Right-hand status cluster: one dot per agent kind that is currently present.
+// Right-hand status cluster. It used to carry a "Claude working / idle" (and Copilot)
+// label too, but output-driven busy detection flips it on every pause in a turn, so it
+// flickered more than it informed; the agents panel (Ctrl+Shift+B) shows that state.
 function updateStatusAgents() {
-  const rows = [];
-  const claude = getAllClaudePanes();
-  const copilot = getAllCopilotPanes();
-  const chatViews = Array.from(chatTabs.values());
-  const now = Date.now();
-
-  const claudeWorking =
-    claude.some(({ pane }) => now < pane.claudeBusyUntil) ||
-    chatViews.some((c) => c.getState().working);
-  if (claude.length || chatViews.length) {
-    rows.push({ label: claudeWorking ? 'Claude working' : 'Claude idle', working: claudeWorking });
-  }
-  if (copilot.length) {
-    const working = copilot.some(({ pane }) => now < pane.copilotBusyUntil);
-    rows.push({ label: working ? 'Copilot working' : 'Copilot idle', working });
-  }
-
   statusAgentsEl.innerHTML = '';
-  rows.forEach((row, i) => {
-    if (i > 0) {
-      const sep = document.createElement('span');
-      sep.className = 'status-sep';
-      sep.textContent = '·';
-      statusAgentsEl.appendChild(sep);
-    }
-    const wrap = document.createElement('span');
-    wrap.className = 'status-agent' + (row.working ? ' working' : '');
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    wrap.appendChild(dot);
-    wrap.appendChild(document.createTextNode(row.label));
-    statusAgentsEl.appendChild(wrap);
-  });
 
   // Flow chip: only flows matched to a live pane/chat count (R9).
   const targets = collectFlowTargets();
@@ -402,12 +372,6 @@ function updateStatusAgents() {
   const running = targets.filter((t) => !t.view.needsYou && flowOverall(t.view) === 'run');
   const chip = flowChipInfo(needs.length, running.length);
   if (chip) {
-    if (statusAgentsEl.childNodes.length) {
-      const sep = document.createElement('span');
-      sep.className = 'status-sep';
-      sep.textContent = '·';
-      statusAgentsEl.appendChild(sep);
-    }
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'status-flow s-' + chip.status;
@@ -717,6 +681,7 @@ function setFlowViews(list) {
   syncFlowUi();
   scheduleAgentRender();
   updateStatusAgents();
+  notifyFlowChanges();
 }
 
 // Show a flow's surface: activate its tab (a gridded tab surfaces its grid cell), focus
@@ -726,6 +691,34 @@ function revealFlowTarget(t) {
   setActive(t.tab.tabId);
   if (t.pane && t.tab.type !== 'chat' && t.tab.activePaneId !== t.pane.paneId) setActivePane(t.tab, t.pane.paneId);
   setFlowDrawer(t.ownerKey, true);
+}
+
+// Windows notifications come from the orchestrate flow, not from guessing at terminal
+// output: one when a flow finishes, one each time it starts waiting for you. A flow's
+// first sighting only records its state (so a restart doesn't replay old news), and
+// only flows tied to a live pane or chat count.
+const flowNotifyState = new Map();   // flowKey -> 'run' | 'needs' | 'done'
+function notifyFlowChanges() {
+  const live = new Set();
+  for (const t of collectFlowTargets()) {
+    const key = t.view.flowKey;
+    if (live.has(key)) continue;
+    live.add(key);
+    const overall = flowOverall(t.view);
+    const now = overall === 'fail' ? 'needs' : overall === 'done' ? 'done' : 'run';
+    const before = flowNotifyState.get(key);
+    flowNotifyState.set(key, now);
+    if (before === undefined || before === now || now === 'run') continue;
+    if (document.hasFocus() || !appSetting('claude', 'notify')) continue;
+    const name = t.tab.customTitle || tabAutoName(t.tab);
+    const title = now === 'done' ? 'Flow done' : 'Flow needs you';
+    const body = now === 'done' ? name : `${name} · ${String(t.view.label || '').replace(/^Needs you · /, '')}`;
+    try {
+      const n = new Notification(title, { body, silent: false });
+      n.onclick = () => { window.focus(); revealFlowTarget(t); };
+    } catch (_) {}
+  }
+  for (const k of flowNotifyState.keys()) if (!live.has(k)) flowNotifyState.delete(k);
 }
 
 if (window.flowApi) {
@@ -1094,6 +1087,27 @@ function sendToClaudePty(ptyId, text) {
   if (!body.includes('\n') && body.startsWith('/')) window.term.input(ptyId, body);
   else window.term.input(ptyId, '\x1b[200~' + body + '\x1b[201~');
   setTimeout(() => window.term.input(ptyId, '\r'), 30);
+}
+
+// Claude CLI shortcuts the hybrid composer hands to the PTY instead of the textarea:
+// key event -> the bytes xterm would have sent, or null for ordinary editing. Left out on
+// purpose: Ctrl+C (copy in the composer; the Stop button interrupts), Ctrl+D (exits the
+// CLI), Ctrl+Z/Ctrl+Y (the composer's own undo), Ctrl+R (main reserves it), Ctrl+V (the
+// composer pastes images itself). Letters match by the typed key; the physical key is a
+// fallback only for layouts whose keys aren't Latin letters. AltGr (Ctrl+Alt) never matches.
+const HYBRID_CLI_CTRL = {
+  o: '\x0f',   // expand / transcript view
+  t: '\x14',   // toggle the task list
+  b: '\x02'    // send a running command to the background
+};
+function hybridCliKey(e) {
+  if (e.metaKey) return null;
+  if (e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Tab') return '\x1b[Z';   // cycle permission mode
+  if (!e.ctrlKey || e.altKey || e.shiftKey) return null;
+  const k = String(e.key || '').toLowerCase();
+  if (HYBRID_CLI_CTRL[k]) return HYBRID_CLI_CTRL[k];
+  const m = /^Key([A-Z])$/.exec(e.code || '');
+  return m && k.length !== 1 ? HYBRID_CLI_CTRL[m[1].toLowerCase()] || null : null;
 }
 
 // What the CLI's own /-menu is showing right now, as { cmd, desc } rows. Entries are a
@@ -1588,6 +1602,10 @@ function ensureHybridBar(tab, pane) {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); submit(); return; }
     // Escape belongs to Claude: it is how a running turn is interrupted.
     if (e.key === 'Escape') { e.preventDefault(); keyTo('\x1b'); return; }
+    // So do the CLI's own shortcuts: with the terminal's input switched off they could
+    // never reach Claude, and a textarea has no use for them.
+    const cliKey = hybridCliKey(e);
+    if (cliKey) { e.preventDefault(); e.stopPropagation(); keyTo(cliKey); return; }
     // Everything else is ordinary text editing, which the textarea already does. Keep it
     // away from the window-level shortcuts so Ctrl+T and friends don't fire while typing.
     e.stopPropagation();
@@ -2998,8 +3016,6 @@ function closePane(tab, paneId) {
   window.term.kill(pane.ptyId);
   ptyPaneMap.delete(pane.ptyId);
   pane.term.dispose();
-  paneWorkingState.delete(paneId + ':claude');
-  paneWorkingState.delete(paneId + ':copilot');
   tab.panes.delete(paneId);
 
   // Collapse split: sibling expands to fill
@@ -5592,31 +5608,6 @@ async function refreshCopilotUsage() {
   scheduleAgentRender();
 }
 
-// ---------- Agent finish notifications ----------
-const paneWorkingState = new Map();  // key: paneId:type -> bool
-
-function checkAgentNotifications() {
-  const now = Date.now();
-  for (const [, tab] of tabs) {
-    for (const [, pane] of tab.panes) {
-      for (const type of ['claude', 'copilot']) {
-        const running = type === 'claude' ? pane.claudeRunning : pane.copilotRunning;
-        const key = pane.paneId + ':' + type;
-        if (!running) { paneWorkingState.delete(key); continue; }
-        const busyUntil = type === 'claude' ? pane.claudeBusyUntil : pane.copilotBusyUntil;
-        const working = now < busyUntil;
-        const wasWorking = paneWorkingState.get(key) ?? false;
-        if (wasWorking && !working && !document.hasFocus() && appSetting('claude', 'notify')) {
-          const name = tab.customTitle || tabAutoName(tab);
-          const label = type === 'claude' ? 'Claude' : 'Copilot';
-          new Notification(`${label} finished`, { body: `${name} is ready`, silent: false });
-        }
-        paneWorkingState.set(key, working);
-      }
-    }
-  }
-}
-
 // ---------- plan limits (5-hour + weekly) ----------
 // One poll for the whole window: the main process caches, and every chat pane plus the
 // status bar reads the same answer. `null` means "nothing to show" — API-key auth, a
@@ -5692,7 +5683,7 @@ setInterval(refreshCopilotUsage, 2000);
 // state-change callbacks (and a dropped animation frame would otherwise leave a card
 // showing the previous model's context window).
 setInterval(() => {
-  if (getAllAgentPanes().length > 0 || chatTabs.size > 0) { renderAgentPanel(); checkAgentNotifications(); }
+  if (getAllAgentPanes().length > 0 || chatTabs.size > 0) renderAgentPanel();
 }, 400);
 renderAgentPanel();
 renderClaudeSessions();
@@ -5746,6 +5737,7 @@ window.chatApi.onExit(({ chatId, code, sessionId }) => {
   }
   scheduleAgentRender();
 });
+const permNotifiedAt = new Map();   // chatId -> last permission notification
 window.chatApi.onPermissionRequest((req) => {
   const view = chatViewFor(req.chatId);
   if (!view) {
@@ -5754,7 +5746,11 @@ window.chatApi.onPermissionRequest((req) => {
     return;
   }
   view.handlePermission(req);
+  // One ping per chat per 20 s: a turn can queue several approvals back to back.
+  const now = Date.now();
+  if (now - (permNotifiedAt.get(req.chatId) || 0) < 20000) return;
   if (!document.hasFocus() && appSetting('claude', 'notify')) {
+    permNotifiedAt.set(req.chatId, now);
     new Notification('Claude needs permission', {
       body: `${req.toolName} in ${basename(req.cwd || '')}`, silent: false
     });
