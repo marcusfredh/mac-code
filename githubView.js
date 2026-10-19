@@ -517,7 +517,7 @@
     refreshBtn.addEventListener('click', () => refresh(true));
     webBtn.addEventListener('click', (e) => {
       const url = currentWebUrl();
-      if (url) openLink(url, e);
+      if (url) openLink(url, e, { web: true });
     });
 
     function currentWebUrl() {

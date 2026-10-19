@@ -4051,10 +4051,13 @@ function parseGitHubUrl(href) {
 // GitHub tab and other github.com pages in the built-in GitHub window, 'browser' sends
 // them to the default browser, 'ask' offers both. With github.ctrlFlips a Ctrl+click
 // goes the other way (and 'ask' + Ctrl goes to the browser).
-function openLink(href, ev) {
+// opts.web: the github.com page itself, never the GitHub tab (the dashboard's own
+// "Open on github.com" button, which would otherwise just reopen the view it sits in).
+function openLink(href, ev, opts) {
   if (!href) return;
   const url = /^www\./i.test(href) ? 'https://' + href : String(href);
-  const gh = window.ghApi ? parseGitHubUrl(url) : null;
+  let gh = window.ghApi ? parseGitHubUrl(url) : null;
+  if (gh && opts && opts.web) gh = { kind: 'web' };
   if (!gh) { window.fileApi.openExternal(url); return; }
   let mode = appSetting('github', 'links');
   if (ev && (ev.ctrlKey || ev.metaKey) && appSetting('github', 'ctrlFlips')) mode = mode === 'browser' ? 'app' : 'browser';
