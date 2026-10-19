@@ -115,6 +115,7 @@ const appSettings = require('./settings');
 const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
 const { createFlowStore, skillConfirmText, diffText, writeDiffFile } = require('./flowStore');
 const noteImages = require('./noteImages');
+const { themeById } = require('./appThemes');
 
 app.setName('Mac Code');
 errState.nameSet = true;
@@ -262,7 +263,7 @@ function createWindow() {
     minWidth: 600,
     minHeight: 400,
     frame: false,
-    backgroundColor: '#0c0c0c',
+    backgroundColor: startupBackground(),
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     show: false,
     webPreferences: {
@@ -2104,6 +2105,11 @@ function readSettingsFileSync(f) {
     } catch (_) {}
   }
   return null;
+}
+
+// Window background before the renderer paints: the saved app theme's --bg.
+function startupBackground() {
+  try { return themeById(getSettings().general.appTheme).vars['--bg'] || '#0c0c0c'; } catch (_) { return '#0c0c0c'; }
 }
 
 function getSettings() {

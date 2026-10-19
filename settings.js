@@ -17,12 +17,13 @@ const SCHEMA = {
     restoreTabs:  { type: 'bool', def: true },
     shell:        { type: 'enum', values: ['pwsh', 'powershell'], def: 'pwsh' },
     startDir:     { type: 'string', def: '', check: (s) => s === '' || isDriveAbsolutePath(s) },
-    confirmClose: { type: 'bool', def: false }
+    confirmClose: { type: 'bool', def: false },
+    appTheme:     { type: 'enum', values: ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt'], def: 'default' }
   },
   terminal: {
     fontFamily:      { type: 'enum', values: ['Cascadia Code', 'Consolas', 'JetBrains Mono'], def: 'Cascadia Code' },
     fontSize:        { type: 'int', min: 8, max: 32, def: 13 },
-    theme:           { type: 'enum', values: ['windowsTerminal', 'oneHalfDark', 'solarizedDark'], def: 'windowsTerminal' },
+    theme:           { type: 'enum', values: ['app', 'windowsTerminal', 'oneHalfDark', 'solarizedDark'], def: 'windowsTerminal' },
     cursorStyle:     { type: 'enum', values: ['block', 'bar', 'underline'], def: 'bar' },
     scrollback:      { type: 'int', min: 0, max: 100000, def: 5000 },
     copyOnSelect:    { type: 'bool', def: false },

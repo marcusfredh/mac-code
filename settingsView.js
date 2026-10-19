@@ -19,7 +19,7 @@
   // DEFAULTS in settings.js, which stays the source of truth.
   const FALLBACK = {
     v: 1,
-    general: { restoreTabs: true, shell: 'pwsh', startDir: '', confirmClose: false },
+    general: { restoreTabs: true, shell: 'pwsh', startDir: '', confirmClose: false, appTheme: 'default' },
     terminal: { fontFamily: 'Cascadia Code', fontSize: 13, theme: 'windowsTerminal', cursorStyle: 'bar',
       scrollback: 5000, copyOnSelect: false, rightClickPaste: false },
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
@@ -66,6 +66,10 @@
   }
   migrateLegacy();
   window.appSettings = current;
+  // Before first paint: the saved app theme (colors, radius, titlebar icon).
+  if (typeof window.applyAppTheme === 'function') {
+    try { window.applyAppTheme(current.general && current.general.appTheme); } catch (_) {}
+  }
 
   function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 
@@ -228,7 +232,12 @@
         controls: [{ kind: 'text', sec: 'general', key: 'startDir', placeholder: 'Automatisk', check: 'startDir', mono: true }] },
       { label: 'Fråga innan flik med körande Claude stängs',
         desc: 'När en Claude-tur pågår i en chatt- eller terminalflik. Gäller inte när appen avslutas.',
-        controls: [{ kind: 'toggle', sec: 'general', key: 'confirmClose' }] }
+        controls: [{ kind: 'toggle', sec: 'general', key: 'confirmClose' }] },
+      { label: 'Apptema',
+        desc: 'Färger, hörn och ikon i hela appen. Terminalen följer med om Terminal → Färgschema är "Följ apptema".',
+        controls: [{ kind: 'select', sec: 'general', key: 'appTheme', options: [
+          opt('default', 'Nuvarande'), opt('fjord', 'Fjord'), opt('heather', 'Ljung'), opt('deep', 'Djuphav'),
+          opt('graphite', 'Grafit'), opt('contrast', 'Kontrast'), opt('cobalt', 'Kobolt')] }] }
     ] },
     { id: 'terminal', label: 'Terminal', rows: [
       { label: 'Typsnitt',
@@ -239,7 +248,7 @@
           { kind: 'number', sec: 'terminal', key: 'fontSize', aria: 'Storlek', min: 8, max: 32, width: 64 }] },
       { label: 'Färgschema',
         controls: [{ kind: 'select', sec: 'terminal', key: 'theme', options: [
-          opt('windowsTerminal', 'Windows Terminal'), opt('oneHalfDark', 'One Half Dark'), opt('solarizedDark', 'Solarized Dark')] }] },
+          opt('app', 'Följ apptema'), opt('windowsTerminal', 'Windows Terminal'), opt('oneHalfDark', 'One Half Dark'), opt('solarizedDark', 'Solarized Dark')] }] },
       { label: 'Markör',
         controls: [{ kind: 'segmented', sec: 'terminal', key: 'cursorStyle', options: [
           opt('block', 'Block'), opt('bar', 'Streck'), opt('underline', 'Understreck')] }] },

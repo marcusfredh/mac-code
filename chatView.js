@@ -16,10 +16,10 @@
   // CLI aliases rather than pinned ids — `claude --model opus` always resolves to
   // the current Opus, so this list doesn't rot when a new model ships.
   const MODELS = [
-    { id: 'opus',   label: 'Opus 5',    dot: '#4ec994', oneM: true },
-    { id: 'sonnet', label: 'Sonnet 5',  dot: '#61d6d6', oneM: true },
-    { id: 'haiku',  label: 'Haiku 4.5', dot: '#d7ba7d' },
-    { id: 'fable',  label: 'Fable 5',   dot: '#b393ff' }
+    { id: 'opus',   label: 'Opus 5',    dot: 'var(--green)', oneM: true },
+    { id: 'sonnet', label: 'Sonnet 5',  dot: 'var(--cyan)', oneM: true },
+    { id: 'haiku',  label: 'Haiku 4.5', dot: 'var(--amber)' },
+    { id: 'fable',  label: 'Fable 5',   dot: 'var(--purple)' }
   ];
 
   // `opus[1m]` and friends are CLI model aliases: same model, 1M-context beta on.
@@ -34,7 +34,7 @@
     return m ? m[1].toLowerCase() : '';
   }
   const FAMILY_DOTS = {
-    opus: '#4ec994', sonnet: '#61d6d6', haiku: '#d7ba7d', fable: '#b393ff', mythos: '#b393ff'
+    opus: 'var(--green)', sonnet: 'var(--cyan)', haiku: 'var(--amber)', fable: 'var(--purple)', mythos: 'var(--purple)'
   };
   // Haiku has no 1M variant; the CLI offers one for the other families.
   function supportsOneM(id) { return modelFamily(id) !== 'haiku' && modelFamily(id) !== ''; }
@@ -43,10 +43,10 @@
   // the CLI's `auto` classifier does not grant approvals in print mode, so `auto`
   // here means Mac Code's local safe-command list, not that classifier.
   const PERM_MODES = [
-    { id: 'default',           label: 'Ask',          pill: 'Ask',          dot: '#d7ba7d', hint: '' },
-    { id: 'auto',              label: 'Auto (local rules)', pill: 'Auto',   dot: '#4ec994', hint: 'safe commands + edits' },
-    { id: 'acceptEdits',       label: 'Accept edits', pill: 'Accept edits', dot: '#61d6d6', hint: 'edits only' },
-    { id: 'bypassPermissions', label: 'Bypass',       pill: 'Bypass',       dot: '#e74856', hint: 'no prompts' }
+    { id: 'default',           label: 'Ask',          pill: 'Ask',          dot: 'var(--amber)', hint: '' },
+    { id: 'auto',              label: 'Auto (local rules)', pill: 'Auto',   dot: 'var(--green)', hint: 'safe commands + edits' },
+    { id: 'acceptEdits',       label: 'Accept edits', pill: 'Accept edits', dot: 'var(--cyan)', hint: 'edits only' },
+    { id: 'bypassPermissions', label: 'Bypass',       pill: 'Bypass',       dot: 'var(--red)', hint: 'no prompts' }
   ];
 
   const TOOL_COLOR = {
@@ -920,7 +920,7 @@
         : 'Change how tool calls are approved';
 
       modelText.textContent = currentModelLabel() + (state.oneM ? ' · 1M' : '');
-      modelDot.style.background = FAMILY_DOTS[modelFamily(state.model)] || '#4ec994';
+      modelDot.style.background = FAMILY_DOTS[modelFamily(state.model)] || 'var(--green)';
 
       const maxLabel = state.contextWindow >= 1e6
         ? '1M'

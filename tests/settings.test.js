@@ -254,3 +254,20 @@ test('github open/merge settings: valid values kept, invalid fall back', () => {
   assert.strictEqual(bad.github.mergeMethod, 'merge');
   assert.strictEqual(bad.github.deleteBranchOnMerge, false);
 });
+
+test('general.appTheme: defaults to default, accepts the 7 themes, invalid falls back', () => {
+  assert.strictEqual(DEFAULTS.general.appTheme, 'default');
+  for (const id of ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt']) {
+    assert.strictEqual(validate({ general: { appTheme: id } }).general.appTheme, id);
+  }
+  assert.strictEqual(validate({ general: { appTheme: 'neon' } }).general.appTheme, 'default');
+  assert.strictEqual(validate({ general: { appTheme: 3 } }).general.appTheme, 'default');
+  const cur = validate({ general: { appTheme: 'fjord' } });
+  assert.strictEqual(applyPatch(cur, { general: { appTheme: 'nope' } }).general.appTheme, 'fjord');
+});
+
+test("terminal.theme: 'app' accepted, default unchanged", () => {
+  assert.strictEqual(DEFAULTS.terminal.theme, 'windowsTerminal');
+  assert.strictEqual(validate({ terminal: { theme: 'app' } }).terminal.theme, 'app');
+  assert.strictEqual(validate({ terminal: { theme: 'bogus' } }).terminal.theme, 'windowsTerminal');
+});

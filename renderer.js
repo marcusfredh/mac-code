@@ -33,6 +33,8 @@ const SOLARIZED_DARK_THEME = {
   brightCyan: '#93a1a1', brightWhite: '#fdf6e3'
 };
 const TERMINAL_THEMES = {
+  // terminal.theme 'app': the active app theme's own terminal palette
+  get app() { return window.themeById(appSetting('general', 'appTheme')).term; },
   windowsTerminal: WINDOWS_TERMINAL_THEME, oneHalfDark: ONE_HALF_DARK_THEME, solarizedDark: SOLARIZED_DARK_THEME
 };
 // terminal.fontFamily -> CSS stack. Cascadia Code is bundled; JetBrains Mono only
@@ -3429,7 +3431,7 @@ async function createEditorTab(filePath, opts = {}) {
     editorEl.innerHTML = '';
     tab.editor = monaco.editor.create(editorEl, {
       value: result.content, language,
-      theme: 'vs-dark', fontSize: 13,
+      theme: window.appMonacoTheme(), fontSize: 13,
       fontFamily: '"Cascadia Code", Consolas, monospace',
       scrollBeyondLastLine: false,
       automaticLayout: true,
@@ -6112,6 +6114,10 @@ function applyTerminalSettings() {
 function applySettings(next, prev) {
   const ch = (sec, key) => !prev || !prev[sec] || !next[sec] || prev[sec][key] !== next[sec][key];
   if (['fontFamily', 'fontSize', 'theme', 'cursorStyle', 'scrollback'].some((k) => ch('terminal', k))) applyTerminalSettings();
+  if (ch('general', 'appTheme')) {
+    window.applyAppTheme(next.general.appTheme);
+    applyTerminalSettings();
+  }
   if (ch('claude', 'hybridInput')) updateHybrid();
   if (ch('claude', 'showUsage')) {
     pushPlanLimits();
