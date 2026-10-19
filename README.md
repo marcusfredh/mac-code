@@ -261,6 +261,8 @@ preload.js                contextBridge IPC surface
 renderer.html             UI shell + all styling
 renderer.js               tabs, panes, Explorer, agents panel, session persistence
 repoUsage.js              frequent-repos counter (pure, unit-tested)
+errorNotes.js             formats errors and files them as notes (pure, unit-tested)
+errorHook.js              first script in the renderer: catches window errors from the start
 chatView.js               Claude chat surface — stream rendering, tool cards, composer
 settings.js               settings schema, defaults and validation (pure, unit-tested)
 settingsView.js           settings store in the renderer + the settings modal
@@ -367,3 +369,26 @@ rather than letting you wonder why a new server isn't there yet.
 | `settings:reload` / `settings:path` / `settings:check` | invoke | Re-read `settings.json` after an edit, its path, and whether the path settings exist |
 | `settings:export` / `settings:import` / `app:version` | invoke | Settings file dialogs, app version |
 | `window:minimize` / `window:maximize` / `window:close` | send | Frame controls |
+| `notes:load` / `notes:save` / `notes:path` / `notes:status` | invoke/send | Repo notes file; `status` says whether it exists (so an unreadable file is never saved over) |
+| `errors:log` | send | Renderer error -> `errors.log` |
+| `errors:takePending` | invoke | Queued error records; also switches live delivery on |
+| `errors:note` | on | A formatted error record from main, once the renderer has taken the pending ones |
+
+## Errors become notes
+
+Errors Mac Code throws are filed as items in the notes of this repo (`marcusfredh/Mac-Code`),
+and the full stack goes to `errors.log` in the data folder (rotated at 1 MB).
+
+- Captured: main-process `uncaughtException` / `unhandledRejection` (the usual error dialog
+  still appears), the main window's renderer crashing or hanging, GPU / utility process
+  crashes, and `error` / `unhandledrejection` in the main window. Not captured: the GitHub
+  window (remote pages), `console.error` output, `ResizeObserver loop` and browser-extension noise.
+- The same error (digits ignored) is one item whose `×N · senast …` line counts repeats; a
+  repeat is written at most once a minute and reopens a ticked-off item only after 10 quiet
+  minutes. At most 30 open and 50 auto items are kept, and 20 new ones per app session.
+- Main never writes `repo-notes.json` (the renderer owns it). Errors raised while the window
+  isn't ready wait in `pending-error-notes.json` and are filed on the next start. If the notes
+  file exists but can't be read, nothing is saved over it and only `errors.log` gets the error.
+- Limitation: handlers are installed at the very top of `main.js`, but a SyntaxError in
+  `main.js` or `errorNotes.js` itself happens before any code runs, so it can't be recorded
+  (Electron's own dialog is all you get).

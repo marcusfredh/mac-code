@@ -1,3 +1,103 @@
+// ===== Error capture: keep this block FIRST, before any other require =====
+// Mac Code's own errors are recorded to errors.log and turned into notes in the Mac-Code
+// repo (see errorNotes.js). Registered this early so an error thrown while the remaining
+// modules load is still caught. (A SyntaxError inside main.js or errorNotes.js itself
+// can't be: nothing has run yet.) Nothing in here may ever throw.
+const errorNotes = require('./errorNotes');
+const errFs = require('fs');
+const errPath = require('path');
+const errState = { rendererReady: false, busy: false, wc: null, nameSet: false, childWired: false };
+const ERR_LOG_MAX = 1024 * 1024;
+const ERR_ENTRY_MAX = 64 * 1024;
+const ERR_PENDING_MAX = 50;
+
+function errUserData() {
+  try {
+    const { app } = require('electron');
+    if (errState.nameSet || app.commandLine.hasSwitch('user-data-dir')) return app.getPath('userData');
+    // Before app.setName() the default folder is still named after package.json.
+    return errPath.join(app.getPath('appData'), 'Mac Code');
+  } catch (_) {
+    return errPath.join(process.env.APPDATA || require('os').homedir(), 'Mac Code');
+  }
+}
+function errFile(name) { return errPath.join(errUserData(), name); }
+function errMkdir() { try { errFs.mkdirSync(errUserData(), { recursive: true }); } catch (_) {} }
+
+function appendErrorLog(rec) {
+  try {
+    errMkdir();
+    const f = errFile('errors.log');
+    try { if (errFs.statSync(f).size > ERR_LOG_MAX) errFs.renameSync(f, f + '.1'); } catch (_) {}
+    const head = '[' + new Date(Number.isFinite(rec.at) ? rec.at : Date.now()).toISOString() + '] ' +
+      rec.source + ' ' + rec.name + ': ' + rec.message;
+    let entry = head + (rec.stack ? '\n' + rec.stack : '') + '\n\n';
+    if (entry.length > ERR_ENTRY_MAX) entry = entry.slice(0, ERR_ENTRY_MAX - 1) + '\n';
+    errFs.appendFileSync(f, entry, 'utf8');
+  } catch (_) {}
+}
+function readPendingErrors() {
+  try {
+    const v = JSON.parse(errFs.readFileSync(errFile('pending-error-notes.json'), 'utf8'));
+    return Array.isArray(v) ? v : [];
+  } catch (_) { return []; }
+}
+function writePendingErrors(list) {
+  try {
+    errMkdir();
+    const f = errFile('pending-error-notes.json');
+    const tmp = f + '.' + process.pid + '.tmp';
+    errFs.writeFileSync(tmp, JSON.stringify(list), 'utf8');
+    errFs.renameSync(tmp, f);
+  } catch (_) {}
+}
+function addPendingError(rec) {
+  const list = readPendingErrors();
+  list.push(rec);
+  writePendingErrors(list.slice(-ERR_PENDING_MAX));
+}
+// Live to the renderer when it has signalled ready and is alive; the pending file otherwise.
+function deliverError(rec, forcePending) {
+  try {
+    const wc = errState.wc;
+    if (!forcePending && errState.rendererReady && wc && !wc.isDestroyed() && !wc.isCrashed()) {
+      wc.send('errors:note', rec);
+      return;
+    }
+  } catch (_) {}
+  addPendingError(rec);
+}
+function recordMainError(source, error, opts) {
+  if (errState.busy) return null; // recursion guard
+  errState.busy = true;
+  try {
+    let version, home;
+    try { version = require('electron').app.getVersion(); } catch (_) {}
+    try { home = require('os').homedir(); } catch (_) {}
+    const rec = errorNotes.formatError({ source, error, version, home, now: Date.now() });
+    if (errorNotes.shouldIgnore(rec)) return rec;
+    appendErrorLog(rec);
+    deliverError(rec, !!(opts && opts.forcePending));
+    return rec;
+  } catch (_) {
+    return null;
+  } finally {
+    errState.busy = false;
+  }
+}
+process.on('uncaughtException', (err) => {
+  try { recordMainError('main', err); } catch (_) {}
+  // Registering a handler suppresses Electron's own dialog; keep showing it.
+  try {
+    const stack = err && err.stack ? err.stack : String(err);
+    require('electron').dialog.showErrorBox('A JavaScript error occurred in the main process', 'Uncaught Exception:\n' + stack);
+  } catch (_) {}
+});
+process.on('unhandledRejection', (reason) => {
+  try { recordMainError('main (promise)', reason); } catch (_) {}
+});
+// ===== end error capture =====
+
 const { app, BrowserWindow, ipcMain, screen, shell, dialog } = require('electron');
 const path = require('path');
 const os = require('os');
@@ -15,6 +115,7 @@ const appSettings = require('./settings');
 const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
 
 app.setName('Mac Code');
+errState.nameSet = true;
 // Must equal build.appId: the installer's Start-menu shortcut carries that id, and
 // Windows silently drops toasts from an id no shortcut is registered for.
 app.setAppUserModelId('com.marcus.mac-code');
@@ -99,6 +200,48 @@ function shellArgs(shellPath) {
   return ['-NoLogo', '-NoExit', '-Command', PWSH_INIT];
 }
 
+// Crashes and hangs of the main window's renderer, and GPU/utility process crashes. Only the
+// main window counts (the GitHub popup is remote content); a dead renderer can't take a
+// live note, so those always go to the pending file and are drained on reload.
+// The app being shut down or killed from outside (End task, SIGTERM = exit code 143) is
+// not a Mac Code error, even though its child processes report reason 'crashed'.
+function processKilled(details) {
+  return errState.quitting || !details || details.reason === 'killed' || details.exitCode === 143;
+}
+
+function wireErrorCapture(win) {
+  try {
+    const wc = win.webContents;
+    errState.wc = wc;
+    errState.rendererReady = false;
+    // Windows shutdown / logoff skips before-quit.
+    win.on('session-end', () => { errState.quitting = true; });
+    wc.on('did-start-navigation', (ev, url, isInPlace, isMainFrame) => {
+      const mainFrame = ev && ev.isMainFrame !== undefined ? ev.isMainFrame : isMainFrame;
+      const sameDoc = ev && ev.isSameDocument !== undefined ? ev.isSameDocument : isInPlace;
+      if (mainFrame && !sameDoc) errState.rendererReady = false;
+    });
+    wc.on('render-process-gone', (_e, details) => {
+      errState.rendererReady = false;
+      const reason = details && details.reason;
+      if (reason === 'clean-exit' || processKilled(details)) return;
+      recordMainError('render-process-gone', { name: 'RenderProcessGone', message: 'reason=' + reason + ' exitCode=' + (details && details.exitCode) }, { forcePending: true });
+    });
+    wc.on('unresponsive', () => {
+      recordMainError('unresponsive', { name: 'WindowUnresponsive', message: 'The main window stopped responding' });
+    });
+    if (!errState.childWired) {
+      errState.childWired = true;
+      app.on('before-quit', () => { errState.quitting = true; });
+      app.on('child-process-gone', (_e, details) => {
+        const type = details && details.type, reason = details && details.reason;
+        if ((type !== 'GPU' && type !== 'Utility') || reason === 'clean-exit' || processKilled(details)) return;
+        recordMainError('child-process-gone', { name: type + 'ProcessGone', message: 'reason=' + reason + ' exitCode=' + details.exitCode });
+      });
+    }
+  } catch (_) {}
+}
+
 function createWindow() {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
@@ -127,6 +270,8 @@ function createWindow() {
       sandbox: false
     }
   });
+
+  wireErrorCapture(mainWindow);
 
   // Position in two steps: setPosition first so setBounds uses target display DPI.
   // Fixes multi-display sizing bug where constructor uses primary display scale.
@@ -1834,6 +1979,34 @@ function notesFile() { return path.join(app.getPath('userData'), 'repo-notes.jso
 ipcMain.handle('notes:load', () => readJsonWithBackup(notesFile()));
 ipcMain.on('notes:save', (_, data) => { atomicWriteJson(notesFile(), data); });
 ipcMain.handle('notes:path', () => notesFile());
+// Lets the renderer tell "no notes file yet" from "file there but unreadable" (a failed
+// load must never be saved over).
+ipcMain.handle('notes:status', () => {
+  try { return { exists: fs.existsSync(notesFile()) || fs.existsSync(notesFile() + '.bak') }; } catch (_) { return { exists: false }; }
+});
+
+// ----- IPC: error notes (see the capture block at the top of this file) -----
+// Only the main window's webContents may use these. main never writes repo-notes.json —
+// the renderer owns that file and rewrites it whole.
+ipcMain.on('errors:log', (e, rec) => {
+  try {
+    if (!fromMainWindow(e) || !rec || typeof rec !== 'object') return;
+    const s = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+    const clean = { source: s(rec.source, 100) || 'renderer', name: s(rec.name, 100) || 'Error',
+      message: s(rec.message, 4000), stack: s(rec.stack, ERR_ENTRY_MAX), at: Number.isFinite(rec.at) ? rec.at : Date.now() };
+    appendErrorLog(clean);
+  } catch (_) {}
+});
+// Returns the queued records, clears them, and from now on main sends errors:note live.
+ipcMain.handle('errors:takePending', (e) => {
+  try {
+    if (!fromMainWindow(e)) return [];
+    const list = readPendingErrors();
+    writePendingErrors([]);
+    errState.rendererReady = true;
+    return list;
+  } catch (_) { return []; }
+});
 
 // ----- IPC: settings -----
 // One JSON file in userData, validated by settings.js and cached here. Every change is

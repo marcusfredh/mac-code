@@ -38,12 +38,53 @@
   let data = { version: 1, repos: {} };
   let loaded = false;
   let saveTimer = null;
+  let loadOk = false;          // the notes file was read (a missing file is not a failure)
   const listeners = new Set();
   const ready = (window.notesApi ? window.notesApi.load() : Promise.resolve(null)).then((d) => {
-    if (d && typeof d === 'object' && d.repos && typeof d.repos === 'object') data = d;
+    if (d && typeof d === 'object' && d.repos && typeof d.repos === 'object') { data = d; loadOk = true; }
     loaded = true;
     emit();
   }).catch(() => { loaded = true; });
+
+  // ---------- Mac Code's own errors become notes (errorNotes.js, errorHook.js) ----------
+  // Records wait here until the store has loaded. If the notes file exists but could not
+  // be read, nothing is saved over it: errors then only live in errors.log (main keeps its
+  // own pending queue and is never asked to hand it over).
+  const errQueue = [];
+  const errSession = { added: 0 };
+  let errReady = false, errCanWrite = false, appVersion = '';
+
+  // rec: a raw renderer record (errorHook) or a formatted one from main.
+  function addErrorNote(rec) {
+    try {
+      if (!errReady) { if (errQueue.length < 100) errQueue.push(rec); return; }
+      const en = window.errorNotes;
+      if (!en || !errCanWrite || !rec || typeof rec !== 'object' || en.shouldIgnore(rec)) return;
+      const formatted = rec.text && rec.fingerprint ? rec
+        : en.formatError(Object.assign({}, rec, { version: appVersion, now: Number.isFinite(rec.at) ? rec.at : Date.now() }));
+      const res = en.addErrorToNotes(data, formatted, { newId, now: Date.now(), session: errSession });
+      if (res.changed) save();
+    } catch (_) {}
+  }
+
+  const errorsReady = ready.then(async () => {
+    try {
+      let exists = false;
+      try { const st = window.notesApi && window.notesApi.status ? await window.notesApi.status() : null; exists = !!(st && st.exists); } catch (_) {}
+      errCanWrite = loadOk || !exists;
+      try { appVersion = String(await window.settingsApi.version()); } catch (_) {}
+      errReady = true;
+      const early = (window.__macErrorQueue || []).splice(0).concat(errQueue.splice(0));
+      for (const r of early) addErrorNote(r);
+      window.__macErrorSink = addErrorNote;
+      const api = window.errorsApi;
+      if (api && errCanWrite) {
+        api.onNote(addErrorNote);                       // before takePending: that call switches live delivery on
+        const pending = await api.takePending();
+        if (Array.isArray(pending)) for (const r of pending) addErrorNote(r);
+      }
+    } catch (_) {}
+  });
 
   function emit() { for (const fn of listeners) { try { fn(); } catch (_) {} } }
   function save() {
@@ -279,7 +320,13 @@
         b.title = 'Branch this was noted on';
         meta.appendChild(b);
       }
-      meta.appendChild(el('span', 'notes-time', ago(it.updated || it.created)));
+      if (it.auto === 'error') {
+        const t = el('span', 'notes-time', '×' + (it.count || 1) + ' · senast ' + ago(it.lastSeen || it.updated || it.created));
+        t.title = 'Automatically noted Mac Code error';
+        meta.appendChild(t);
+      } else {
+        meta.appendChild(el('span', 'notes-time', ago(it.updated || it.created)));
+      }
       main.appendChild(meta);
       row.appendChild(main);
 
@@ -408,6 +455,8 @@
     notesToMarkdown,
     openCount,
     ready,
+    errorsReady,
+    addErrorNote,
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
   };
 })();

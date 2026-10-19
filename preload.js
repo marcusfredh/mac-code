@@ -122,7 +122,21 @@ contextBridge.exposeInMainWorld('ghApi', {
 contextBridge.exposeInMainWorld('notesApi', {
   load: ()     => ipcRenderer.invoke('notes:load'),
   save: (data) => ipcRenderer.send('notes:save', data),
-  path: ()     => ipcRenderer.invoke('notes:path')
+  path: ()     => ipcRenderer.invoke('notes:path'),
+  status: ()   => ipcRenderer.invoke('notes:status')
+});
+
+// Mac Code's own errors -> notes. onNote: formatted records pushed by main (only after
+// takePending has run); takePending: records queued while the renderer wasn't ready (also
+// switches live delivery on); log: raw renderer errors for errors.log.
+contextBridge.exposeInMainWorld('errorsApi', {
+  onNote: (callback) => {
+    const listener = (_event, rec) => callback(rec);
+    ipcRenderer.on('errors:note', listener);
+    return () => ipcRenderer.removeListener('errors:note', listener);
+  },
+  takePending: () => ipcRenderer.invoke('errors:takePending'),
+  log: (rec) => ipcRenderer.send('errors:log', rec)
 });
 
 // `initial` is read synchronously here so the renderer has settings before its first
