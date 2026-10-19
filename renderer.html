@@ -2339,6 +2339,213 @@
     .set-confirm-text { font-size: 12.5px; line-height: 1.55; color: var(--fg); white-space: pre-wrap; word-break: break-word; user-select: text; }
     .set-confirm-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
+    /* ---------- Flöden (flowEditor.js) ---------- */
+    /* Wide dialog: the window minus the overlay's 16px inset. Content does not scroll; the canvas fills it. */
+    .set-dialog.wide { width: 100%; height: 100%; }
+    .set-content.flows { overflow: hidden; display: flex; flex-direction: column; padding: 4px 20px 14px; }
+    .set-content.flows > .set-section:not([hidden]) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .set-content.flows .set-h2 { margin: 12px 0 8px; }
+    .set-dialog.flow-big .set-hdr, .set-dialog.flow-big .set-nav, .set-dialog.flow-big .set-content.flows .set-h2 { display: none; }
+    .set-dialog.flow-big .set-content.flows { padding-top: 12px; }
+    .flow-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .flow-host[hidden] { display: none; }
+    .fe-root {
+      --fe-agent: var(--purple); --fe-step: var(--fg-dim); --fe-check: var(--cyan); --fe-ask: var(--amber);
+      --fe-start: var(--green); --fe-hook: var(--amber);
+      flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px;
+    }
+    .fe-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .fe-picker { width: auto; min-width: 160px; max-width: 260px; font-weight: 600; }
+    .fe-cls { width: 96px; height: 28px; }
+    .fe-meta { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+    .fe-meta code, .fe-paths code { font-family: var(--mono); font-size: 11.5px; color: var(--fg); }
+    .fe-grow { flex: 1; }
+    .fe-chip {
+      height: 24px; padding: 0 10px; border-radius: 12px; font: 12px var(--ui); cursor: pointer;
+      color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+    }
+    .fe-chip[hidden] { display: none; }
+    .fe-hooksbtn[aria-pressed="true"] { border-color: var(--fe-hook); color: var(--fe-hook); }
+    .fe-banner {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px;
+      font-size: 12.5px; color: var(--fg-strong); background: var(--card); border: 1px solid var(--line);
+    }
+    .fe-banner[hidden] { display: none; }
+    .fe-banner.err { border-color: color-mix(in srgb, var(--red) 55%, transparent); background: color-mix(in srgb, var(--red) 10%, var(--card)); }
+    .fe-banner.warn { border-color: color-mix(in srgb, var(--amber) 55%, transparent); background: color-mix(in srgb, var(--amber) 9%, var(--card)); }
+    .fe-banner-text { flex: 1; min-width: 200px; }
+    .fe-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .fe-canvas {
+      position: absolute; inset: 0; overflow: hidden; touch-action: none; outline: none; background-color: var(--card);
+      background-image: radial-gradient(var(--fill-hover) 1px, transparent 1.2px); background-size: 20px 20px;
+    }
+    .fe-canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+    .fe-canvas.panning { cursor: grabbing; }
+    .fe-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+    .fe-world.tidy .fe-node, .fe-world.tidy .fe-group {
+      transition: left .45s cubic-bezier(.3,.7,.2,1), top .45s cubic-bezier(.3,.7,.2,1), width .45s, height .45s;
+    }
+    svg.fe-edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; }
+    .fe-e { fill: none; stroke: var(--dim-ansi); stroke-width: 1.6; }
+    .fe-e.hit { stroke: transparent; stroke-width: 14; cursor: pointer; pointer-events: stroke; }
+    .fe-e.hook { stroke: var(--fe-hook); stroke-dasharray: 3 4; opacity: .6; stroke-width: 1.2; }
+    .fe-e.sel { stroke: var(--accent); }
+    .fe-e.flow { stroke: var(--accent); stroke-width: 2.4; stroke-dasharray: 6 5; animation: fe-dash .55s linear infinite; }
+    .fe-e.temp { stroke: var(--accent); stroke-dasharray: 4 4; }
+    .fe-arrow { fill: var(--dim-ansi); }
+    @keyframes fe-dash { to { stroke-dashoffset: -11; } }
+    .fe-elabel {
+      position: absolute; transform: translate(-50%, -50%); font: 10.5px var(--mono); color: var(--fg-dim);
+      background: var(--card); padding: 0 4px; border-radius: 4px; pointer-events: none; white-space: nowrap;
+    }
+    .fe-eplus {
+      position: absolute; width: 20px; height: 20px; margin: -10px 0 0 -10px; padding: 0; border-radius: 50%;
+      border: 1px solid var(--accent); background: var(--dialog); color: var(--accent); font: 14px/1 var(--ui);
+      display: grid; place-items: center; opacity: 0; transition: opacity .12s; cursor: pointer;
+    }
+    .fe-eplus.show, .fe-eplus:focus-visible { opacity: 1; }
+    .fe-group { position: absolute; border: 1px dashed rgba(255, 255, 255, 0.14); border-radius: 14px; background: var(--fill); pointer-events: none; }
+    .fe-group span {
+      position: absolute; top: -9px; left: 14px; padding: 0 6px; display: inline-flex; gap: 6px; align-items: center;
+      font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-muted); background: var(--card);
+    }
+    .fe-group span i { font-style: normal; color: var(--fe-hook); letter-spacing: 0; text-transform: none; font-weight: 500; }
+    .fe-node { position: absolute; user-select: none; touch-action: none; cursor: grab; outline: none; border-radius: 10px; }
+    .fe-node:focus-visible .fe-card { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .fe-card {
+      position: relative; width: 184px; height: 46px; display: flex; align-items: center; gap: 9px; padding: 0 10px;
+      background: var(--dialog); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    }
+    .fe-node.sel .fe-card { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .fe-node.run .fe-card { border-color: var(--accent); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .fe-node.done .fe-card { border-color: color-mix(in srgb, var(--green) 60%, transparent); }
+    .fe-node.drop .fe-card { border-color: var(--accent); border-style: dashed; }
+    .fe-node.bad .fe-card { border-color: var(--red); }
+    .fe-ic {
+      width: 26px; height: 26px; flex: none; border-radius: 7px; display: grid; place-items: center;
+      font: 600 11px var(--mono); color: var(--fe-c, var(--fg-dim)); background: color-mix(in srgb, var(--fe-c, var(--fg-dim)) 14%, transparent);
+    }
+    .k-agent { --fe-c: var(--fe-agent); } .k-step { --fe-c: var(--fe-step); } .k-check { --fe-c: var(--fe-check); }
+    .k-ask { --fe-c: var(--fe-ask); } .k-start { --fe-c: var(--fe-start); }
+    .fe-txt { min-width: 0; flex: 1; }
+    .fe-tt { font-size: 12.5px; font-weight: 500; color: var(--fg-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fe-ts { font-size: 11px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fe-marks { position: absolute; right: -6px; top: -8px; display: flex; gap: 3px; }
+    .fe-mk {
+      height: 16px; padding: 0 5px; border-radius: 999px; font: 10px/14px var(--mono); color: var(--fg-dim);
+      background: var(--dialog); border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    .fe-mk.m { color: var(--fe-agent); border-color: color-mix(in srgb, var(--fe-agent) 45%, transparent); }
+    .fe-mk.h { color: var(--fe-hook); border-color: color-mix(in srgb, var(--fe-hook) 45%, transparent); }
+    .fe-port {
+      position: absolute; right: -6px; top: 17px; width: 11px; height: 11px; border-radius: 50%;
+      border: 2px solid var(--accent); background: var(--dialog); opacity: 0; cursor: crosshair;
+    }
+    .fe-node:hover .fe-port, .fe-node.sel .fe-port, .fe-node:focus-visible .fe-port { opacity: 1; }
+    .fe-lane { position: absolute; font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-muted); pointer-events: none; white-space: nowrap; }
+    .fe-hnode {
+      position: absolute; height: 30px; padding: 0 10px; display: flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer;
+      border: 1px dashed color-mix(in srgb, var(--fe-hook) 60%, transparent); border-radius: 999px;
+      background: var(--dialog); color: var(--fe-hook); font: 11.5px var(--mono);
+    }
+    .fe-hnode.off { opacity: .5; text-decoration: line-through; }
+    .fe-hnode.missing { color: var(--fg-muted); border-color: var(--line); }
+    .fe-tools { position: absolute; left: 10px; top: 10px; display: flex; gap: 6px; }
+    .fe-zoom { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; }
+    .fe-tool {
+      height: 30px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
+      font: 12.5px var(--ui); color: var(--fg-strong); background: var(--dialog);
+      border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    }
+    .fe-tool:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .fe-tool:disabled { opacity: .45; cursor: default; }
+    .fe-add { width: 30px; padding: 0; justify-content: center; font-size: 17px; }
+    .fe-tool.dirty { border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent); }
+    .fe-toast {
+      position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: calc(100% - 200px);
+      padding: 5px 14px; border-radius: 999px; font-size: 12.5px; color: var(--fg-dim); background: var(--dialog);
+      border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+    }
+    .fe-toast[hidden] { display: none; }
+    .fe-toast b { color: var(--fg-strong); font-weight: 600; }
+    .fe-drawer {
+      position: absolute; top: 8px; right: 8px; bottom: 8px; width: min(280px, calc(100% - 16px)); padding: 14px 16px; overflow-y: auto;
+      background: var(--dialog); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+      transform: translateX(calc(100% + 20px)); visibility: hidden; transition: transform .18s ease, visibility 0s linear .18s;
+    }
+    .fe-drawer.open { transform: none; visibility: visible; transition: transform .18s ease; }
+    .fe-dh { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .fe-dh .fe-ic { width: 30px; height: 30px; }
+    .fe-dh-t { flex: 1; min-width: 0; }
+    .fe-dh-k { font-size: 11px; color: var(--fg-dim); }
+    .fe-dh-title { font-weight: 600; color: var(--fg-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fe-dh-x { width: 30px; height: 30px; font-size: 18px; }
+    .fe-dnote { margin: -4px 0 10px; }
+    .fe-f { display: flex; flex-direction: column; gap: 4px; margin-bottom: 11px; min-width: 0; }
+    .fe-f label { font-size: 11.5px; color: var(--fg-dim); }
+    .fe-f .set-input, .fe-f .set-select { width: 100%; height: 30px; font-size: 12.5px; }
+    .fe-f .set-input[readonly] { color: var(--fg-muted); }
+    .set-input.fe-ta { height: auto; min-height: 60px; padding: 6px 8px; resize: vertical; line-height: 1.45; font-family: var(--ui); }
+    .set-input.fe-ta.mono { font-family: var(--mono); font-size: 12px; }
+    .set-input.fe-bad, .set-select.fe-bad { border-color: var(--red); }
+    .fe-hint { font-size: 11.5px; line-height: 1.45; color: var(--fg-dim); }
+    .fe-hint.err { color: #f0a0a8; }
+    .fe-dsec { margin: 14px 0 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-muted); }
+    .fe-path { display: flex; align-items: flex-end; gap: 6px; }
+    .fe-path .fe-f { flex: 1; }
+    .fe-path .fe-x { margin-bottom: 11px; }
+    .fe-x { width: 26px; height: 26px; flex: none; border: 0; border-radius: 6px; background: transparent; color: var(--fg-dim); font-size: 15px; cursor: pointer; }
+    .fe-x:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .fe-hk { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+    .fe-hn { flex: 1; min-width: 0; font: 11.5px var(--mono); color: var(--fe-hook); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fe-hn small { display: block; font: 11px var(--ui); color: var(--fg-dim); }
+    .fe-hk.off .fe-hn { opacity: .6; }
+    .fe-hk.missing .fe-hn { color: var(--fg-muted); }
+    .fe-hk.missing .fe-hn small { color: var(--amber); }
+    .fe-relink, .fe-hookadd { width: 100%; height: 30px; margin-top: 6px; font-size: 12.5px; }
+    .fe-hookadd { color: var(--accent); }
+    .fe-mini { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 4px; padding: 10px 12px; background: var(--card); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; }
+    .fe-mini-title { font-size: 13px; font-weight: 600; color: var(--fg-strong); margin-bottom: 6px; }
+    .fe-mini-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+    .fe-del { margin-top: 16px; color: #f0a0a8; }
+    .fe-panel {
+      position: absolute; left: 50%; top: 56px; transform: translateX(-50%); width: min(420px, calc(100% - 24px));
+      display: flex; flex-direction: column; gap: 4px; padding: 14px 16px;
+      background: var(--dialog); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    }
+    .fe-panel[hidden] { display: none; }
+    .fe-menu {
+      position: fixed; z-index: 1350; min-width: 220px; max-height: 60vh; overflow-y: auto; padding: 4px;
+      background: var(--menu); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 9px; box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+    }
+    .fe-mi {
+      display: flex; width: 100%; align-items: center; gap: 9px; padding: 6px 8px; border: 0; border-radius: 6px;
+      background: none; color: var(--fg-strong); font: 12.5px var(--ui); text-align: left; cursor: pointer;
+    }
+    .fe-mi:hover:not(:disabled), .fe-mi:focus-visible { background: var(--fill-hover); outline: none; }
+    .fe-mi:disabled { opacity: .45; cursor: default; }
+    .fe-mi .fe-ic { width: 22px; height: 22px; font-size: 10px; }
+    .fe-mi small { margin-left: auto; color: var(--fg-dim); font: 10.5px var(--mono); }
+    .fe-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+    .fe-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--fg-dim); }
+    .fe-paths { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fe-status { white-space: nowrap; }
+    .fe-status.ok { color: var(--green); }
+    .fe-status.err { color: #f0a0a8; }
+    .set-confirm.fe-preview { width: min(860px, 100%); max-height: calc(100vh - 32px); }
+    .fe-pre {
+      flex: 1; min-height: 120px; max-height: 56vh; overflow: auto; margin: 0; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+      font: 12px/1.5 var(--mono); color: var(--fg); background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; user-select: text;
+    }
+    .fe-pre:focus-visible { outline: 2px solid var(--accent); }
+    .fe-root button:focus-visible, .fe-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    @media (prefers-reduced-motion: reduce) {
+      .fe-e.flow { animation: none; }
+      .fe-drawer, .fe-drawer.open, .fe-eplus, .fe-world.tidy .fe-node, .fe-world.tidy .fe-group { transition: none; }
+    }
+
     /* Settings: secrets / variables / environments */
     .gh-settings { padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
     .gh-set-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -3054,6 +3261,9 @@
       require(['vs/editor/editor.main'], resolve, reject);
     });
   </script>
+  <!-- the flow editor (Settings → Flöden) only defines window.FlowEditor; settingsView mounts it -->
+  <script src="flowCompile.js"></script>
+  <script src="flowEditor.js"></script>
   <!-- settingsView.js first: the scripts below read settings while they load -->
   <script src="settingsView.js"></script>
   <script src="chatView.js"></script>

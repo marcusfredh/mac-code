@@ -192,6 +192,17 @@ defaults to the overlay, and the merge dialog's defaults (merge commit, keep the
   old file to `~/.claude/backups/mac-code/` and stops if the file changed since it was listed.
   Adding a hook, changing its command or matcher, or switching it back on asks once more in a
   Windows dialog that shows the exact command.
+- **Flöden** — the orchestrate flow (and your own flows) as a canvas of phases and steps:
+  agents with an optional per-step model and "run again on findings, max N", plain steps,
+  conditions and "ask me" steps, with the hooks that guard each step. Add a step with + on an
+  arrow, connect by dragging from a card's dot, click a card to edit it, "Städa upp" lays the
+  canvas out again, "Testkör" simulates a trivial/normal/risky task (nothing runs), "Större"
+  uses the whole window. Each flow autosaves to `~/.claude/flows/<name>.json`. "Skriv SKILL.md"
+  compiles it to `~/.claude/skills/<name>/SKILL.md` — only when you ask, after a preview and a
+  Windows confirm that lists the added and removed lines; the old file is backed up, a
+  hand-edited or foreign SKILL.md is flagged before it is overwritten, and text that would run
+  commands when the skill loads (`!`…`` or fenced ```!) is refused. The built-in orchestrate flow
+  carries every rule of the hand-written skill; agent files are never changed by a flow.
 - **GitHub** — open GitHub as an overlay or its own tab; open GitHub links in the app, the browser, or ask (the GitHub tab's
   checkbox is the same setting); whether Ctrl+click flips that; a worktree folder
   template with `{repo}` and `{branch}` (a full path that contains `{branch}` and a

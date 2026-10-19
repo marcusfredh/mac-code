@@ -439,6 +439,27 @@ function copyTreeForBackup(src, dest) {
   if (links.length) fs.writeFileSync(path.join(dest, LINKS_MANIFEST), JSON.stringify(links, null, 2) + '\n', { flag: 'wx' });
 }
 
+// Backups (R10: unique name, never overwrite) under one backup folder. Shared with
+// flowStore.js.
+function createBackups(backupDir, now = () => new Date()) {
+  function backupTarget(basename) {
+    fs.mkdirSync(backupDir, { recursive: true });
+    const st = stamp(now());
+    for (let n = 1; n < 1000; n++) {
+      const p = path.join(backupDir, st + '-' + n + '-' + basename);
+      if (!fs.existsSync(p)) return p;
+    }
+    throw new Error('no free backup name');
+  }
+  function backupFile(src, basename) {
+    if (!fs.existsSync(src)) return null;
+    const dest = backupTarget(basename);
+    fs.writeFileSync(dest, readCapped(src), { flag: 'wx' });
+    return dest;
+  }
+  return { backupTarget, backupFile };
+}
+
 function fail(error, extra) { return Object.assign({ ok: false, error }, extra); }
 function errMsg(err) { return err && err.message ? err.message : String(err); }
 
@@ -511,22 +532,7 @@ function createClaudeConfig({ root, userData, confirm, now = () => new Date() })
   const home = path.dirname(root);
   const ask = typeof confirm === 'function' ? confirm : async () => false;
 
-  // ---- backups (R10: unique name, never overwrite) ----
-  function backupTarget(basename) {
-    fs.mkdirSync(backupDir, { recursive: true });
-    const st = stamp(now());
-    for (let n = 1; n < 1000; n++) {
-      const p = path.join(backupDir, st + '-' + n + '-' + basename);
-      if (!fs.existsSync(p)) return p;
-    }
-    throw new Error('no free backup name');
-  }
-  function backupFile(src, basename) {
-    if (!fs.existsSync(src)) return null;
-    const dest = backupTarget(basename);
-    fs.writeFileSync(dest, readCapped(src), { flag: 'wx' });
-    return dest;
-  }
+  const { backupTarget, backupFile } = createBackups(backupDir, now);
 
   // ---- settings.json ----
   function readSettings() {
@@ -936,5 +942,7 @@ module.exports = {
   MAX_READ_BYTES, KNOWN_EVENTS, MODELS,
   validName, validModel, parseFrontmatter, setFrontmatterField, formatValue,
   agentTemplate, skillTemplate, flattenHooks, applyHookOp, findHookScript, quoteForDisplay,
-  createClaudeConfig
+  createClaudeConfig,
+  // Shared with flowStore.js.
+  UNSAFE_CHARS_RE, sha1, readCapped, revOf, atomicWriteText, childPath, createBackups, errMsg
 };

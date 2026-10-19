@@ -179,6 +179,17 @@ contextBridge.exposeInMainWorld('claudeCfgApi', {
   hookScriptPath: (args) => ipcRenderer.invoke('ccfg:hookScriptPath', args)
 });
 
+// Claude flows (Settings → Flöden). Not `flowApi`: that name is the live /orchestrate
+// flow-state view below.
+contextBridge.exposeInMainWorld('flowCfgApi', {
+  list:       ()     => ipcRenderer.invoke('flowcfg:list'),
+  get:        (args) => ipcRenderer.invoke('flowcfg:get', args),
+  save:       (args) => ipcRenderer.invoke('flowcfg:save', args),
+  delete:     (args) => ipcRenderer.invoke('flowcfg:delete', args),
+  preview:    (args) => ipcRenderer.invoke('flowcfg:preview', args),
+  writeSkill: (args) => ipcRenderer.invoke('flowcfg:writeSkill', args)
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

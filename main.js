@@ -113,6 +113,7 @@ const { parseSessionFile, parseProcessSnapshot, lastTurnEnd, PaneSessionTracker 
 const github = require('./github');
 const appSettings = require('./settings');
 const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
+const { createFlowStore, skillConfirmText, diffText, writeDiffFile } = require('./flowStore');
 
 app.setName('Mac Code');
 errState.nameSet = true;
@@ -2205,3 +2206,68 @@ ccfgHandle('ccfg:hookRemove',     (c, a) => c.hookRemove(a));
 ccfgHandle('ccfg:hookDisable',    (c, a) => c.hookDisable(a));
 ccfgHandle('ccfg:hookEnable',     (c, a) => c.hookEnable(a));
 ccfgHandle('ccfg:hookScriptPath', (c, a) => c.hookScriptPath(a), null);
+
+// ----- IPC: Claude flows (Settings → Flöden) -----
+// ~/.claude/flows/<slug>.json and the skills/<slug>/SKILL.md compiled from them. File
+// logic lives in flowStore.js; here only the main-window gate and the native confirm
+// before SKILL.md is written. Channels are flowcfg:* because flow:* belongs to the live
+// /orchestrate flow-state view (flowState.js).
+let flowStoreInst = null;
+function flowStore() {
+  if (!flowStoreInst) {
+    flowStoreInst = createFlowStore({
+      root: path.join(os.homedir(), '.claude'),
+      userData: app.getPath('userData'),
+      confirm: confirmSkillWrite,
+      claudeConfig: claudeConfigStore()
+    });
+  }
+  return flowStoreInst;
+}
+
+// The SKILL.md text is loaded into every Claude session that uses the skill, so the
+// write is confirmed here in main, never only in the renderer (R7).
+// When the dialog cannot show every changed line, a third button writes the full diff
+// to userData/flow-preview/ and opens it; then the same dialog comes back, until the
+// user picks Skriv or Avbryt.
+async function confirmSkillWrite(info) {
+  const t = skillConfirmText(info);
+  const buttons = t.truncated ? [t.button, 'Visa alla ändringar', 'Avbryt'] : [t.button, 'Avbryt'];
+  const cancel = buttons.length - 1;
+  for (;;) {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const r = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Claude-skill',
+      message: t.message,
+      detail: t.detail,
+      buttons,
+      defaultId: cancel,
+      cancelId: cancel,
+      noLink: true
+    });
+    if (r.response === 0) return true;
+    if (!t.truncated || r.response !== 1) return false;
+    try {
+      const file = writeDiffFile({ userData: app.getPath('userData'), slug: info.slug, text: diffText(info) });
+      const err = await shell.openPath(file);
+      if (err) await dialog.showMessageBox(mainWindow, { type: 'error', title: 'Claude-skill', message: 'Kunde inte öppna diffen', detail: file + '\n' + err, buttons: ['OK'], noLink: true });
+    } catch (err) {
+      await dialog.showMessageBox(mainWindow, { type: 'error', title: 'Claude-skill', message: 'Kunde inte skriva diffen', detail: err && err.message ? err.message : String(err), buttons: ['OK'], noLink: true });
+    }
+  }
+}
+
+function flowHandle(channel, fn) {
+  ipcMain.handle(channel, async (e, args) => {
+    if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+    try { return await fn(flowStore(), args && typeof args === 'object' ? args : {}); }
+    catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
+  });
+}
+flowHandle('flowcfg:list',       (s) => s.flowList());
+flowHandle('flowcfg:get',        (s, a) => s.flowGet(a));
+flowHandle('flowcfg:save',       (s, a) => s.flowSave(a));
+flowHandle('flowcfg:delete',     (s, a) => s.flowDelete(a));
+flowHandle('flowcfg:preview',    (s, a) => s.flowPreview(a));
+flowHandle('flowcfg:writeSkill', (s, a) => s.flowWriteSkill(a));

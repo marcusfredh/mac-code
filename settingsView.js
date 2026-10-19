@@ -288,6 +288,7 @@
         controls: [{ kind: 'text', sec: 'claude', key: 'cliPath', placeholder: 'Automatisk', check: 'cliPath', mono: true }] }
     ] },
     { id: 'claudecfg', label: 'Claude-konfiguration', claudecfg: true },
+    { id: 'claudeflows', label: 'Flöden', claudeflows: true },
     { id: 'github', label: 'GitHub', rows: [
       { label: 'Öppna GitHub som',
         desc: 'Popup lägger GitHub över appen (Esc eller Ctrl+Shift+G stänger). Egen flik öppnar den som en vanlig flik. En redan öppen GitHub-flik ligger kvar tills du stänger den.',
@@ -1154,9 +1155,100 @@
     return [];
   }
 
-  // Closing by the user (outside click, X, Klar) asks first when a form has unsaved input.
+  // ---------- Flöden: the canvas editor (flowEditor.js) ----------
+  // The section holds one search row (shown only while searching) and the editor's host.
+  // Shown on its own, the dialog goes wide and the content stops scrolling (the canvas
+  // fills it). The editor keeps its state across closes, so an edit that could not be
+  // saved is still there when the dialog opens again.
+  const FLOW_ID = 'claudeflows';
+  const flowUi = { host: null, mounted: false, shown: false };
+  function flowEditor() {
+    const f = window.FlowEditor;
+    return f && typeof f.mount === 'function' ? f : null;
+  }
+  function flowFlush() {
+    const f = flowEditor();
+    if (!f || !flowUi.mounted || typeof f.flush !== 'function') return Promise.resolve({ ok: true });
+    try { return Promise.resolve(f.flush()).catch((e) => ({ ok: false, error: (e && e.message) || String(e) })); }
+    catch (e) { return Promise.resolve({ ok: false, error: (e && e.message) || String(e) }); }
+  }
+  function flowMount() {
+    if (!flowUi.host) return;
+    const f = flowEditor();
+    if (!f) {
+      if (!flowUi.host.firstChild) {
+        const n = el('div', 'set-row-note warn', 'Flödesredigeraren saknas i den här versionen av Mac Code.');
+        n.setAttribute('role', 'status');
+        flowUi.host.appendChild(n);
+      }
+      return;
+    }
+    f.mount(flowUi.host, {
+      flowApi: window.flowCfgApi || null,
+      claudeCfgApi: cfgApi(),
+      openInEditor: (p) => {
+        if (typeof window.macOpenInEditor !== 'function') return;
+        close();
+        window.macOpenInEditor(p);
+      },
+      confirm: appConfirm
+    });
+    flowUi.mounted = true;
+  }
+  // Esc inside the editor (drawer, menu, form, big mode) closes that first. -> true when it did.
+  function flowConsumesEsc() {
+    const f = flowEditor();
+    if (!f || !flowUi.mounted || !flowUi.shown || typeof f.consumesEsc !== 'function') return false;
+    try { return !!f.consumesEsc(); } catch (_) { return false; }
+  }
+  // Wide layout + mount when the section is the one on screen (no search).
+  function flowLayout(q) {
+    const on = !q && activeSection === FLOW_ID && isOpen();
+    const was = flowUi.shown;
+    flowUi.shown = on;
+    ui.dlg.classList.toggle('wide', on);
+    ui.content.classList.toggle('flows', on);
+    if (!on) ui.dlg.classList.remove('flow-big');
+    if (flowUi.host) flowUi.host.hidden = !on;
+    if (on && !was) flowMount();
+    if (!on && was) flowFlush();
+  }
+  // Before the dialog closes: the last edit must be saved, or the user says close anyway.
+  async function flowSettleBeforeClose() {
+    if (!flowUi.mounted) return true;
+    const r = await Promise.race([flowFlush(), new Promise((res) => setTimeout(() => res({ timeout: true }), 1500))]);
+    // Still saving after 1.5 s: it carries on in the background.
+    if (!r || r.ok || r.timeout) return true;
+    return appConfirm({
+      title: 'Flödet är inte sparat',
+      message: r.conflict
+        ? 'Flödesfilen ändrades utanför Mac Code. Dina ändringar finns kvar under Flöden tills Mac Code stängs. Stäng ändå?'
+        : 'Ändringen kunde inte sparas: ' + (r.error || 'okänt fel') + '. Stäng ändå?',
+      okLabel: 'Stäng ändå', cancelLabel: 'Stanna'
+    });
+  }
+  function buildFlowRows(sec, box) {
+    const rowEl = el('div', 'set-row');
+    const text = el('div', 'set-row-text');
+    text.appendChild(el('div', 'set-row-label', 'Flöden'));
+    text.appendChild(el('div', 'set-row-desc', 'Claude-flöden som skills, ritade på en canvas: steg, agenter, villkor och hooks.'));
+    rowEl.appendChild(text);
+    const ctl = el('div', 'set-row-ctl');
+    ctl.appendChild(smallBtn('Öppna', () => { ui.search.value = ''; showSection(FLOW_ID); }));
+    rowEl.appendChild(ctl);
+    const host = el('div', 'flow-host');
+    host.hidden = true;
+    box.appendChild(host);
+    flowUi.host = host;
+    return [{ def: { label: 'Flöden' }, sectionId: sec.id, controls: [], el: rowEl, flowSearch: true,
+      search: 'flöden flow flows orchestrate canvas skill steg' }];
+  }
+
+  // Closing by the user (outside click, X, Klar, Esc) asks first when a form has unsaved
+  // input, and waits for the flow editor's last save.
   async function requestClose() {
     if (!(await cfgConfirmDiscard())) return;
+    if (!(await flowSettleBeforeClose())) return;
     close();
   }
 
@@ -1217,8 +1309,9 @@
       box.appendChild(el('h2', 'set-h2', sec.label));
       if (sec.note) box.appendChild(el('div', 'set-section-note', sec.note));
       const rows = sec.keys ? buildKeysRows(sec) : sec.about ? buildAboutRows(sec)
-        : sec.claudecfg ? buildClaudeCfgRows(sec, box) : sec.rows.map((r) => buildRow(r, sec.id));
-      for (const r of rows) { box.appendChild(r.el); ui.rows.push(r); }
+        : sec.claudecfg ? buildClaudeCfgRows(sec, box)
+        : sec.claudeflows ? buildFlowRows(sec, box) : sec.rows.map((r) => buildRow(r, sec.id));
+      for (const r of rows) { if (r.flowSearch) box.insertBefore(r.el, flowUi.host); else box.appendChild(r.el); ui.rows.push(r); }
       content.appendChild(box);
       ui.sections.set(sec.id, { box, rows });
     }
@@ -1269,7 +1362,8 @@
         // form is cancelled next; only then does Esc close the dialog.
         if (document.activeElement === search && search.value) { e.preventDefault(); search.value = ''; applySearch(); }
         else if (cfg.form && cfgVisible()) { e.preventDefault(); cfgCancelForm(); }
-        else { e.preventDefault(); close(); }
+        else if (flowConsumesEsc()) e.preventDefault();
+        else { e.preventDefault(); requestClose(); }
       } else trapTab(e, dlg);
       // The app's own shortcuts (Ctrl+T, Ctrl+Shift+W …) must not act behind the modal.
       e.stopPropagation();
@@ -1292,7 +1386,8 @@
     for (const [id, { box, rows }] of ui.sections) {
       if (!q) {
         box.hidden = id !== activeSection;
-        for (const r of rows) r.el.hidden = false;
+        // The flows search row only shows while searching; the canvas takes its place.
+        for (const r of rows) r.el.hidden = !!r.flowSearch;
         continue;
       }
       let any = false;
@@ -1308,6 +1403,7 @@
       b.classList.toggle('active', on);
       if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     }
+    flowLayout(q);
     ui.empty.hidden = !q || hits > 0;
     ui.empty.textContent = q && !hits ? `Inga inställningar matchar "${ui.search.value.trim()}".` : '';
   }
@@ -1352,8 +1448,8 @@
     ui.search.value = '';
     ui.about && ui.about.say('', null);
     syncAll();
-    showSection(activeSection);
     ui.overlay.classList.add('show');
+    showSection(activeSection);
     ui.search.focus();
     refreshChecks();
     refreshAbout();
@@ -1363,12 +1459,15 @@
 
   function close() {
     if (!isOpen()) return;
+    // A pending flow edit keeps saving in the background; the editor stays mounted.
+    flowFlush();
     // A text field with an unsent edit: commit it the way a blur would.
     const a = document.activeElement;
     if (a && ui.dlg.contains(a) && a.tagName === 'INPUT' && a.type === 'text') a.blur();
     // An unsaved Claude-konfiguration form does not outlive the dialog.
     cfg.form = null;
     ui.overlay.classList.remove('show');
+    flowLayout('');
     const p = prevFocus;
     prevFocus = null;
     restoreFocus(p);
