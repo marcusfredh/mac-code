@@ -9,8 +9,8 @@ const HEX = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
 const RGBA = /^rgba\(\d{1,3}, \d{1,3}, \d{1,3}, 0?\.\d+\)$/;
 const def = APP_THEMES[0];
 
-test('7 themes, ids match the settings enum, default first', () => {
-  assert.strictEqual(APP_THEMES.length, 7);
+test('8 themes, ids match the settings enum, default first', () => {
+  assert.strictEqual(APP_THEMES.length, 8);
   assert.deepStrictEqual(APP_THEMES.map((t) => t.id), SCHEMA.general.appTheme.values);
   assert.strictEqual(def.id, SCHEMA.general.appTheme.def);
 });

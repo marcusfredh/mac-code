@@ -105,6 +105,23 @@
       brightYellow: '#f8d18a', brightBlue: '#9aa6ff', brightMagenta: '#dba6ff', brightCyan: '#7cdcf0',
       brightWhite: '#f0f1fb'
     }
+  },
+  {
+    // Spiris: neutral warm charcoal (from the site's #1d1d1e / #f5f3f0 neutrals) so nothing
+    // purple sits behind text. Coral #ff5e57 (softened) is the accent, lavender (#d5b3ff family)
+    // the secondary purple, and a muted brand-purple only for selections.
+    id: 'spiris', name: 'Spiris', radius: 8, fgRgb: '245,243,240', ink: '#2b0806',
+    icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M8 8.2a1 1 0 1 1 1-1 2.2 2.2 0 0 1-2.2 2.2A3.4 3.4 0 0 1 3.4 6a4.6 4.6 0 0 1 4.6-4.6A5.8 5.8 0 0 1 13.8 7.2a6.6 6.6 0 0 1-6.6 6.6"/></svg>',
+    ui: { bg: '#141413', chrome: '#1b1a19', panel: '#1e1d1c', tabActive: '#292826', card: '#171615', cardHdr: '#1b1a19', composer: '#201f1e',
+      accent: '#ff6f66', accentHi: '#ff9690', green: '#5fcf9b', cyan: '#7cc4dc', amber: '#f2c46d', purple: '#c9aaff', red: '#ff7aa8' },
+    term: {
+      background: '#141413', foreground: '#e6e2dc', cursor: '#ff9690', cursorAccent: '#141413',
+      selectionBackground: '#3a2a52', black: '#252322', red: '#ff6f66', green: '#5fcf9b',
+      yellow: '#f2c46d', blue: '#8aa4f0', magenta: '#c9aaff', cyan: '#6fc0d6',
+      white: '#d8d3cc', brightBlack: '#6e6a65', brightRed: '#ff9690', brightGreen: '#88dfb6',
+      brightYellow: '#f7d692', brightBlue: '#aec0f6', brightMagenta: '#dcc7ff', brightCyan: '#97d4e6',
+      brightWhite: '#f5f3f0'
+    }
   }
   ];
 

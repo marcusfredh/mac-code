@@ -237,7 +237,7 @@
         desc: 'Färger, hörn och ikon i hela appen. Terminalen följer med om Terminal → Färgschema är "Följ apptema".',
         controls: [{ kind: 'select', sec: 'general', key: 'appTheme', options: [
           opt('default', 'Nuvarande'), opt('fjord', 'Fjord'), opt('heather', 'Ljung'), opt('deep', 'Djuphav'),
-          opt('graphite', 'Grafit'), opt('contrast', 'Kontrast'), opt('cobalt', 'Kobolt')] }] }
+          opt('graphite', 'Grafit'), opt('contrast', 'Kontrast'), opt('cobalt', 'Kobolt'), opt('spiris', 'Spiris')] }] }
     ] },
     { id: 'terminal', label: 'Terminal', rows: [
       { label: 'Typsnitt',

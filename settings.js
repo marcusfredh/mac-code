@@ -18,7 +18,7 @@ const SCHEMA = {
     shell:        { type: 'enum', values: ['pwsh', 'powershell'], def: 'pwsh' },
     startDir:     { type: 'string', def: '', check: (s) => s === '' || isDriveAbsolutePath(s) },
     confirmClose: { type: 'bool', def: false },
-    appTheme:     { type: 'enum', values: ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt'], def: 'default' }
+    appTheme:     { type: 'enum', values: ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt', 'spiris'], def: 'default' }
   },
   terminal: {
     fontFamily:      { type: 'enum', values: ['Cascadia Code', 'Consolas', 'JetBrains Mono'], def: 'Cascadia Code' },

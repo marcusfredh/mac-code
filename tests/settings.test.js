@@ -255,9 +255,9 @@ test('github open/merge settings: valid values kept, invalid fall back', () => {
   assert.strictEqual(bad.github.deleteBranchOnMerge, false);
 });
 
-test('general.appTheme: defaults to default, accepts the 7 themes, invalid falls back', () => {
+test('general.appTheme: defaults to default, accepts the 8 themes, invalid falls back', () => {
   assert.strictEqual(DEFAULTS.general.appTheme, 'default');
-  for (const id of ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt']) {
+  for (const id of ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt', 'spiris']) {
     assert.strictEqual(validate({ general: { appTheme: id } }).general.appTheme, id);
   }
   assert.strictEqual(validate({ general: { appTheme: 'neon' } }).general.appTheme, 'default');
