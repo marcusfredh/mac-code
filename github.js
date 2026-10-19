@@ -15,7 +15,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { resolveWorktreePath, parseWorktreeList } = require('./settings');
-const { buildMergeArgs } = require('./ghArgs');
+const { buildMergeArgs, buildCopilotReviewArgs } = require('./ghArgs');
 const { normalizeTimeline, copilotReviewState, normalizeReviewThreads, attachReviewThreads } = require('./ghTimeline');
 
 const GH_TIMEOUT_MS = 30000;
@@ -450,6 +450,21 @@ function register(ipcMain, getMainWindow, getSettings) {
     if (r.missing) return { ok: false, error: 'GitHub CLI (gh) is not installed' };
     if (r.code !== 0) return { ok: false, error: firstErrorLine(r.stderr || r.stdout) };
     return { ok: true, output: (r.stdout || r.stderr || '').trim() };
+  });
+
+  // Request a Copilot review (gh pr edit --add-reviewer @copilot). Args are validated by buildCopilotReviewArgs.
+  // Runs in the home directory like gh:merge; the renderer re-fetches gh:item to see the result.
+  ipcMain.handle('gh:requestCopilotReview', async (e, args) => {
+    const win = getMainWindow && getMainWindow();
+    if (!win || win.isDestroyed() || e.sender !== win.webContents ||
+        (e.senderFrame && e.senderFrame !== win.webContents.mainFrame)) return { ok: false, error: 'not allowed' };
+    let argv;
+    try { argv = buildCopilotReviewArgs(args || {}); }
+    catch (err) { return { ok: false, error: err.message }; }
+    const r = await runGh(argv, { cwd: os.homedir() });
+    if (r.missing) return { ok: false, error: 'GitHub CLI (gh) is not installed' };
+    if (r.code !== 0) return { ok: false, error: firstErrorLine(r.stderr || r.stdout) };
+    return { ok: true };
   });
 
   // PR for the branch checked out in `cwd` (gh resolves the branch and its upstream).

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { buildMergeArgs } = require('../ghArgs');
+const { buildMergeArgs, buildCopilotReviewArgs } = require('../ghArgs');
 
 const SHA = 'a'.repeat(40);
 const base = { repo: 'octo/repo.js', number: 12, method: 'squash', matchHead: SHA };
@@ -46,4 +46,19 @@ test('rejects bad input', () => {
     assert.throws(() => buildMergeArgs({ ...base, matchHead }), /head/, String(matchHead));
   }
   assert.throws(() => buildMergeArgs(), /repo/);
+});
+
+test('copilot review args: valid input', () => {
+  assert.deepStrictEqual(buildCopilotReviewArgs({ repo: 'octo/repo.js', number: 12 }),
+    ['pr', 'edit', '12', '--repo', 'octo/repo.js', '--add-reviewer', '@copilot']);
+  assert.strictEqual(buildCopilotReviewArgs({ repo: 'a/b', number: '7' })[2], '7');
+});
+
+test('copilot review args: bad repo and number throw', () => {
+  for (const repo of ['-x/y', 'a/b c', 'nope', '', null, undefined]) {
+    assert.throws(() => buildCopilotReviewArgs({ repo, number: 1 }), /bad repo/);
+  }
+  for (const number of [0, -1, '1;x', '', null, 1e9]) {
+    assert.throws(() => buildCopilotReviewArgs({ repo: 'a/b', number }), /bad number/);
+  }
 });

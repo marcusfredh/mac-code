@@ -35,4 +35,12 @@ function buildMergeArgs({ repo, number, method, deleteBranch, auto, disableAuto,
   return args;
 }
 
-module.exports = { buildMergeArgs };
+// Ask Copilot to review a PR (gh pr edit --add-reviewer @copilot).
+function buildCopilotReviewArgs({ repo, number } = {}) {
+  if (typeof repo !== 'string' || !REPO_RE.test(repo) || repo.startsWith('-')) throw new Error('bad repo');
+  const n = Number(number);
+  if (number === '' || number == null || !Number.isInteger(n) || n <= 0 || n >= 1e9) throw new Error('bad number');
+  return ['pr', 'edit', String(n), '--repo', repo, '--add-reviewer', '@copilot'];
+}
+
+module.exports = { buildMergeArgs, buildCopilotReviewArgs };

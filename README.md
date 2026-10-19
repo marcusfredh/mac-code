@@ -142,7 +142,9 @@ GitHub dashboard (PRs, issues, Actions, repo settings; data via the `gh` CLI).
 
 A PR's timeline shows inline review comments (Copilot's per-file comments too) inside
 their review's card, one thread per `file:line` with its replies. Resolved threads start
-collapsed; your own unsubmitted draft comments are not shown.
+collapsed; your own unsubmitted draft comments are not shown. An open PR without a Copilot
+review request shows "Request Copilot review" (for repos where Copilot doesn't review
+automatically); it runs `gh pr edit --add-reviewer @copilot`.
 
 #### Merging pull requests
 An open PR shows **Merge…** when you have write access to the repo. The dialog lists the

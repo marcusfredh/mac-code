@@ -231,6 +231,8 @@
       active: false, disposed: false
     };
     let listSeq = 0, detailSeq = 0, pollTimer = null;
+    const copilotNotes = new Map();        // repo#n -> { kind:'fail'|'warn', text, at } shown under the actions
+    const copilotPending = new Set();      // repo#n with a Copilot review request in flight
     let mergeDlg = null;                   // { key, update(d) } while the merge dialog is open
     let unknownRetryKey = null;            // repo#n already re-fetched for UNKNOWN mergeability
     let unknownRetryTimer = null;          // that re-fetch, while it is still pending
@@ -1008,7 +1010,19 @@
             'New branch + worktree for this issue, then start Claude on it'));
         }
       }
+      if (prOpen && window.ghApi && window.ghApi.requestCopilotReview &&
+          ['ADMIN', 'MAINTAIN', 'WRITE', 'TRIAGE'].includes(repoInfo(d).viewerPermission) && !copilotRequested(d)) {
+        const pending = copilotPending.has(d.repo + '#' + d.number);
+        const cb = actionBtn('copilot', pending ? 'Requesting…' : copilotReviewed(d) ? 'Re-request Copilot review' : 'Request Copilot review',
+          () => requestCopilot(d, cb), 'Ask Copilot to review this pull request');
+        cb.disabled = pending;
+        actions.appendChild(cb);
+      }
       head.appendChild(actions);
+      const noteKey = d.repo + '#' + d.number;
+      const note = copilotNotes.get(noteKey);
+      if (note && Date.now() - note.at < 5 * 60 * 1000 && !copilotRequested(d)) head.appendChild(el('div', 'gh-d-note ' + note.kind, note.text));
+      else if (note) copilotNotes.delete(noteKey);
       detailEl.appendChild(head);
 
       // Facts: labels, assignees, review, diff.
@@ -1253,6 +1267,31 @@
       UNKNOWN: ['pending', 'GitHub is still working out whether this can be merged…']
     };
 
+    function copilotRequested(d) {
+      if (d.copilotReview === 'requested' || d.copilotReview === 'reviewing') return true;
+      return ((d.reviewRequests && d.reviewRequests.nodes) || []).some((n) => n && n.requestedReviewer && /^copilot/i.test(String(n.requestedReviewer.login || '')));
+    }
+    function copilotReviewed(d) {
+      return Array.isArray(d.timeline) && d.timeline.some((ev) => ev.kind === 'review' && ev.authorIsBot && /^copilot/i.test(String(ev.author || '')));
+    }
+    async function requestCopilot(d, btn) {
+      const key = d.repo + '#' + d.number;
+      if (copilotPending.has(key)) return;
+      copilotPending.add(key);
+      btn.disabled = true;
+      const lab = btn.querySelector('span'); if (lab) lab.textContent = 'Requesting…';
+      let r, f;
+      try {
+        try { r = await window.ghApi.requestCopilotReview({ repo: d.repo, number: d.number }); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+        f = await fetchItem(d.repo, d.number);
+      } finally { copilotPending.delete(key); }
+      const fresh = f && f.ok ? f.data : null;
+      if (st.disposed) return;
+      if (!r || !r.ok) copilotNotes.set(key, { kind: 'fail', text: 'Could not request a Copilot review: ' + ((r && r.error) || 'unknown error'), at: Date.now() });
+      else if (fresh && !copilotRequested(fresh)) copilotNotes.set(key, { kind: 'warn', text: 'gh accepted the request, but GitHub does not show Copilot as a reviewer. Is Copilot code review available for this repo and your account?', at: Date.now() });
+      else copilotNotes.delete(key);
+      applyFresh(d.repo, d.number, fresh);
+    }
     function repoInfo(d) { return (d && d.repoInfo) || {}; }
     function canMerge(d) {
       return !!(window.ghApi && window.ghApi.merge) && ['ADMIN', 'MAINTAIN', 'WRITE'].includes(repoInfo(d).viewerPermission);
@@ -1318,7 +1357,8 @@
     function applyFresh(repo, number, fresh) {
       if (st.disposed) return;
       if (st.detail && st.detail.repo === repo && st.detail.number === number) {
-        if (fresh) { st.detailData = fresh; renderDetail(fresh); }
+        // detailSeq++: a poll fetch started before the write must not render over this.
+        if (fresh) { detailSeq++; st.detailData = fresh; renderDetail(fresh); }
         else openDetail(repo, number);
       }
       loadList(true);
