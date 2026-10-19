@@ -146,6 +146,25 @@ contextBridge.exposeInMainWorld('settingsApi', {
   }
 });
 
+// Global Claude agents / skills / hooks (~/.claude). Every call takes one args object;
+// see the ccfg:* handlers in main.js.
+contextBridge.exposeInMainWorld('claudeCfgApi', {
+  list:           ()     => ipcRenderer.invoke('ccfg:list'),
+  agentSetModel:  (args) => ipcRenderer.invoke('ccfg:agentSetModel', args),
+  agentCreate:    (args) => ipcRenderer.invoke('ccfg:agentCreate', args),
+  agentDelete:    (args) => ipcRenderer.invoke('ccfg:agentDelete', args),
+  agentPath:      (args) => ipcRenderer.invoke('ccfg:agentPath', args),
+  skillCreate:    (args) => ipcRenderer.invoke('ccfg:skillCreate', args),
+  skillDelete:    (args) => ipcRenderer.invoke('ccfg:skillDelete', args),
+  skillPath:      (args) => ipcRenderer.invoke('ccfg:skillPath', args),
+  hookAdd:        (args) => ipcRenderer.invoke('ccfg:hookAdd', args),
+  hookUpdate:     (args) => ipcRenderer.invoke('ccfg:hookUpdate', args),
+  hookRemove:     (args) => ipcRenderer.invoke('ccfg:hookRemove', args),
+  hookDisable:    (args) => ipcRenderer.invoke('ccfg:hookDisable', args),
+  hookEnable:     (args) => ipcRenderer.invoke('ccfg:hookEnable', args),
+  hookScriptPath: (args) => ipcRenderer.invoke('ccfg:hookScriptPath', args)
+});
+
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),

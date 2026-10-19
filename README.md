@@ -183,6 +183,15 @@ defaults to the overlay, and the merge dialog's defaults (merge commit, keep the
   meter, and a custom path to `claude` — used by chat panes and the app's own `claude`
   commands (MCP), not by terminal tabs; it must be a full path to an existing
   `claude.exe` / `.cmd` / `.bat`, otherwise the normal lookup is used.
+- **Claude-konfiguration** — the global Claude Code agents (`~/.claude/agents`), skills
+  (`~/.claude/skills`, linked skills are shown as such and deleting one only removes the link)
+  and hooks (`hooks` in `~/.claude/settings.json`). Pick an agent's model, open any agent, skill
+  or hook script in the editor, create and delete agents and skills, and add, edit, delete or
+  switch hooks on and off (a switched-off hook is kept in Mac Code's own
+  `claude-disabled-hooks.json` until it is switched on again). Every write first backs up the
+  old file to `~/.claude/backups/mac-code/` and stops if the file changed since it was listed.
+  Adding a hook, changing its command or matcher, or switching it back on asks once more in a
+  Windows dialog that shows the exact command.
 - **GitHub** — open GitHub as an overlay or its own tab; open GitHub links in the app, the browser, or ask (the GitHub tab's
   checkbox is the same setting); whether Ctrl+click flips that; a worktree folder
   template with `{repo}` and `{branch}` (a full path that contains `{branch}` and a

@@ -2240,6 +2240,37 @@
     .set-row-note.warn { color: var(--amber); }
     .set-row-note.ok { color: var(--green); }
     .set-row-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    /* Claude-konfiguration (agents / skills / hooks in ~/.claude) */
+    .set-btn.sm { height: 28px; padding: 0 10px; font-size: 12.5px; }
+    .cfg-group { display: flex; align-items: flex-end; gap: 24px; padding: 22px 0 8px; border-bottom: 1px solid var(--line); }
+    .cfg-group[hidden], .cfg-event[hidden], .cfg-form[hidden] { display: none; }
+    .cfg-h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--fg-strong); }
+    .cfg-event {
+      padding: 14px 0 2px; font-family: var(--mono); font-size: 12px; color: var(--fg-dim);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .cfg-item { padding: 10px 0; gap: 16px; }
+    .cfg-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cfg-k { color: var(--fg-muted); font-size: 12px; }
+    .cfg-badge {
+      display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 4px; vertical-align: 1px;
+      font-size: 11px; font-weight: normal; color: var(--fg-dim); background: var(--fill-hover); border: 1px solid var(--line);
+    }
+    .cfg-cmd { margin-top: 3px; font-family: var(--mono); font-size: 12px; color: var(--fg); user-select: text; }
+    .cfg-off .set-row-text { opacity: 0.55; }
+    .cfg-item .set-switch:disabled { opacity: 0.4; }
+    .cfg-model { width: 110px; height: 28px; }
+    .cfg-form {
+      display: flex; flex-direction: column; gap: 10px; margin: 10px 0; padding: 14px 16px;
+      background: var(--card); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px;
+    }
+    .cfg-form-title { font-size: 13.5px; font-weight: 600; color: var(--fg-strong); }
+    .cfg-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+    .cfg-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .cfg-field.wide { grid-column: 1 / -1; }
+    .cfg-field-label { font-size: 12px; color: var(--fg-dim); }
+    .cfg-field .set-input, .cfg-field .set-select { width: 100%; }
+    .cfg-form-foot { display: flex; justify-content: flex-end; gap: 8px; }
     .set-path {
       margin-top: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--fg-muted);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text;

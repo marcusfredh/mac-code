@@ -12,6 +12,7 @@ const { autoAllowsCommand } = require('./autoMode');
 const { parseSessionFile, parseProcessSnapshot, lastTurnEnd, PaneSessionTracker } = require('./claudeSessions');
 const github = require('./github');
 const appSettings = require('./settings');
+const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
 
 app.setName('Mac Code');
 // Must equal build.appId: the installer's Start-menu shortcut carries that id, and
@@ -1964,3 +1965,70 @@ ipcMain.handle('settings:import', async (e) => {
   return { ok: true, settings: commitSettings(settings), skipped };
 });
 ipcMain.handle('app:version', () => app.getVersion());
+
+// ----- IPC: Claude config -----
+// The global Claude Code agents, skills and settings.json hooks under ~/.claude. All
+// file logic (path building, backups, revs/conflicts, the disabled-hook store) lives in
+// claudeConfig.js; here only the main-window gate and the native confirm. The renderer
+// never sends a path — only names, ids and the revs it was given by ccfg:list.
+let claudeCfg = null;
+function claudeConfigStore() {
+  if (!claudeCfg) {
+    claudeCfg = createClaudeConfig({
+      root: path.join(os.homedir(), '.claude'),
+      userData: app.getPath('userData'),
+      confirm: confirmHookCommand
+    });
+  }
+  return claudeCfg;
+}
+
+// A hook command runs as code on every Claude session, so adding one, changing its
+// command or re-enabling it is confirmed here in main, never only in the renderer.
+const HOOK_CONFIRM = {
+  add:    { button: 'Lägg till', message: 'Lägga till en Claude-hook?' },
+  update: { button: 'Spara',     message: 'Ändra kommandot för en Claude-hook?' },
+  enable: { button: 'Aktivera',  message: 'Aktivera en Claude-hook igen?' }
+};
+async function confirmHookCommand({ action, event, matcher, command }) {
+  const c = HOOK_CONFIRM[action];
+  if (!c || !mainWindow || mainWindow.isDestroyed()) return false;
+  const r = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: 'Claude-hook',
+    message: c.message,
+    // JSON-quoted so control / invisible characters show as escapes, never as layout.
+    detail: 'Kommandot körs vid varje Claude-session.\n\n' +
+      'Event: ' + quoteForDisplay(event) + '\n' +
+      'Matcher: ' + quoteForDisplay(matcher || '') + (matcher ? '' : ' (alla)') + '\n' +
+      'Kommando:\n' + quoteForDisplay(command),
+    buttons: [c.button, 'Avbryt'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return r.response === 0;
+}
+
+// Path lookups answer null when refused; everything else { ok:false, error }.
+function ccfgHandle(channel, fn, denied = { ok: false, error: 'not allowed' }) {
+  ipcMain.handle(channel, async (e, args) => {
+    if (!fromMainWindow(e)) return denied;
+    try { return await fn(claudeConfigStore(), args && typeof args === 'object' ? args : {}); }
+    catch (err) { return denied === null ? null : { ok: false, error: err && err.message ? err.message : String(err) }; }
+  });
+}
+ccfgHandle('ccfg:list',           (c) => c.list());
+ccfgHandle('ccfg:agentSetModel',  (c, a) => c.agentSetModel(a));
+ccfgHandle('ccfg:agentCreate',    (c, a) => c.agentCreate(a));
+ccfgHandle('ccfg:agentDelete',    (c, a) => c.agentDelete(a));
+ccfgHandle('ccfg:agentPath',      (c, a) => c.agentPath(a), null);
+ccfgHandle('ccfg:skillCreate',    (c, a) => c.skillCreate(a));
+ccfgHandle('ccfg:skillDelete',    (c, a) => c.skillDelete(a));
+ccfgHandle('ccfg:skillPath',      (c, a) => c.skillPath(a), null);
+ccfgHandle('ccfg:hookAdd',        (c, a) => c.hookAdd(a));
+ccfgHandle('ccfg:hookUpdate',     (c, a) => c.hookUpdate(a));
+ccfgHandle('ccfg:hookRemove',     (c, a) => c.hookRemove(a));
+ccfgHandle('ccfg:hookDisable',    (c, a) => c.hookDisable(a));
+ccfgHandle('ccfg:hookEnable',     (c, a) => c.hookEnable(a));
+ccfgHandle('ccfg:hookScriptPath', (c, a) => c.hookScriptPath(a), null);
