@@ -227,9 +227,24 @@ function hardenGitHubSession() {
   ses.setPermissionCheckHandler((_wc, permission) => GH_ALLOWED_PERMISSIONS.has(permission));
 }
 
-function openGitHubWindow(url, parent) {
+// Signed out, GitHub answers private pages with a 404. Send a signed-out window through
+// the login page first; return_to brings it back to the page once signed in.
+async function withLogin(url) {
+  let p;
+  try { p = new URL(url); } catch (_) { return url; }
+  if (p.hostname.toLowerCase() !== 'github.com' || isGitHubAuthUrl(url) ||
+      /^\/(signup|join|password_reset)(\/|$)/i.test(p.pathname)) return url;
+  try {
+    const c = await session.fromPartition('persist:github').cookies.get({ url: 'https://github.com', name: 'logged_in' });
+    if (c.some((x) => x.value === 'yes')) return url;
+  } catch (_) { return url; }
+  return 'https://github.com/login?return_to=' + encodeURIComponent(p.pathname.replace(/^\/+/, '/') + p.search + p.hash);
+}
+
+async function openGitHubWindow(url, parent) {
   if (!isHttpUrl(url)) return { ok: false, error: 'not a web URL' };
   if (!isGitHubHost(url)) { shell.openExternal(url); return { ok: true, external: true }; }
+  url = await withLogin(url);
   if (ghWindow && !ghWindow.isDestroyed()) {
     ghWindow.loadURL(url);
     if (ghWindow.isMinimized()) ghWindow.restore();
