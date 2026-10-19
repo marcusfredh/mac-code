@@ -37,7 +37,7 @@ function normalizeOne(e) {
       const state = String(e.state || '').toUpperCase();
       if (state === 'PENDING') return null;
       const u = obj(e.user);
-      return { kind: 'review', at: str(e.submitted_at), actor, author: login(u), authorIsBot: u.type === 'Bot',
+      return { kind: 'review', id: typeof e.id === 'number' ? e.id : null, at: str(e.submitted_at), actor, author: login(u), authorIsBot: u.type === 'Bot',
         state, bodyHTML: str(e.body_html), url: ghUrl(e.html_url) };
     }
     case 'committed': {
@@ -119,4 +119,56 @@ function copilotReviewState(timeline, now = Date.now()) {
   return state;
 }
 
-module.exports = { normalizeTimeline, copilotReviewState };
+// GraphQL reviewThreads nodes -> whitelisted threads (inline file comments).
+function normalizeReviewThreads(nodes) {
+  const out = [];
+  const num = (v) => (typeof v === 'number' ? v : null);
+  for (const t of Array.isArray(nodes) ? nodes : []) {
+    if (!t || typeof t !== 'object') continue;
+    // PENDING: the viewer's own unsubmitted draft comments, not posted yet.
+    const cn = obj(t.comments), list = Array.isArray(cn.nodes) ? cn.nodes.filter((c) => c && typeof c === 'object' && c.state !== 'PENDING') : [];
+    if (!list.length) continue;
+    const comments = list.map((c) => {
+      const a = obj(c.author);
+      return { author: str(a.login), authorIsBot: a.__typename === 'Bot', at: str(c.createdAt), bodyHTML: str(c.bodyHTML), url: ghUrl(c.url) };
+    });
+    const total = num(cn.totalCount);
+    out.push({ path: str(t.path), line: t.line != null ? num(t.line) : num(t.originalLine), fileLevel: t.subjectType === 'FILE',
+      outdated: !!t.isOutdated, resolved: !!t.isResolved, reviewId: num(obj(list[0].pullRequestReview).databaseId),
+      more: total == null ? 0 : Math.max(0, total - list.length), comments });
+  }
+  return out;
+}
+
+// New timeline with threads attached to their review (ev.threads); threads whose review is
+// not in the timeline become one synthetic review per reviewId, placed by time without re-sorting.
+function attachReviewThreads(timeline, threads) {
+  if (!Array.isArray(timeline)) return timeline;
+  const out = timeline.slice(), byId = new Map();
+  out.forEach((ev, i) => { if (ev && ev.kind === 'review' && typeof ev.id === 'number') byId.set(ev.id, i); });
+  const copied = new Set(), orphans = [], orphanById = new Map();
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (!t || !Array.isArray(t.comments) || !t.comments.length) continue;
+    if (t.reviewId != null && byId.has(t.reviewId)) {
+      const i = byId.get(t.reviewId);
+      if (!copied.has(i)) { out[i] = Object.assign({}, out[i], { threads: [] }); copied.add(i); }
+      out[i].threads.push(t);
+    } else if (t.reviewId != null && orphanById.has(t.reviewId)) orphanById.get(t.reviewId).threads.push(t);
+    else {
+      const c = t.comments[0];
+      const ev = { kind: 'review', state: 'COMMENTED', actor: null, author: c.author, authorIsBot: c.authorIsBot,
+        at: c.at, bodyHTML: null, url: null, threads: [t] };
+      orphans.push(ev);
+      if (t.reviewId != null) orphanById.set(t.reviewId, ev);
+    }
+  }
+  for (const ev of orphans) {
+    const at = Date.parse(ev.at);
+    let pos = Number.isNaN(at) ? -1 : out.findIndex((x) => x && Date.parse(x.at) > at);
+    if (pos < 0) pos = out.length;
+    out.splice(pos, 0, ev);
+  }
+  return out;
+}
+
+module.exports = { normalizeTimeline, copilotReviewState, normalizeReviewThreads, attachReviewThreads };

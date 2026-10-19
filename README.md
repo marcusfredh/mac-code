@@ -140,6 +140,10 @@ GitHub dashboard (PRs, issues, Actions, repo settings; data via the `gh` CLI).
   In overlay mode a GitHub tab saved by an earlier session is not recreated; its state
   becomes the overlay's.
 
+A PR's timeline shows inline review comments (Copilot's per-file comments too) inside
+their review's card, one thread per `file:line` with its replies. Resolved threads start
+collapsed; your own unsubmitted draft comments are not shown.
+
 #### Merging pull requests
 An open PR shows **Merge…** when you have write access to the repo. The dialog lists the
 checks, the review decision and GitHub's merge state in plain words, and offers:

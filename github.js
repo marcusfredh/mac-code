@@ -16,7 +16,7 @@ const fs = require('fs');
 const os = require('os');
 const { resolveWorktreePath, parseWorktreeList } = require('./settings');
 const { buildMergeArgs } = require('./ghArgs');
-const { normalizeTimeline, copilotReviewState } = require('./ghTimeline');
+const { normalizeTimeline, copilotReviewState, normalizeReviewThreads, attachReviewThreads } = require('./ghTimeline');
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -168,6 +168,8 @@ query($owner: String!, $name: String!, $n: Int!) {
         reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Team { name } } } }
         comments(last: 60) { totalCount nodes { author { login } createdAt bodyHTML url } }
         reviews(last: 40) { nodes { author { login } state createdAt bodyHTML url } }
+        reviewThreads(last: 100) { totalCount nodes { isResolved isOutdated path line originalLine subjectType
+          comments(first: 50) { totalCount nodes { databaseId state author { login __typename } createdAt bodyHTML url pullRequestReview { databaseId } } } } }
         files(first: 100) { totalCount nodes { path additions deletions changeType } }
         commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 60) { nodes {
           __typename
@@ -411,8 +413,11 @@ function register(ipcMain, getMainWindow, getSettings) {
     try {
       if (!tl.ok) throw new Error(tl.error);
       item.timeline = normalizeTimeline(tl.data);
+      // Inline review comments (e.g. Copilot's per-file ones) hang off their review.
+      item.timeline = attachReviewThreads(item.timeline, normalizeReviewThreads(item.reviewThreads && item.reviewThreads.nodes));
       item.copilotReview = copilotReviewState(item.timeline);
     } catch (_) { item.timeline = null; item.copilotReview = null; }
+    delete item.reviewThreads;
     // Repository-level merge info rides along on the item; the repository object itself
     // is not returned.
     const repoNode = r.data.data.repository;

@@ -2061,7 +2061,17 @@
     .gh-comment > .gh-md { padding: 10px 12px; }
     .gh-comment.review.approved { border-color: rgba(63, 185, 80, 0.35); }
     .gh-comment.review.changes_requested { border-color: rgba(248, 81, 73, 0.35); }
-    .gh-comment.review:not(:has(.gh-md)) .gh-comment-hdr { border-bottom: 0; }
+    .gh-comment.review:not(:has(.gh-md)):not(:has(.gh-thread)) .gh-comment-hdr { border-bottom: 0; }
+
+    .gh-thread { border: 1px solid var(--line); border-radius: 6px; margin: 10px 12px; overflow: hidden; }
+    .gh-thread-hdr { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 10px; background: var(--card-hdr); cursor: pointer; color: var(--fg-dim); }
+    .gh-thread-hdr:hover { color: var(--fg-strong); }
+    .gh-thread-hdr .gh-mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gh-thread.collapsed > :not(.gh-thread-hdr) { display: none; }
+    .gh-thread-c { padding: 8px 10px; border-top: 1px solid var(--line); }
+    .gh-thread-c .gh-comment-hdr { padding: 0 0 4px; background: none; border: 0; }
+    .gh-thread-c .gh-md { padding: 0; font-size: 12.5px; }
+    .gh-thread > .gh-more { padding: 6px 10px; border-top: 1px solid var(--line); }
 
     .gh-btn.primary { background: var(--accent); border-color: transparent; color: #06212f; font-weight: 600; }
     .gh-btn.primary:hover:not(:disabled) { background: var(--accent-hi); color: #06212f; }

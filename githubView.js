@@ -777,7 +777,44 @@
         renderBody(b, ev.bodyHTML);
         card.appendChild(b);
       }
+      for (const th of Array.isArray(ev.threads) ? ev.threads : []) card.appendChild(threadBlock(th));
       return card;
+    }
+
+    // One inline review thread: collapsible file header, then its comments.
+    // Threads the user opened or closed by hand, keyed by first comment URL, so a poll
+    // refresh doesn't snap them back to the default.
+    const threadToggled = new Map();
+    function threadBlock(th) {
+      const key = th.comments && th.comments[0] && th.comments[0].url;
+      const collapsed = key && threadToggled.has(key) ? threadToggled.get(key) : !!th.resolved;
+      const box = el('div', 'gh-thread' + (collapsed ? ' collapsed' : ''));
+      const hdr = el('div', 'gh-thread-hdr'); hdr.tabIndex = 0; hdr.setAttribute('role', 'button');
+      hdr.appendChild(el('span', 'gh-mono', String(th.path || '') + (!th.fileLevel && th.line != null ? ':' + th.line : '')));
+      if (th.outdated) hdr.appendChild(el('span', 'gh-badge', 'outdated'));
+      if (th.resolved) hdr.appendChild(el('span', 'gh-badge ok', 'resolved'));
+      const toggle = () => {
+        const c = box.classList.toggle('collapsed');
+        if (key) threadToggled.set(key, c);
+        hdr.setAttribute('aria-expanded', String(!c));
+      };
+      hdr.setAttribute('aria-expanded', String(!collapsed));
+      hdr.addEventListener('click', toggle);
+      hdr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+      box.appendChild(hdr);
+      for (const c of Array.isArray(th.comments) ? th.comments : []) {
+        const row = el('div', 'gh-thread-c');
+        const h = el('div', 'gh-comment-hdr');
+        h.appendChild(el('strong', null, c.author || 'ghost'));
+        const t = el('span', 'gh-comment-time', ago(c.at));
+        if (c.url) { t.classList.add('link'); t.title = 'Open comment'; t.addEventListener('click', (e) => openLink(c.url, e)); }
+        h.appendChild(t);
+        row.appendChild(h);
+        if (String(c.bodyHTML || '').trim()) { const b = el('div', 'gh-md'); renderBody(b, c.bodyHTML); row.appendChild(b); }
+        box.appendChild(row);
+      }
+      if (th.more > 0) box.appendChild(el('div', 'gh-more', '+' + th.more + ' more repl' + (th.more === 1 ? 'y' : 'ies') + ' on github.com'));
+      return box;
     }
 
     const isCopilotName = (n) => /^copilot/i.test(String(n || ''));
@@ -873,7 +910,7 @@
       for (let i = 0; i < tl.length; i++) {
         const ev = tl[i];
         if (!ev || typeof ev !== 'object') continue;
-        if (ev.kind === 'comment' || (ev.kind === 'review' && String(ev.bodyHTML || '').trim())) {
+        if (ev.kind === 'comment' || (ev.kind === 'review' && (String(ev.bodyHTML || '').trim() || (Array.isArray(ev.threads) && ev.threads.length)))) {
           box.appendChild(commentCard(ev, ev.at)); n++;
         } else if (ev.kind === 'commit') {
           const group = [];
