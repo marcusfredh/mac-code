@@ -2113,6 +2113,34 @@
     .gh-import-status { font-size: 11px; }
     .gh-import-status.ok { color: var(--gh-open); } .gh-import-status.fail { color: var(--gh-closed); }
 
+    /* PR / issue timeline */
+    .gh-tl { position: relative; padding-left: 26px; }
+    .gh-tl::before { content: ''; position: absolute; left: 9px; top: 4px; bottom: 4px; width: 2px; background: var(--line); }
+    .gh-tl > .gh-comment { position: relative; background: var(--card); overflow: visible; }
+    .gh-tl > .gh-comment > .gh-md { overflow: hidden; }
+    .gh-tl > .gh-comment > .gh-comment-hdr { border-radius: 5px 5px 0 0; }
+    .gh-tl > .gh-comment > .gh-comment-hdr:last-child { border-radius: 5px; }
+    .gh-tl > .gh-comment::before { content: ''; position: absolute; left: -17px; top: 14px; width: 16px; height: 2px; background: var(--line); }
+    .gh-tl-row { position: relative; display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 0; font-size: 12px; color: var(--fg-muted); }
+    .gh-tl-ico { position: absolute; left: -26px; width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--fill); border: 2px solid var(--card); box-sizing: content-box; margin-left: -1px; color: var(--fg-muted); }
+    .gh-tl-ico .gh-ico { width: 12px; height: 12px; }
+    .gh-tl-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .gh-tl-actor { color: var(--fg-strong); font-weight: 600; }
+    .gh-tl-time { margin-left: auto; font-size: 11px; white-space: nowrap; }
+    .gh-tl-link.link { color: var(--fg); cursor: pointer; }
+    .gh-tl-link.link:hover { color: var(--accent); text-decoration: underline; }
+    .gh-tl-commit { display: flex; align-items: baseline; gap: 8px; padding: 1px 0 1px 4px; font-size: 12px; color: var(--fg); }
+    .gh-tl-commit .gh-mono { color: var(--fg-muted); }
+    .gh-tl-msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gh-tl-commit.link { cursor: pointer; }
+    .gh-tl-commit.link:hover .gh-tl-msg { color: var(--accent); text-decoration: underline; }
+    .gh-tl-row.copilot { color: var(--fg-dim); }
+    .gh-tl-row.copilot .gh-tl-ico { color: var(--gh-merged); background: rgba(163, 113, 247, 0.15); }
+    .gh-comment.copilot { border-color: rgba(163, 113, 247, 0.35); }
+    .gh-badge.pending { color: var(--gh-pending); border-color: rgba(210, 153, 34, 0.4); background: rgba(210, 153, 34, 0.1); animation: gh-pulse 1.6s ease-in-out infinite; }
+    @keyframes gh-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+    @media (prefers-reduced-motion: reduce) { .gh-badge.pending { animation: none; } }
+
     /* Merge dialog */
     .gh-badge.merge { color: var(--gh-merged); border-color: rgba(163, 113, 247, 0.4); background: rgba(163, 113, 247, 0.1); }
     .gh-merge { display: flex; flex-direction: column; gap: 12px; }

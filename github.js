@@ -16,6 +16,7 @@ const fs = require('fs');
 const os = require('os');
 const { resolveWorktreePath, parseWorktreeList } = require('./settings');
 const { buildMergeArgs } = require('./ghArgs');
+const { normalizeTimeline, copilotReviewState } = require('./ghTimeline');
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -47,6 +48,19 @@ async function ghJson(args, opts) {
   if (r.code !== 0) return { ok: false, error: firstErrorLine(r.stderr || r.stdout) };
   try { return { ok: true, data: JSON.parse(r.stdout || 'null') }; }
   catch (e) { return { ok: false, error: 'Bad JSON from gh: ' + e.message }; }
+}
+
+// Run gh and parse NDJSON stdout (one JSON value per line, bad lines skipped) into { ok, data: [] }.
+async function ghLines(args, opts) {
+  const r = await runGh(args, opts);
+  if (r.missing) return { ok: false, error: 'GitHub CLI (gh) is not installed', missing: true };
+  if (r.code !== 0) return { ok: false, error: firstErrorLine(r.stderr || r.stdout) };
+  const data = [];
+  for (const line of (r.stdout || '').split('\n')) {
+    if (!line.trim()) continue;
+    try { data.push(JSON.parse(line)); } catch (_) {}
+  }
+  return { ok: true, data };
 }
 
 function firstErrorLine(s) {
@@ -151,7 +165,7 @@ query($owner: String!, $name: String!, $n: Int!) {
         autoMergeRequest { enabledAt mergeMethod }
         labels(first: 20) { nodes { name color } }
         assignees(first: 10) { nodes { login } }
-        reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+        reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Team { name } } } }
         comments(last: 60) { totalCount nodes { author { login } createdAt bodyHTML url } }
         reviews(last: 40) { nodes { author { login } state createdAt bodyHTML url } }
         files(first: 100) { totalCount nodes { path additions deletions changeType } }
@@ -368,12 +382,22 @@ function register(ipcMain, getMainWindow, getSettings) {
     const n = validNumber(number);
     if (!validRepo(repo) || !n) return { ok: false, error: 'bad item' };
     const [owner, name] = repo.split('/');
-    const r = await ghJson(['api', 'graphql', '-f', 'query=' + DETAIL_QUERY,
-      '-f', 'owner=' + owner, '-f', 'name=' + name, '-F', 'n=' + n]);
+    // REST timeline (has Copilot review events GraphQL omits) runs alongside the detail query.
+    const [r, tl] = await Promise.all([
+      ghJson(['api', 'graphql', '-f', 'query=' + DETAIL_QUERY,
+        '-f', 'owner=' + owner, '-f', 'name=' + name, '-F', 'n=' + n]),
+      ghLines(['api', '-H', 'Accept: application/vnd.github.html+json', '--paginate', '--jq', '.[]',
+        'repos/' + repo + '/issues/' + n + '/timeline?per_page=100'])
+    ]);
     if (!r.ok) return r;
     const item = r.data && r.data.data && r.data.data.repository && r.data.data.repository.issueOrPullRequest;
     if (!item) return { ok: false, error: 'Not found: ' + repo + '#' + n };
     item.repo = repo;
+    try {
+      if (!tl.ok) throw new Error(tl.error);
+      item.timeline = normalizeTimeline(tl.data);
+      item.copilotReview = copilotReviewState(item.timeline);
+    } catch (_) { item.timeline = null; item.copilotReview = null; }
     // Repository-level merge info rides along on the item; the repository object itself
     // is not returned.
     const repoNode = r.data.data.repository;

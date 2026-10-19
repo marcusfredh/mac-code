@@ -110,6 +110,9 @@
     trash: '<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 9h5.8l.6-9" stroke="currentColor" fill="none" stroke-width="1.3" stroke-linejoin="round"/>',
     plus: '<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
     upload: '<path d="M8 11V3M4.5 6.5L8 3l3.5 3.5M3 13h10" stroke="currentColor" fill="none" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+    eye: '<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" stroke="currentColor" fill="none" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="currentColor"/>',
+    copilot: '<rect x="2.5" y="5" width="11" height="7.5" rx="3" stroke="currentColor" fill="none" stroke-width="1.3"/><path d="M8 5V3M6 8.2v1.4M10 8.2v1.4" stroke="currentColor" fill="none" stroke-width="1.3" stroke-linecap="round"/>',
+    tag: '<path d="M2.5 2.5h5l6 6-5 5-6-6z" stroke="currentColor" fill="none" stroke-width="1.3" stroke-linejoin="round"/><circle cx="5.5" cy="5.5" r="1" fill="currentColor"/>',
     env: '<rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" fill="none" stroke-width="1.3"/><path d="M5 7l2 1.5L5 10M8.5 10h2.5" stroke="currentColor" fill="none" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>'
   };
   function icon(name, cls) { const s = svg(ICON[name]); s.classList.add('gh-ico'); if (cls) s.classList.add(cls); return s; }
@@ -754,6 +757,146 @@
       return b;
     }
 
+    // Comment / review card (also the fallback Conversation rendering).
+    function commentCard(ev, at) {
+      const copilot = ev.kind === 'review' && ev.authorIsBot && /^copilot/i.test(String(ev.author || ''));
+      const card = el('div', 'gh-comment' + (ev.kind === 'review' ? ' review ' + String(ev.state).toLowerCase() : '') + (copilot ? ' copilot' : ''));
+      const ch = el('div', 'gh-comment-hdr');
+      ch.appendChild(el('strong', null, typeof ev.author === 'string' ? ev.author : login(ev.author)));
+      if (ev.kind === 'review') {
+        const s = String(ev.state);
+        ch.appendChild(el('span', 'gh-badge ' + (s === 'APPROVED' ? 'ok' : s === 'CHANGES_REQUESTED' ? 'fail' : ''),
+          s === 'APPROVED' ? 'approved' : s === 'CHANGES_REQUESTED' ? 'requested changes' : s === 'DISMISSED' ? 'dismissed' : 'reviewed'));
+      }
+      const t = el('span', 'gh-comment-time', ago(at));
+      if (ev.url) { t.classList.add('link'); t.title = 'Open comment'; t.addEventListener('click', (e) => openLink(ev.url, e)); }
+      ch.appendChild(t);
+      card.appendChild(ch);
+      if (String(ev.bodyHTML || '').trim()) {
+        const b = el('div', 'gh-md');
+        renderBody(b, ev.bodyHTML);
+        card.appendChild(b);
+      }
+      return card;
+    }
+
+    const isCopilotName = (n) => /^copilot/i.test(String(n || ''));
+    const spaced = (v) => String(v == null ? '' : v).replace(/[_-]+/g, ' ').trim().toLowerCase();
+
+    // One compact timeline row: icon on the line, bold actor, text, time at the right.
+    function tlRow(ico, icoCls, actor, text, at, extra) {
+      const row = el('div', 'gh-tl-row' + (extra ? ' ' + extra : ''));
+      const i = el('span', 'gh-tl-ico');
+      i.appendChild(icon(ico, icoCls));
+      row.appendChild(i);
+      const body = el('span', 'gh-tl-text');
+      if (actor) { body.appendChild(el('strong', 'gh-tl-actor', actor)); body.appendChild(document.createTextNode(' ')); }
+      if (text instanceof Node) body.appendChild(text); else body.appendChild(document.createTextNode(String(text == null ? '' : text)));
+      row.appendChild(body);
+      const t = ago(at);
+      if (t) row.appendChild(el('span', 'gh-tl-time', t));
+      return row;
+    }
+
+    // Row for one non-card, non-commit event.
+    function eventRow(ev) {
+      const a = ev.actor || null, at = ev.at;
+      const row = (ico, cls, text, extra) => tlRow(ico, cls, a, text, at, extra);
+      const k = ev.kind;
+      switch (k) {
+        case 'review': {
+          const s = String(ev.state || '');
+          const cp = ev.authorIsBot && isCopilotName(ev.author);
+          return tlRow(s === 'APPROVED' ? 'check' : s === 'CHANGES_REQUESTED' ? 'cross' : 'eye', s === 'APPROVED' ? 'ok' : s === 'CHANGES_REQUESTED' ? 'fail' : '',
+            ev.author || null, s === 'APPROVED' ? 'approved these changes' : s === 'CHANGES_REQUESTED' ? 'requested changes' : s === 'DISMISSED' ? 'review dismissed' : 'reviewed', at, cp ? 'copilot' : '');
+        }
+        case 'review_requested': case 'review_request_removed': {
+          const cp = ev.reviewerIsBot && isCopilotName(ev.reviewer);
+          const who = ev.reviewer || 'a reviewer';
+          return row(cp ? 'copilot' : 'eye', '', (k === 'review_requested' ? 'requested a review from ' : 'removed the review request for ') + who, cp ? 'copilot' : '');
+        }
+        case 'copilot': {
+          const ph = ev.phase, via = ev.via;
+          let text;
+          if (ph === 'failed') text = via === 'review' ? 'Copilot review failed' : via === 'agent' ? 'Copilot failed working' : 'Copilot failed work';
+          else if (via === 'review') text = ph === 'finished' ? 'Copilot finished reviewing' : 'Copilot started reviewing' + (a ? ' on behalf of ' + a : '');
+          else if (via === 'agent') text = 'Copilot ' + (ph === 'finished' ? 'finished' : 'started') + ' working';
+          else text = 'Copilot ' + (ph === 'finished' ? 'finished' : 'started') + ' work';
+          return tlRow('copilot', ph === 'failed' ? 'fail' : ph === 'finished' ? 'ok' : 'pending', null, text, at, 'copilot');
+        }
+        case 'merged': return row('prMerged', 'merged', 'merged' + (ev.commit ? ' commit ' + ev.commit : ''));
+        case 'referenced': return row('dot', '', 'referenced this' + (ev.commit ? ' in commit ' + ev.commit : ''));
+        case 'closed': return row('prClosed', 'closed', 'closed this');
+        case 'reopened': return row('prOpen', 'open', 'reopened this');
+        case 'ready_for_review': return row('prOpen', 'open', 'marked this as ready for review');
+        case 'convert_to_draft': return row('prOpen', 'draft', 'marked this as a draft');
+        case 'head_ref_force_pushed': return row('branch', '', 'force-pushed the branch');
+        case 'head_ref_deleted': return row('branch', '', 'deleted the branch');
+        case 'head_ref_restored': return row('branch', '', 'restored the branch');
+        case 'base_ref_changed': return row('branch', '', 'changed the base branch');
+        case 'base_ref_force_pushed': return row('branch', '', 'force-pushed the base branch');
+        case 'auto_merge_enabled': return row('prMerged', 'merged', 'enabled auto-merge');
+        case 'auto_merge_disabled': return row('prMerged', '', 'disabled auto-merge');
+        case 'added_to_merge_queue': return row('prMerged', 'merged', 'added this to the merge queue');
+        case 'removed_from_merge_queue': return row('prMerged', '', 'removed this from the merge queue');
+        case 'locked': return row('lock', '', 'locked this conversation');
+        case 'unlocked': return row('lock', '', 'unlocked this conversation');
+        case 'deployed': return row('dot', '', 'deployed this');
+        case 'review_dismissed': return row('cross', '', 'dismissed a review' + (ev.state ? ' (' + spaced(ev.state) + ')' : '') + (ev.message ? ': ' + ev.message : ''));
+        case 'labeled': case 'unlabeled': {
+          const f = document.createDocumentFragment();
+          f.appendChild(document.createTextNode(k === 'labeled' ? 'added ' : 'removed '));
+          f.appendChild(labelChip(ev.label || { name: 'label' }));
+          return row('tag', '', f);
+        }
+        case 'assigned': return row('dot', '', 'assigned ' + (ev.assignee || 'someone'));
+        case 'unassigned': return row('dot', '', 'unassigned ' + (ev.assignee || 'someone'));
+        case 'milestoned': return row('dot', '', 'added this to the ' + (ev.milestone || '') + ' milestone');
+        case 'demilestoned': return row('dot', '', 'removed this from the ' + (ev.milestone || '') + ' milestone');
+        case 'renamed': return row('edit', '', 'changed the title from "' + (ev.from || '') + '" to "' + (ev.to || '') + '"');
+        case 'cross_referenced': {
+          const src = ev.source || {};
+          const f = document.createDocumentFragment();
+          f.appendChild(document.createTextNode('mentioned this in '));
+          const lk = el('span', 'gh-tl-link', (src.repo || '') + (src.number != null ? '#' + src.number : '') + (src.title ? ' ' + src.title : ''));
+          if (src.url) { lk.classList.add('link'); lk.addEventListener('click', (e) => openLink(src.url, e)); }
+          f.appendChild(lk);
+          return row(src.isPr ? 'prOpen' : 'issueOpen', '', f);
+        }
+        default: return row('dot', '', spaced(ev.event || k));
+      }
+    }
+
+    function timelineSection(tl) {
+      const box = el('div', 'gh-tl');
+      let n = 0;
+      for (let i = 0; i < tl.length; i++) {
+        const ev = tl[i];
+        if (!ev || typeof ev !== 'object') continue;
+        if (ev.kind === 'comment' || (ev.kind === 'review' && String(ev.bodyHTML || '').trim())) {
+          box.appendChild(commentCard(ev, ev.at)); n++;
+        } else if (ev.kind === 'commit') {
+          const group = [];
+          while (i < tl.length && tl[i] && tl[i].kind === 'commit') group.push(tl[i++]);
+          i--;
+          const wrap = el('div', 'gh-tl-commits');
+          wrap.appendChild(tlRow('dot', '', null, group.length === 1 ? 'Commit' : group.length + ' commits', group[0].at));
+          for (const c of group) {
+            const line = el('div', 'gh-tl-commit');
+            line.appendChild(el('span', 'gh-mono', String(c.sha || '').slice(0, 7)));
+            line.appendChild(el('span', 'gh-tl-msg', c.message || ''));
+            if (c.url) { line.classList.add('link'); line.title = 'Open commit'; line.addEventListener('click', (e) => openLink(c.url, e)); }
+            wrap.appendChild(line);
+          }
+          box.appendChild(wrap); n++;
+        } else { const r = eventRow(ev); if (r) { box.appendChild(r); n++; } }
+      }
+      const sec = section('Timeline', n);
+      if (!n) sec.appendChild(el('div', 'gh-empty-body', 'No activity yet.'));
+      else sec.appendChild(box);
+      return sec;
+    }
+
     function renderDetail(d) {
       const isPr = d.__typename === 'PullRequest';
       const scrollTop = detailEl.scrollTop;
@@ -783,6 +926,10 @@
         if (d.isInMergeQueue) stateRow.appendChild(el('span', 'gh-badge merge', queueLabel(d)));
         if (d.autoMergeRequest) stateRow.appendChild(el('span', 'gh-badge merge', autoMergeLabel(d)));
       }
+      const prOpen = isPr && state === 'OPEN' && !d.merged;
+      if (prOpen && d.copilotReview === 'reviewing') stateRow.appendChild(el('span', 'gh-badge pending', 'Copilot reviewing\u2026'));
+      else if (prOpen && d.copilotReview === 'requested') stateRow.appendChild(el('span', 'gh-badge pending', 'Copilot review requested'));
+      else if (prOpen && d.copilotReview === 'failed') stateRow.appendChild(el('span', 'gh-badge fail', 'Copilot review failed'));
       const by = el('span', 'gh-d-by');
       by.appendChild(el('strong', null, login(d.author)));
       by.appendChild(document.createTextNode(' opened ' + ago(d.createdAt)));
@@ -894,41 +1041,25 @@
         detailEl.appendChild(sec);
       }
 
-      // Timeline: comments + reviews, oldest first.
-      const events = [];
-      for (const c of (d.comments && d.comments.nodes) || []) events.push({ kind: 'comment', ...c });
-      for (const r of (d.reviews && d.reviews.nodes) || []) {
-        if (r.state === 'COMMENTED' && !String(r.bodyHTML || '').trim()) continue; // inline-only review
-        events.push({ kind: 'review', ...r });
-      }
-      events.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-      const total = (d.comments && d.comments.totalCount) || 0;
-      const sec = section('Conversation', events.length);
-      if (total > ((d.comments && d.comments.nodes) || []).length) {
-        sec.appendChild(el('div', 'gh-more', `Showing the latest ${d.comments.nodes.length} of ${total} comments`));
-      }
-      if (!events.length) sec.appendChild(el('div', 'gh-empty-body', 'No comments yet.'));
-      for (const ev of events) {
-        const card = el('div', 'gh-comment' + (ev.kind === 'review' ? ' review ' + String(ev.state).toLowerCase() : ''));
-        const ch = el('div', 'gh-comment-hdr');
-        ch.appendChild(el('strong', null, login(ev.author)));
-        if (ev.kind === 'review') {
-          const s = String(ev.state);
-          ch.appendChild(el('span', 'gh-badge ' + (s === 'APPROVED' ? 'ok' : s === 'CHANGES_REQUESTED' ? 'fail' : ''),
-            s === 'APPROVED' ? 'approved' : s === 'CHANGES_REQUESTED' ? 'requested changes' : s === 'DISMISSED' ? 'dismissed' : 'reviewed'));
+      // Timeline (full, in display order) or, if it failed to load, comments + reviews.
+      if (Array.isArray(d.timeline)) detailEl.appendChild(timelineSection(d.timeline));
+      else {
+        const events = [];
+        for (const c of (d.comments && d.comments.nodes) || []) events.push({ kind: 'comment', ...c });
+        for (const r of (d.reviews && d.reviews.nodes) || []) {
+          if (r.state === 'COMMENTED' && !String(r.bodyHTML || '').trim()) continue; // inline-only review
+          events.push({ kind: 'review', ...r });
         }
-        const t = el('span', 'gh-comment-time', ago(ev.createdAt));
-        if (ev.url) { t.classList.add('link'); t.title = 'Open comment'; t.addEventListener('click', (e) => openLink(ev.url, e)); }
-        ch.appendChild(t);
-        card.appendChild(ch);
-        if (String(ev.bodyHTML || '').trim()) {
-          const b = el('div', 'gh-md');
-          renderBody(b, ev.bodyHTML);
-          card.appendChild(b);
+        events.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+        const total = (d.comments && d.comments.totalCount) || 0;
+        const sec = section('Conversation', events.length);
+        if (total > ((d.comments && d.comments.nodes) || []).length) {
+          sec.appendChild(el('div', 'gh-more', `Showing the latest ${d.comments.nodes.length} of ${total} comments`));
         }
-        sec.appendChild(card);
+        if (!events.length) sec.appendChild(el('div', 'gh-empty-body', 'No comments yet.'));
+        for (const ev of events) sec.appendChild(commentCard(ev, ev.createdAt));
+        detailEl.appendChild(sec);
       }
-      detailEl.appendChild(sec);
 
       if (same) detailEl.scrollTop = scrollTop;
       // An open merge dialog for this PR follows every refresh (poll, retry, refetch).
