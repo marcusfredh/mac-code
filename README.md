@@ -158,7 +158,8 @@ the branch; the repo's *Automatically delete head branches* setting applies (sho
 the dialog). After any attempt the PR is fetched again: the state pill then shows
 *Merged*, *Auto-merge on* or *In merge queue (#n)*, and a failure is explained in the
 dialog. With auto-merge on, the button reads **Auto-merge on…** and lets you turn it
-off. The last method and the delete-branch choice are remembered
+off. The pre-selected method (*Create a merge commit* unless changed) and whether
+*Delete branch* starts checked (off unless changed) come from the settings
 (`github.mergeMethod`, `github.deleteBranchOnMerge`).
 
 ### Settings
@@ -166,7 +167,7 @@ off. The last method and the delete-branch choice are remembered
 (no Save button) to `settings.json` in the app's user-data folder; the search box
 filters across all categories. The defaults are the app's behavior before settings
 existed, so nothing changes until you change it — except *Öppna GitHub som*, which
-defaults to the overlay.
+defaults to the overlay, and the merge dialog's defaults (merge commit, keep the branch).
 
 - **Allmänt** — restore tabs at start, PowerShell 7 or Windows PowerShell for new tabs,
   a start folder for new tabs, and an optional confirm before closing a tab or pane
@@ -186,7 +187,7 @@ defaults to the overlay.
   checkbox is the same setting); whether Ctrl+click flips that; a worktree folder
   template with `{repo}` and `{branch}` (a full path that contains `{branch}` and a
   folder named `worktrees`; empty = next to the clone); draft PRs; the GitHub tab's
-  poll interval.
+  poll interval; the merge dialog's default method and whether it deletes the branch.
 - **Editor och Explorer** — autosave (on focus change or after 1 s), word wrap, minimap,
   tab size, and whether the Explorer shows dot files.
 - **Om** — version, and the settings file: open it in the editor (saving it with

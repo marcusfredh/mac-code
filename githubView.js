@@ -1313,7 +1313,7 @@
       if (!queue) {
         let allowed = MERGE_METHODS.filter((m) => info[m.allowed] === true);
         if (!allowed.length) allowed = MERGE_METHODS;
-        const want = setting('mergeMethod', 'squash');
+        const want = setting('mergeMethod', 'merge');
         const pick = allowed.some((m) => m.key === want) ? want : allowed[0].key;
         const fs = el('fieldset', 'gh-merge-methods');
         fs.appendChild(el('legend', 'gh-field-label', 'Merge method'));
@@ -1347,7 +1347,7 @@
       // Delete the head branch (never with auto-merge or a queue: gh can't, the repo setting applies).
       const delLab = el('label', 'gh-check');
       const delCb = el('input'); delCb.type = 'checkbox';
-      delCb.checked = setting('deleteBranchOnMerge', true) === true;
+      delCb.checked = setting('deleteBranchOnMerge', false) === true;
       const delTxt = el('span');
       delTxt.append(document.createTextNode('Delete branch '), el('span', 'gh-mono', d0.headRefName || ''), document.createTextNode(' after merge'));
       delLab.append(delCb, delTxt);
@@ -1405,11 +1405,6 @@
             args.method = method;
             if (auto) args.auto = true;
             else if (!cross && delCb.checked) args.deleteBranch = true;
-          }
-          // Remember the choices for next time.
-          if (window.setAppSetting) {
-            if (method && method !== setting('mergeMethod', 'squash')) window.setAppSetting('github', 'mergeMethod', method);
-            if (!delCb.disabled && delCb.checked !== setting('deleteBranchOnMerge', true)) window.setAppSetting('github', 'deleteBranchOnMerge', delCb.checked);
           }
           running = true;
           setError('');

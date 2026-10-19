@@ -19,8 +19,8 @@ test('DEFAULTS: schema v1, reproduces today', () => {
   assert.strictEqual(DEFAULTS.github.links, 'app');
   assert.strictEqual(DEFAULTS.github.pollSeconds, 60);
   assert.strictEqual(DEFAULTS.github.openAs, 'overlay');
-  assert.strictEqual(DEFAULTS.github.mergeMethod, 'squash');
-  assert.strictEqual(DEFAULTS.github.deleteBranchOnMerge, true);
+  assert.strictEqual(DEFAULTS.github.mergeMethod, 'merge');
+  assert.strictEqual(DEFAULTS.github.deleteBranchOnMerge, false);
   assert.strictEqual(DEFAULTS.editor.tabSize, 2);
   assert.strictEqual(DEFAULTS.explorer.showHidden, true);
   assert.ok(Object.isFrozen(DEFAULTS) && Object.isFrozen(DEFAULTS.general));
@@ -251,6 +251,6 @@ test('github open/merge settings: valid values kept, invalid fall back', () => {
   assert.strictEqual(ok.github.deleteBranchOnMerge, false);
   const bad = validate({ github: { openAs: 'window', mergeMethod: 'ff', deleteBranchOnMerge: 'yes' } });
   assert.strictEqual(bad.github.openAs, 'overlay');
-  assert.strictEqual(bad.github.mergeMethod, 'squash');
-  assert.strictEqual(bad.github.deleteBranchOnMerge, true);
+  assert.strictEqual(bad.github.mergeMethod, 'merge');
+  assert.strictEqual(bad.github.deleteBranchOnMerge, false);
 });

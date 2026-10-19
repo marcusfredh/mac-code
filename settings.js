@@ -46,8 +46,8 @@ const SCHEMA = {
     draftPr:          { type: 'bool', def: false },
     pollSeconds:      { type: 'enum', values: [60, 300, 0], def: 60 },
     openAs:           { type: 'enum', values: ['overlay', 'tab'], def: 'overlay' },
-    mergeMethod:      { type: 'enum', values: ['squash', 'merge', 'rebase'], def: 'squash' },
-    deleteBranchOnMerge: { type: 'bool', def: true }
+    mergeMethod:      { type: 'enum', values: ['squash', 'merge', 'rebase'], def: 'merge' },
+    deleteBranchOnMerge: { type: 'bool', def: false }
   },
   editor: {
     autosave: { type: 'enum', values: ['off', 'blur', 'delay'], def: 'off' },

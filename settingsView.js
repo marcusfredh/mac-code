@@ -25,7 +25,7 @@
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
       permissionDefault: null, notify: true, showUsage: true, cliPath: '' },
     github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60,
-      openAs: 'overlay', mergeMethod: 'squash', deleteBranchOnMerge: true },
+      openAs: 'overlay', mergeMethod: 'merge', deleteBranchOnMerge: false },
     editor: { autosave: 'off', wordWrap: false, minimap: false, tabSize: 2 },
     explorer: { showHidden: true }
   };
@@ -309,7 +309,14 @@
       { label: 'Uppdatera PR- och CI-status',
         desc: 'Hur ofta GitHub-fliken frågar gh medan den visas.',
         controls: [{ kind: 'select', sec: 'github', key: 'pollSeconds', options: [
-          opt(60, 'Var 60:e sekund'), opt(300, 'Var 5:e minut'), opt(0, 'Bara när fliken öppnas')] }] }
+          opt(60, 'Var 60:e sekund'), opt(300, 'Var 5:e minut'), opt(0, 'Bara när fliken öppnas')] }] },
+      { label: 'Förvalt merge-sätt',
+        desc: 'Förvalt i Merge-dialogen. Tillåter repot inte valet förväljs det första som repot tillåter.',
+        controls: [{ kind: 'segmented', sec: 'github', key: 'mergeMethod', options: [
+          opt('merge', 'Merge commit'), opt('squash', 'Squash'), opt('rebase', 'Rebase')] }] },
+      { label: 'Ta bort branchen efter merge',
+        desc: 'Förvalt läge för "Delete branch" i Merge-dialogen.',
+        controls: [{ kind: 'toggle', sec: 'github', key: 'deleteBranchOnMerge' }] }
     ] },
     { id: 'editor', label: 'Editor och Explorer', rows: [
       { label: 'Autospara filer',
