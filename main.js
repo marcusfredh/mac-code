@@ -114,6 +114,7 @@ const github = require('./github');
 const appSettings = require('./settings');
 const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
 const { createFlowStore, skillConfirmText, diffText, writeDiffFile } = require('./flowStore');
+const noteImages = require('./noteImages');
 
 app.setName('Mac Code');
 errState.nameSet = true;
@@ -1984,6 +1985,79 @@ ipcMain.handle('notes:path', () => notesFile());
 // load must never be saved over).
 ipcMain.handle('notes:status', () => {
   try { return { exists: fs.existsSync(notesFile()) || fs.existsSync(notesFile() + '.bak') }; } catch (_) { return { exists: false }; }
+});
+
+// ----- IPC: note images -----
+// Images attached to notes live in userData/note-images, never in the repo. noteImages.js
+// validates ids, extensions and bytes; a file name is always `${id}.${ext}` from validated
+// parts, and the resolved path must stay inside the folder. Main window only.
+function noteImageDir() { return path.join(app.getPath('userData'), 'note-images'); }
+function noteImagePath(ref) {
+  const name = noteImages.imageFileName(ref);
+  if (!name) return null;
+  const dir = path.resolve(noteImageDir());
+  const p = path.resolve(dir, name);
+  return path.dirname(p) === dir ? p : null;
+}
+ipcMain.handle('notes:imageDir', (e) => (fromMainWindow(e) ? noteImageDir() : { ok: false, error: 'not allowed' }));
+ipcMain.handle('notes:saveImage', async (e, args) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  try {
+    const { base64, mediaType } = args || {};
+    const checked = noteImages.checkImageData(base64, mediaType);
+    if (!checked.ok) return checked;
+    const id = Date.now().toString(36) + '-' + crypto.randomBytes(6).toString('hex');
+    const p = noteImagePath({ id, ext: checked.ext });
+    if (!p) return { ok: false, error: 'invalid image name' };
+    await fs.promises.mkdir(noteImageDir(), { recursive: true });
+    await fs.promises.writeFile(p, checked.buf);
+    return { ok: true, image: { id, ext: checked.ext } };
+  } catch (err) { return { ok: false, error: err.message || String(err) }; }
+});
+ipcMain.handle('notes:readImage', async (e, args) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  try {
+    const p = noteImagePath(args);
+    if (!p) return { ok: false, error: 'invalid image' };
+    const st = await fs.promises.stat(p);
+    if (!st.isFile()) return { ok: false, error: 'not a file' };
+    if (st.size > noteImages.MAX_BYTES) return { ok: false, error: 'image is too large' };
+    const buf = await fs.promises.readFile(p);
+    return { ok: true, base64: buf.toString('base64'), mediaType: noteImages.EXTS[args.ext] };
+  } catch (err) { return { ok: false, error: err.code === 'ENOENT' ? 'image not found' : (err.message || String(err)) }; }
+});
+ipcMain.handle('notes:deleteImage', async (e, args) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  try {
+    const p = noteImagePath(args);
+    if (!p) return { ok: false, error: 'invalid image' };
+    await fs.promises.unlink(p);
+    return { ok: true };
+  } catch (err) { return err.code === 'ENOENT' ? { ok: true } : { ok: false, error: err.message || String(err) }; }
+});
+// Removes image files no note refers to. Only plain files named like ours, never recursive.
+ipcMain.handle('notes:pruneImages', async (e, keepNames) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  if (!Array.isArray(keepNames) || !keepNames.every((n) => typeof n === 'string')) return { ok: false, error: 'invalid keep list' };
+  try {
+    const keep = new Set(keepNames);
+    const dir = noteImageDir();
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (err) {
+      if (err.code === 'ENOENT') return { ok: true, removed: 0 };
+      throw err;
+    }
+    let removed = 0;
+    for (const ent of entries) {
+      if (!ent.isFile() || !noteImages.isImageFileName(ent.name) || keep.has(ent.name)) continue;
+      const p = path.join(dir, ent.name);
+      // A file saved in the last 10 minutes may just not be referenced yet (a save in flight
+      // at startup, or another Mac Code window whose debounced notes save hasn't flushed).
+      try { if (Date.now() - (await fs.promises.stat(p)).mtimeMs < 10 * 60 * 1000) continue; } catch (_) { continue; }
+      try { await fs.promises.unlink(p); removed++; } catch (_) {}
+    }
+    return { ok: true, removed };
+  } catch (err) { return { ok: false, error: err.message || String(err) }; }
 });
 
 // ----- IPC: error notes (see the capture block at the top of this file) -----

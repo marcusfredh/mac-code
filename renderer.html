@@ -2665,6 +2665,26 @@
     .notes-stage-add { width: 70px; background: transparent; border: 1px dashed var(--line); color: var(--fg); border-radius: 10px; font: 10.5px var(--ui); padding: 1px 7px; outline: none; }
     .notes-stage-add:focus { border-color: rgba(96, 205, 255, 0.5); border-style: solid; }
     .notes-hint { font-size: 10.5px; color: var(--fg-faint); }
+    /* Note images: 48px thumbnails, pending/broken states, drop highlight, preview overlay */
+    .notes-panel { position: relative; }
+    .notes-add-status { margin-left: auto; font-size: 11px; color: var(--fg-muted); }
+    .notes-text:empty { min-height: 1.45em; }
+    .notes-imgs { display: flex; flex-wrap: wrap; gap: 6px; }
+    .notes-img { position: relative; width: 48px; height: 48px; flex-shrink: 0; border-radius: 6px; overflow: hidden; background: var(--fill); border: 1px solid var(--line); cursor: default; outline: none; }
+    .notes-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .notes-img:focus-visible { border-color: var(--accent); }
+    .notes-img.pending img { opacity: 0.4; }
+    .notes-img.pending::after { content: ''; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -8px 0 0 -8px; border: 2px solid var(--fg-faint); border-top-color: var(--accent); border-radius: 50%; animation: branch-spin 0.8s linear infinite; }
+    .notes-img.broken { border-style: dashed; }
+    .notes-img.broken::after { content: '!'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--red); font-size: 16px; font-weight: 600; }
+    .notes-img.broken img { display: none; }
+    .notes-img-x { position: absolute; top: 2px; right: 2px; z-index: 1; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; background: var(--bg); color: var(--fg-strong); font-size: 12px; line-height: 16px; text-align: center; opacity: 0; cursor: default; }
+    .notes-img:hover .notes-img-x, .notes-img:focus-within .notes-img-x { opacity: 1; }
+    .notes-img-x:hover { background: var(--red); }
+    .notes-item.drop-hot, .notes-add.drop-hot { background: var(--fill-hover); box-shadow: inset 0 0 0 1px var(--accent); }
+    .notes-preview { display: none; position: absolute; left: 0; right: 0; top: 0; height: 100%; z-index: 20; align-items: center; justify-content: center; padding: 10px; box-sizing: border-box; background: var(--bg); outline: none; cursor: zoom-out; }
+    .notes-preview.open { display: flex; }
+    .notes-preview img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
     .status-notes { cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: rgba(255, 255, 255, 0.72); }
     .status-notes:hover, .status-notes.on { color: #fff; }
     .status-notes-count { min-width: 15px; height: 15px; line-height: 15px; padding: 0 4px; border-radius: 8px; text-align: center; font-size: 10px; font-weight: 600; background: rgba(96, 205, 255, 0.2); color: var(--accent); }

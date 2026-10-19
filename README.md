@@ -120,6 +120,15 @@ a terminal tab, `cd` into a different repo, start a chat, or pick from the list
 which is also what the list opens. A folder that has been deleted is shown dimmed and
 never opened. Counts live in the app's local storage (`repoUsage`, at most 60 repos).
 
+### Notes
+`Ctrl+Shift+N` opens the repo's notes at the bottom of the Explorer. Images can be attached
+to a note: paste or drop them into the add box (they go along when you press Enter), drop
+them onto an existing note, or paste one while editing it (PNG, JPEG, GIF or WebP, up to 10 MB).
+Click a thumbnail to preview it, or drag it into a Claude chat composer to attach it there.
+**Copy** (and a note's own copy button) adds a `![name](path)` line per image with the
+file's path, never the bitmap. Images are stored in Mac Code's data folder, never in the repo,
+and files no note refers to any more are removed on the next start.
+
 ### GitHub
 `Ctrl+Shift+G`, the GitHub button, the status-bar PR pill and GitHub links all open the
 GitHub dashboard (PRs, issues, Actions, repo settings; data via the `gh` CLI).

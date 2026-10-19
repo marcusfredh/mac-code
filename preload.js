@@ -124,7 +124,12 @@ contextBridge.exposeInMainWorld('notesApi', {
   load: ()     => ipcRenderer.invoke('notes:load'),
   save: (data) => ipcRenderer.send('notes:save', data),
   path: ()     => ipcRenderer.invoke('notes:path'),
-  status: ()   => ipcRenderer.invoke('notes:status')
+  status: ()   => ipcRenderer.invoke('notes:status'),
+  saveImage:   (args) => ipcRenderer.invoke('notes:saveImage', args),
+  readImage:   (args) => ipcRenderer.invoke('notes:readImage', args),
+  imageDir:    ()     => ipcRenderer.invoke('notes:imageDir'),
+  deleteImage: (args) => ipcRenderer.invoke('notes:deleteImage', args),
+  pruneImages: (keep) => ipcRenderer.invoke('notes:pruneImages', keep)
 });
 
 // Mac Code's own errors -> notes. onNote: formatted records pushed by main (only after

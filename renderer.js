@@ -1371,6 +1371,16 @@ function ensureHybridBar(tab, pane) {
   });
   wrap.addEventListener('dragover', (e) => { e.preventDefault(); });
   wrap.addEventListener('drop', async (e) => {
+    // A thumbnail dragged out of the notes panel (notesView.js validates and reads it).
+    const noteImgMime = 'application/x-maccode-note-image';
+    if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes(noteImgMime)) {
+      e.preventDefault();
+      const raw = e.dataTransfer.getData(noteImgMime);
+      const rn = window.repoNotes;
+      const res = rn && rn.noteImageFile ? await rn.noteImageFile(raw) : { error: 'note images are not available' };
+      if (res.file) await addImageFile(res.file); else setStatus(res.error);
+      return;
+    }
     if (!e.dataTransfer || !e.dataTransfer.files.length) return;
     e.preventDefault();
     for (const file of e.dataTransfer.files) {

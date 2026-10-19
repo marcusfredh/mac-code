@@ -1809,6 +1809,17 @@
     });
     root.addEventListener('dragover', (e) => { e.preventDefault(); });
     root.addEventListener('drop', async (e) => {
+      // A thumbnail dragged out of the notes panel (notesView.js validates and reads it).
+      // The composer has no status line, so a failed read just attaches nothing.
+      const noteImgMime = 'application/x-maccode-note-image';
+      if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes(noteImgMime)) {
+        e.preventDefault();
+        const raw = e.dataTransfer.getData(noteImgMime);
+        const rn = window.repoNotes;
+        const res = rn && rn.noteImageFile ? await rn.noteImageFile(raw) : null;
+        if (res && res.file) await addImageFile(res.file);
+        return;
+      }
       if (!e.dataTransfer || !e.dataTransfer.files.length) return;
       e.preventDefault();
       for (const file of e.dataTransfer.files) {

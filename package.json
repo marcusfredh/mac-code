@@ -1,6 +1,6 @@
 {
   "name": "mac-code",
-  "version": "0.21.3",
+  "version": "0.22.0",
   "description": "Modern PowerShell wrapper for Windows built on Electron + xterm.js + node-pty",
   "main": "main.js",
   "author": "Marcus",
@@ -42,6 +42,7 @@
       "ghArgs.js",
       "ghTimeline.js",
       "notesView.js",
+      "noteImages.js",
       "settings.js",
       "claudeConfig.js",
       "flowCompile.js",
