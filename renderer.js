@@ -58,7 +58,7 @@ function terminalOptions() {
     theme: TERMINAL_THEMES[appSetting('terminal', 'theme')] || WINDOWS_TERMINAL_THEME
   };
 }
-// The frame around each terminal (and the hybrid band over Claude's composer) has to
+// The frame around each terminal has to
 // match the scheme's background, so it is a CSS variable.
 function applyTerminalBackground() {
   document.documentElement.style.setProperty('--term-bg', terminalOptions().theme.background);
@@ -945,12 +945,12 @@ function fitAll() {
 // TUI drawn straight into xterm, with no markdown pass and no pacing in front of it.
 // What it does not give us is an input box we can style. Hybrid mode keeps that output
 // and replaces only the input — Claude's own composer box at the bottom of the pane is
-// covered by an opaque band, xterm's keyboard is switched off, and text goes into the
+// collapsed out of the terminal, xterm's keyboard is switched off, and text goes into the
 // PTY from our own composer instead.
 //
-// The band is driven by a *positive* match on the composer box, so anything we do not
+// The collapse is driven by a *positive* match on the composer box, so anything we do not
 // recognise — a permission prompt, a /-menu, a plan review — unmasks and hands the
-// keyboard back to the terminal rather than trapping the user behind paint.
+// keyboard back to the terminal rather than hiding what the user has to answer.
 // claude.hybridInput, switched in Settings (Ctrl+, > Claude).
 const hybridEnabled = () => appSetting('claude', 'hybridInput');
 
@@ -998,8 +998,8 @@ function claudeComposerRows(term) {
   if (!PROMPT_RE.test(cursorText) || CHOICE_RE.test(cursorText)) return null;
 
   // Once Claude names the session it prints that name on a line just above its input
-  // box. Tolerate a single such label between the prompt and the frame top so the band
-  // still recognises the composer — a question or a numbered choice is never a label,
+  // box. Tolerate a single such label between the prompt and the frame top so the
+  // collapse still recognises the composer — a question or a numbered choice is never a label,
   // and the cursor-is-on-a-prompt guard above already keeps us clear of dialogs.
   let top = -1;
   let skipped = false;
@@ -1050,27 +1050,118 @@ function setPaneStdin(pane, on) {
   try { pane.term.options.disableStdin = off; } catch (_) {}
 }
 
-// Band geometry and keyboard state for one pane. Cheap enough for every render.
+// Collapsing Claude's composer out of the terminal. The TUI draws its input box straight
+// after the transcript with the statusline and agents list under it, and leaves whatever
+// is left of the screen empty below that. Painting an opaque band over the box left a
+// blank gap of its height between the transcript and the statusline, and the rule
+// lines poked out to the right of it (the band stops short of the scrollbar). So instead
+// the box's own row elements are hidden, and every row under it is shifted up by the
+// box's height: the statusline lands right under the transcript and the gap moves to
+// the bottom of the screen. Only the DOM rows move — the buffer, the PTY size and the
+// rows xterm thinks it drew are untouched — which is why the moved part sits under a
+// transparent guard (installComposerGuard): xterm would still map a click there to the
+// row that used to be drawn at that spot.
+function applyComposerCollapse(pane, rows, cellFallback) {
+  const rowsEl = pane.el.querySelector('.xterm-rows');
+  const screen = pane.el.querySelector('.xterm-screen');
+  const guard = pane.composerGuard;
+  if (!rowsEl || !rowsEl.children.length || !screen || !guard) { clearComposerCollapse(pane); return false; }
+  const els = rowsEl.children;
+  // xterm's own css cell height, as it sized each row; measured as a fallback.
+  const h = parseFloat(els[0].style.height) || cellFallback;
+  if (!(h > 0)) { clearComposerCollapse(pane); return false; }
+  // On a very short pane the frame's top rule can sit above the viewport; only the part
+  // that is on screen is hidden, and only that much is shifted up.
+  const top = Math.max(rows.top, 0);
+  const n = rows.bottom - top + 1;
+  // The guard is positioned inside .pane-term (its padding box), from the collapse's top
+  // row down; the screen's offset in there is measured, not assumed from the padding.
+  const wrap = guard.parentElement;
+  const offset = screen.getBoundingClientRect().top - wrap.getBoundingClientRect().top - wrap.clientTop;
+  const guardTop = Math.round(offset + top * h);
+  const key = `${top}|${rows.bottom}|${pane.term.rows}|${h}|${els.length}|${guardTop}`;
+  if (pane.collapseKey === key) return true;
+  const shift = `translateY(-${n * h}px)`;
+  // Every row is set each time, not just the ones that changed: xterm reuses the same
+  // row elements as the box moves and adds or drops them on a resize.
+  for (let i = 0; i < els.length; i++) {
+    const s = els[i].style;
+    if (i >= top && i <= rows.bottom) { s.visibility = 'hidden'; s.transform = ''; }
+    else if (i > rows.bottom) { s.visibility = ''; s.transform = shift; }
+    else { s.visibility = ''; s.transform = ''; }
+  }
+  guard.style.top = guardTop + 'px';
+  guard.classList.add('on');
+  pane.collapseKey = key;
+  pane.collapseTopPx = top * h;
+  return true;
+}
+
+function clearComposerCollapse(pane) {
+  pane.collapseTopPx = null;
+  if (pane.composerGuard) pane.composerGuard.classList.remove('on');
+  if (pane.collapseKey == null) return;
+  pane.collapseKey = null;
+  const rowsEl = pane.el && pane.el.querySelector('.xterm-rows');
+  if (!rowsEl) return;
+  for (const el of rowsEl.children) { el.style.visibility = ''; el.style.transform = ''; }
+}
+
+// While the composer is collapsed, the screen from its top row down shows rows that are
+// not where xterm thinks they are. Mouse input there would hover and open links, or start
+// a selection (and copyOnSelect it) on rows the user is not looking at. So that part is
+// covered by a transparent element xterm never sees events from. It sits inside
+// .pane-term, so everything else behaves as on the terminal: a mousedown still bubbles to
+// the pane (activating it) and the document (closing menus), and right-click still pastes
+// or opens the pane menu. It stops short of the scrollbar so the thumb can be grabbed.
+function installComposerGuard(pane) {
+  const wrap = pane.el.querySelector('.pane-term');
+  if (!wrap) return;
+  const guard = document.createElement('div');
+  guard.className = 'pane-composer-guard';
+  wrap.appendChild(guard);
+  pane.composerGuard = guard;
+  guard.addEventListener('mousedown', (e) => {
+    // Not focusable: a left click here would otherwise blur the composer that
+    // setActivePane just focused. Right-button is left alone for the context menu.
+    if (e.button !== 2) e.preventDefault();
+  });
+  // A selection drag that started in the transcript must not reach xterm's document-level
+  // drag listener from here, or it extends onto the hidden and shifted rows. Mouseup is
+  // never stopped, so the drag still ends.
+  guard.addEventListener('mousemove', (e) => {
+    if (e.buttons & 1) e.stopPropagation();
+  });
+  // The wheel is handed to xterm as if it hit the terminal, so the transcript scrolls
+  // exactly as it does everywhere else in the pane.
+  guard.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const target = pane.el.querySelector('.xterm');
+    if (!target) return;
+    target.dispatchEvent(new WheelEvent('wheel', {
+      deltaX: e.deltaX, deltaY: e.deltaY, deltaZ: e.deltaZ, deltaMode: e.deltaMode,
+      clientX: e.clientX, clientY: e.clientY, screenX: e.screenX, screenY: e.screenY,
+      ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey,
+      bubbles: true, cancelable: true
+    }));
+  }, { passive: false });
+}
+
+// Collapse geometry and keyboard state for one pane. Cheap enough for every render.
 function updatePaneMask(pane) {
-  if (!pane.mask) return;
   // Mid-scrape the menu is open over the pane and about to be closed again. Leave the
-  // band where it is rather than reacting to a screen that is not settled.
+  // collapse where it is rather than reacting to a screen that is not settled.
   if (pane.hybridScraping && pane.masked) return;
   const active = hybridEnabled() && pane.claudeRunning && !pane.hybridRaw;
   const rows = active ? claudeComposerRows(pane.term) : null;
   const m = rows ? paneRowMetrics(pane) : null;
 
-  if (!rows || !m) {
+  if (!rows || !m || !applyComposerCollapse(pane, rows, m.cell)) {
     pane.masked = false;
-    pane.mask.classList.remove('on');
-    pane.mask.style.height = '0px';
+    clearComposerCollapse(pane);
     setPaneStdin(pane, true);
     return;
   }
-  // One extra pixel of height so rounding never leaves a sliver of the frame showing.
-  pane.mask.style.top = Math.floor(m.offset + rows.top * m.cell) + 'px';
-  pane.mask.style.height = (Math.ceil((rows.bottom - rows.top + 1) * m.cell) + 1) + 'px';
-  pane.mask.classList.add('on');
   pane.masked = true;
   pane.everMasked = true;
   setPaneStdin(pane, false);
@@ -1554,7 +1645,7 @@ function ensureHybridBar(tab, pane) {
       return;
     }
     if (!pane) return;
-    // The band is down, so the pane is showing something that owns the keyboard itself —
+    // The composer is not collapsed, so the pane is showing something that owns the keyboard itself —
     // a permission prompt, a menu, /usage. Text sent now would land in that, not in a
     // message, so it stays here until the pane is back to its composer.
     if (!pane.masked && !pane.hybridRaw) {
@@ -1649,7 +1740,7 @@ function removeHybridBar(pane) {
   if (!pane || !pane.hybridBar) return;
   pane.hybridBar.el.remove();
   pane.hybridBar = null;
-  if (pane.mask) { pane.mask.classList.remove('on'); pane.mask.style.height = '0px'; }
+  clearComposerCollapse(pane);
   pane.masked = false;
   pane.everMasked = false;
   pane.hybridRaw = false;
@@ -1682,7 +1773,7 @@ function updateHybrid() {
 }
 
 // Reading the list drives a pane's keyboard, so it waits for a moment where that is
-// safe: the band is up, Claude is not mid-turn, and its composer is empty. The list is
+// safe: the composer is collapsed, Claude is not mid-turn, and its composer is empty. The list is
 // the same across a tab's panes, so it is scraped once (from whichever pane is ready)
 // and shared via tab.hybridCommands.
 function maybeLoadHybridCommands(tab) {
@@ -2576,8 +2667,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   term.loadAddon(serialize);
   // The xterm lives in its own framed box; this pane's composer is appended to paneEl
   // later as a sibling below it, so the composer sits under the terminal, not inside its
-  // frame. The mask stays a child of paneEl (its offset is measured live), so its
-  // geometry is unaffected by this wrapper.
+  // frame. Hybrid input's composer collapse works on xterm's own row elements, so it is
+  // unaffected by this wrapper.
   const termWrap = document.createElement('div');
   termWrap.className = 'pane-term';
   paneEl.appendChild(termWrap);
@@ -2610,9 +2701,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     // resumePending covers the gap between a Resume click and its command line arriving.
     claudeRunGen: 0, claudeStartedAt: 0, atPrompt: false, sessionPollBusy: false,
     resumePending: false, resumePendingTimer: null,
-    // Hybrid input: the band over Claude's own composer box, whether it is currently
-    // drawn, and whether xterm's keyboard is switched off behind it.
-    mask: null, masked: false, everMasked: false, stdinOff: false, hybridRaw: false,
+    // Hybrid input: whether Claude's own composer box is currently collapsed out of the
+    // terminal (and the rows/offset it was collapsed at), and whether xterm's keyboard is
+    // switched off behind it.
+    masked: false, everMasked: false, stdinOff: false, hybridRaw: false,
+    collapseKey: null, collapseTopPx: null, composerGuard: null,
     copilotRunning: false, copilotBusyUntil: 0, copilotSessionId: null,
     copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
@@ -2853,14 +2946,11 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   });
   paneEl.appendChild(closeBtn);
 
-  // Hybrid input's band. Always in the DOM, sized and shown only while hybrid mode is
-  // on and the pane is running claude.
-  const mask = document.createElement('div');
-  mask.className = 'pane-mask';
-  paneEl.appendChild(mask);
-  pane.mask = mask;
+  // Hybrid input collapses Claude's composer rows out of the terminal while hybrid mode
+  // is on and the pane is running claude; the guard keeps the mouse off the moved rows.
+  installComposerGuard(pane);
 
-  // The band has to follow whatever the TUI just drew, so it is driven off renders
+  // The collapse has to follow whatever the TUI just drew, so it is driven off renders
   // rather than a timer.
   term.onRender(() => updatePaneMask(pane));
 
