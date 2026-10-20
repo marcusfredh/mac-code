@@ -199,7 +199,8 @@ contextBridge.exposeInMainWorld('flowCfgApi', {
 contextBridge.exposeInMainWorld('fileApi', {
   read:         (p)          => ipcRenderer.invoke('file:read', p),
   write:        (p, content) => ipcRenderer.invoke('file:write', p, content),
-  openExternal: (p)          => ipcRenderer.invoke('file:openExternal', p)
+  openExternal: (p)          => ipcRenderer.invoke('file:openExternal', p),
+  openFolderUri: (uri, opts) => ipcRenderer.invoke('file:openFolderUri', uri, opts)
 });
 
 contextBridge.exposeInMainWorld('flowApi', {

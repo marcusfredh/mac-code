@@ -116,6 +116,7 @@ const { createClaudeConfig, quoteForDisplay } = require('./claudeConfig');
 const { createFlowStore, skillConfirmText, diffText, writeDiffFile } = require('./flowStore');
 const noteImages = require('./noteImages');
 const { themeById } = require('./appThemes');
+const { folderPathFromFileUri, checkLocalFolder, worktreeRoots, folderOpenDecision } = require('./folderUri');
 
 app.setName('Mac Code');
 errState.nameSet = true;
@@ -379,7 +380,10 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
     cols,
     rows,
     cwd,
-    env: { ...process.env, MAC_CODE_FLOW_KEY: flowKey },
+    // FORCE_HYPERLINK: xterm renders OSC 8 hyperlinks, but nothing in this environment
+    // tells CLIs so (no WT_SESSION / TERM_PROGRAM they recognise), and without it Claude
+    // Code prints its statusline worktree path as plain text instead of a folder link.
+    env: { ...process.env, MAC_CODE_FLOW_KEY: flowKey, FORCE_HYPERLINK: '1' },
     useConpty: true
   });
 
@@ -1394,6 +1398,32 @@ ipcMain.handle('file:openExternal', async (_, p) => {
     catch (err) { return { error: err.message }; }
   }
   const err = await shell.openPath(s);
+  return err ? { error: err } : { ok: true };
+});
+// OSC 8 file: links clicked in a terminal (Claude Code's statusline links its worktree
+// folder). The URI comes from whatever runs in the pane, so it only ever opens an
+// existing local folder in Explorer — never a file, which would run or open an
+// attacker-chosen target on one click, never a network path, a shell-namespace folder
+// or a path through a symlink or junction (folderUri.js has the details). What is
+// opened is the canonical path checkLocalFolder verified, not the URI's spelling of it.
+// Explorer rendering a folder's contents can still reach out over SMB, so only a folder
+// inside the worktree root opens straight away (the statusline's own link). Any other
+// folder comes back as { needsConfirm, path } unopened; the renderer asks the user and
+// calls again with { confirmed: true, path }, and every check is run again on that call.
+// The decision is made here rather than in the renderer, which could be talked into
+// skipping it.
+ipcMain.handle('file:openFolderUri', async (e, uri, opts) => {
+  if (!fromMainWindow(e)) return { error: 'not allowed' };
+  const r = folderPathFromFileUri(uri);
+  if (r.error) return { error: r.error };
+  const c = await checkLocalFolder(r.path, fs.promises);
+  if (c.error) return { error: c.error };
+  let template = '';
+  try { template = getSettings().github.worktreeTemplate; } catch (_) {}
+  if (folderOpenDecision(c.path, worktreeRoots(template), opts) !== 'open') {
+    return { needsConfirm: true, path: c.path };
+  }
+  const err = await shell.openPath(c.path);
   return err ? { error: err } : { ok: true };
 });
 

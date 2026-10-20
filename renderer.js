@@ -1093,12 +1093,17 @@ function applyComposerCollapse(pane, rows, cellFallback) {
   guard.style.top = guardTop + 'px';
   guard.classList.add('on');
   pane.collapseKey = key;
-  pane.collapseTopPx = top * h;
+  // What composerGuardLinkAt needs to map a point on the guard back to a buffer cell.
+  pane.collapseRows = n;
+  pane.collapseTopRow = top;
+  pane.collapseCellH = h;
   return true;
 }
 
 function clearComposerCollapse(pane) {
-  pane.collapseTopPx = null;
+  pane.collapseRows = null;
+  pane.collapseTopRow = null;
+  pane.collapseCellH = null;
   if (pane.composerGuard) pane.composerGuard.classList.remove('on');
   if (pane.collapseKey == null) return;
   pane.collapseKey = null;
@@ -1114,6 +1119,8 @@ function clearComposerCollapse(pane) {
 // .pane-term, so everything else behaves as on the terminal: a mousedown still bubbles to
 // the pane (activating it) and the document (closing menus), and right-click still pastes
 // or opens the pane menu. It stops short of the scrollbar so the thumb can be grabbed.
+// Links under it (the statusline's worktree folder link sits there) are looked up for the
+// row that is actually drawn at the point, so they still show a pointer and open on click.
 function installComposerGuard(pane) {
   const wrap = pane.el.querySelector('.pane-term');
   if (!wrap) return;
@@ -1121,16 +1128,52 @@ function installComposerGuard(pane) {
   guard.className = 'pane-composer-guard';
   wrap.appendChild(guard);
   pane.composerGuard = guard;
+  // Left mousedown point and selection, to tell a click from a selection drag on mouseup.
+  let down = null;
   guard.addEventListener('mousedown', (e) => {
     // Not focusable: a left click here would otherwise blur the composer that
     // setActivePane just focused. Right-button is left alone for the context menu.
     if (e.button !== 2) e.preventDefault();
+    down = null;
+    if (e.button === 0) {
+      let sel = '';
+      try { sel = pane.term.getSelection(); } catch (_) {}
+      down = { x: e.clientX, y: e.clientY, sel };
+    }
   });
+  guard.addEventListener('mouseup', (e) => {
+    const d = down;
+    down = null;
+    if (!d || e.button !== 0) return;
+    if (Math.abs(e.clientX - d.x) > 4 || Math.abs(e.clientY - d.y) > 4) return;
+    let sel = '';
+    try { sel = pane.term.getSelection(); } catch (_) {}
+    if (sel !== d.sel) return;
+    composerGuardLinkAt(pane, e.clientX, e.clientY).then((link) => {
+      if (!link) return;
+      try { link.activate(e, link.text); } catch (_) {}
+    });
+  });
+  // Hover: one lookup per cell (and per collapse layout), not per mousemove. hoverSeq
+  // drops a lookup that resolves after the mouse has already moved on.
+  let hoverKey = null, hoverSeq = 0;
+  const setCursor = (c) => { if (guard.style.cursor !== c) guard.style.cursor = c; };
+  guard.addEventListener('mouseleave', () => { hoverKey = null; hoverSeq++; setCursor(''); });
   // A selection drag that started in the transcript must not reach xterm's document-level
   // drag listener from here, or it extends onto the hidden and shifted rows. Mouseup is
   // never stopped, so the drag still ends.
   guard.addEventListener('mousemove', (e) => {
     if (e.buttons & 1) e.stopPropagation();
+    if (e.buttons) return;
+    const cell = composerGuardCell(pane, e.clientX, e.clientY);
+    const key = cell ? `${cell.x}|${cell.y}|${pane.collapseKey}` : null;
+    if (key === hoverKey) return;
+    hoverKey = key;
+    const seq = ++hoverSeq;
+    if (!cell) { setCursor(''); return; }
+    composerGuardLinkAt(pane, e.clientX, e.clientY).then((link) => {
+      if (seq === hoverSeq) setCursor(link ? 'pointer' : '');
+    });
   });
   // The wheel is handed to xterm as if it hit the terminal, so the transcript scrolls
   // exactly as it does everywhere else in the pane.
@@ -1145,6 +1188,62 @@ function installComposerGuard(pane) {
       bubbles: true, cancelable: true
     }));
   }, { passive: false });
+}
+
+// The buffer cell drawn at a point on the composer guard, as { x, y } in xterm's link
+// convention (both 1-based, y a buffer line number), or null where no row is drawn.
+// Visual row v at or below the collapse's top row shows the row n further down (see
+// applyComposerCollapse); the bottom n visual rows show nothing.
+function composerGuardCell(pane, clientX, clientY) {
+  try {
+    const term = pane.term;
+    const n = pane.collapseRows, top = pane.collapseTopRow, h = pane.collapseCellH;
+    if (pane.collapseKey == null || !(n > 0) || !(h > 0) || top == null) return null;
+    const screen = pane.el.querySelector('.xterm-screen');
+    if (!screen || !term.cols || !term.rows) return null;
+    const sr = screen.getBoundingClientRect();
+    // xterm's own css cell width (private API, same as its mouse service uses); the
+    // screen's width per column is a close enough stand-in if that ever moves.
+    let w = 0;
+    try { w = term._core._renderService.dimensions.css.cell.width; } catch (_) {}
+    if (!(w > 0)) w = sr.width / term.cols;
+    if (!(w > 0)) return null;
+    const v = Math.floor((clientY - sr.top) / h);
+    const col = Math.floor((clientX - sr.left) / w);
+    if (v < top || v + n >= term.rows || col < 0 || col >= term.cols) return null;
+    return { x: col + 1, y: term.buffer.active.viewportY + v + n + 1 };
+  } catch (_) { return null; }
+}
+
+// The link at a point on the composer guard: the same providers xterm itself asks, in
+// its order (OSC 8 first, then the file and URL providers), first match wins. This reaches
+// into xterm's private linkifier; if that is not there, nothing under the guard is a link.
+function composerGuardLinkAt(pane, clientX, clientY) {
+  const cell = composerGuardCell(pane, clientX, clientY);
+  if (!cell) return Promise.resolve(null);
+  let providers;
+  try { providers = pane.term._core.linkifier2._linkProviders; } catch (_) {}
+  if (!Array.isArray(providers) || !providers.length) return Promise.resolve(null);
+  const cols = pane.term.cols;
+  const at = (l) => {
+    const r = l && l.range;
+    if (!r || !r.start || !r.end) return false;
+    const cur = cell.y * cols + cell.x;
+    return r.start.y * cols + r.start.x <= cur && cur <= r.end.y * cols + r.end.x;
+  };
+  // A provider that never calls back counts as no links, so one cannot stall the rest.
+  const asks = providers.map((p) => new Promise((resolve) => {
+    setTimeout(() => resolve([]), 500);
+    try { p.provideLinks(cell.y, (links) => resolve(Array.isArray(links) ? links : [])); }
+    catch (_) { resolve([]); }
+  }));
+  return Promise.all(asks).then((replies) => {
+    for (const links of replies) {
+      const hit = links.find(at);
+      if (hit) return hit;
+    }
+    return null;
+  }).catch(() => null);
 }
 
 // Collapse geometry and keyboard state for one pane. Cheap enough for every render.
@@ -2659,7 +2758,25 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
 
   const term = new Terminal({
     lineHeight: 1.0, cursorBlink: true, allowProposedApi: true,
-    ...terminalOptions()
+    ...terminalOptions(),
+    // OSC 8 hyperlinks (escape-sequence links, e.g. Claude Code's statusline worktree
+    // path). Without a handler xterm only takes http(s) and opens them via a confirm()
+    // and window.open. The text a link is drawn over can say anything, so every OSC 8
+    // link asks in an in-app dialog first, except a folder inside the worktree root:
+    // - http(s): confirmOscLink (host + full URL), then openLink like every other link.
+    // - file: only ever a local folder, never a file; main runs the checks and decides
+    //   whether to ask (openOscFolderLink, folderUri.js).
+    // - every other scheme is ignored.
+    // The composer guard activates OSC links through this same handler.
+    linkHandler: {
+      allowNonHttpProtocols: true,
+      activate(ev, uri) {
+        if (/^file:/i.test(uri)) openOscFolderLink(uri);
+        else if (/^https?:\/\//i.test(uri)) {
+          confirmOscLink(uri).then((href) => { if (href) openLink(href, ev); });
+        }
+      }
+    }
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -2705,7 +2822,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     // terminal (and the rows/offset it was collapsed at), and whether xterm's keyboard is
     // switched off behind it.
     masked: false, everMasked: false, stdinOff: false, hybridRaw: false,
-    collapseKey: null, collapseTopPx: null, composerGuard: null,
+    collapseKey: null, collapseRows: null, collapseTopRow: null, collapseCellH: null,
+    composerGuard: null,
     copilotRunning: false, copilotBusyUntil: 0, copilotSessionId: null,
     copilotUsage: null,
     suppressBusyUntil: 0, lastDataAt: 0, usage: null,
@@ -4146,6 +4264,53 @@ function parseGitHubUrl(href) {
     if (view) return { kind: 'repo', repo, view };
   }
   return { kind: 'web' };
+}
+
+// The in-app confirm dialog, or the browser's own if settingsView hasn't set it up.
+function askConfirm(title, message, okLabel) {
+  if (typeof window.appConfirm === 'function') return window.appConfirm({ title, message, okLabel });
+  return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+}
+
+// OSC 8 links ask before anything opens. Their visible text and target are independent
+// (a program can draw "https://github.com/…" over a link to anywhere, and the text can
+// be hidden — concealed, or drawn in the background colour), so the dialog shows what
+// the link really opens. Nothing is exempt, github.com included: a GitHub link can lead
+// on to a sign-in page in the GitHub window.
+// http(s): the host the URL parser sees comes first, on its own line (punycode for an
+// IDN), then the full address. URIs with userinfo are refused without asking:
+// "https://github.com&x@evil.example" goes to evil.example but reads as github.com.
+// So are URIs over OSC_LINK_MAX (padding that could push the real host out of view)
+// and ones with Unicode format characters (bidi overrides, zero-width), raw or
+// percent-decoded. What is shown and opened is the parser's own url.href, not the raw
+// text. Resolves to that href when the user agrees, else null.
+const OSC_LINK_MAX = 2048;
+function confirmOscLink(uri) {
+  if (typeof uri !== 'string' || uri.length > OSC_LINK_MAX) return Promise.resolve(null);
+  let url;
+  try { url = new URL(uri); } catch (_) { return Promise.resolve(null); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) return Promise.resolve(null);
+  const href = url.href;
+  let decoded = href;
+  try { decoded = decodeURIComponent(href); } catch (_) {}
+  if (href.length > OSC_LINK_MAX || /\p{Cf}/u.test(uri) || /\p{Cf}/u.test(decoded)) return Promise.resolve(null);
+  return askConfirm('Öppna länken?',
+    `${url.host}\n\nEtt program i terminalen vill öppna den här adressen:\n${href}`, 'Öppna')
+    .then((ok) => (ok ? href : null));
+}
+
+// file: OSC 8 links. Main decides: a folder inside the worktree root (the statusline's
+// own link) opens straight away; any other folder that passes its checks comes back as
+// { needsConfirm, path } with the canonical path, and only opens if the user agrees.
+// Main checks everything again on the confirmed call, and opens only if the folder still
+// resolves to the path shown here.
+async function openOscFolderLink(uri) {
+  let r;
+  try { r = await window.fileApi.openFolderUri(uri); } catch (_) { return; }
+  if (!r || !r.needsConfirm || typeof r.path !== 'string') return;
+  const ok = await askConfirm('Öppna mappen?',
+    `Ett program i terminalen vill öppna den här mappen i Utforskaren:\n\n${r.path}`, 'Öppna');
+  if (ok) window.fileApi.openFolderUri(uri, { confirmed: true, path: r.path });
 }
 
 // Every link click in the app lands here. Anything that is not github.com goes to the

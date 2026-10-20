@@ -2353,10 +2353,13 @@
       width: min(440px, 100%); display: flex; flex-direction: column; gap: 10px; padding: 18px 20px 16px;
       background: var(--dialog); color: var(--fg); font-family: var(--ui);
       border: 1px solid rgba(255, 255, 255, 0.09); border-radius: calc(10px * var(--radius-k)); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+      /* Never taller than the window: a long message (an OSC 8 link's URL, say) scrolls
+         inside the text, so the title and the buttons always stay on screen. */
+      max-height: calc(100vh - 48px);
     }
-    .set-confirm-title { font-size: 14px; font-weight: 600; color: var(--fg-strong); }
-    .set-confirm-text { font-size: 12.5px; line-height: 1.55; color: var(--fg); white-space: pre-wrap; word-break: break-word; user-select: text; }
-    .set-confirm-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+    .set-confirm-title { flex-shrink: 0; font-size: 14px; font-weight: 600; color: var(--fg-strong); }
+    .set-confirm-text { min-height: 0; overflow: auto; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.55; color: var(--fg); white-space: pre-wrap; word-break: break-word; user-select: text; }
+    .set-confirm-foot { flex-shrink: 0; display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
     /* ---------- Flöden (flowEditor.js) ---------- */
     /* Wide dialog: the window minus the overlay's 16px inset. Content does not scroll; the canvas fills it. */
