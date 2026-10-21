@@ -2301,6 +2301,28 @@
     .set-row-note.warn { color: var(--amber); }
     .set-row-note.ok { color: var(--green); }
     .set-row-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    /* Ändringslogg */
+    .cl-ver { border-bottom: 1px solid var(--line); }
+    .cl-sum {
+      display: flex; align-items: center; gap: 10px; padding: 12px 4px; cursor: pointer; list-style: none;
+      font-size: 14px; color: var(--fg-strong); border-radius: calc(5px * var(--radius-k));
+    }
+    .cl-sum::-webkit-details-marker { display: none; }
+    .cl-sum::before {
+      content: ''; width: 6px; height: 6px; flex-shrink: 0; margin: 0 4px 0 2px;
+      border-right: 1.5px solid var(--fg-dim); border-bottom: 1.5px solid var(--fg-dim);
+      transform: rotate(-45deg); transition: transform 0.12s;
+    }
+    .cl-ver[open] > .cl-sum::before { transform: rotate(45deg); }
+    .cl-sum:hover { background: var(--fill-hover); }
+    .cl-sum:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+    .cl-v { font-family: var(--mono); font-weight: 600; }
+    .cl-date { font-size: 12.5px; color: var(--fg-dim); }
+    .cl-sum .cfg-badge[hidden] { display: none; }
+    .cl-sum .cfg-badge { margin-left: 0; color: var(--accent); border-color: var(--accent); }
+    .cl-list { margin: 0; padding: 0 8px 14px 38px; font-size: 13px; line-height: 1.5; color: var(--fg); }
+    .cl-list li { margin: 3px 0; }
+    .cl-list li::marker { color: var(--fg-dim); }
     /* Claude-konfiguration (agents / skills / hooks in ~/.claude) */
     .set-btn.sm { height: 28px; padding: 0 10px; font-size: 12.5px; }
     .cfg-group { display: flex; align-items: flex-end; gap: 24px; padding: 22px 0 8px; border-bottom: 1px solid var(--line); }
@@ -3350,6 +3372,7 @@
   <script src="flowEditor.js"></script>
   <!-- appThemes.js before settingsView.js: it applies the saved app theme while it loads -->
   <script src="appThemes.js"></script>
+  <script src="changelog.js"></script>
   <!-- settingsView.js first: the scripts below read settings while they load -->
   <script src="settingsView.js"></script>
   <script src="chatView.js"></script>

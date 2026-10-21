@@ -359,6 +359,7 @@
       ['Godkänn senaste förfrågan', 'Ctrl+Enter'],
       ['Öppna inställningar', 'Ctrl+,']
     ] },
+    { id: 'changelog', label: 'Ändringslogg', changelog: true },
     { id: 'about', label: 'Om', about: true }
   ];
 
@@ -612,6 +613,43 @@
 
     ui.about = { vLabel, pathEl, say };
     return rows;
+  }
+
+  // Ändringslogg: one <details> per version from window.CHANGELOG (changelog.js). Search
+  // matches version and date only, never the bullet text. The running version gets a badge
+  // once api.version() answers (setCurrentVersion, called from refreshAbout).
+  function buildChangelogRows(sec) {
+    const list = Array.isArray(window.CHANGELOG) ? window.CHANGELOG : [];
+    const rows = [];
+    const badges = new Map();
+    list.forEach((e, i) => {
+      const d = el('details', 'cl-ver');
+      if (i < 3) d.open = true;
+      const sum = el('summary', 'cl-sum');
+      sum.appendChild(el('span', 'cl-v', e.version));
+      sum.appendChild(el('span', 'cl-date', e.date));
+      const badge = el('span', 'cfg-badge', 'Nuvarande');
+      badge.hidden = true;
+      sum.appendChild(badge);
+      d.appendChild(sum);
+      const ul = el('ul', 'cl-list');
+      for (const t of e.items) ul.appendChild(el('li', null, t));
+      d.appendChild(ul);
+      badges.set(e.version, badge);
+      rows.push({ def: { label: 'Version ' + e.version }, sectionId: sec.id, controls: [], el: d,
+        search: ('ändringslogg changelog ' + e.version + ' ' + e.date).toLowerCase() });
+    });
+    if (!rows.length) {
+      const n = el('div', 'set-section-note', 'Ingen ändringslogg hittades.');
+      rows.push({ def: { label: 'Ändringslogg' }, sectionId: sec.id, controls: [], el: n, search: 'ändringslogg changelog' });
+    }
+    ui.changelog = { badges };
+    return rows;
+  }
+
+  function setCurrentVersion(v) {
+    if (!ui.changelog) return;
+    for (const [ver, b] of ui.changelog.badges) b.hidden = ver !== v;
   }
 
   // ---------- Claude-konfiguration: global agents, skills and hooks in ~/.claude ----------
@@ -1321,6 +1359,7 @@
       box.appendChild(el('h2', 'set-h2', sec.label));
       if (sec.note) box.appendChild(el('div', 'set-section-note', sec.note));
       const rows = sec.keys ? buildKeysRows(sec) : sec.about ? buildAboutRows(sec)
+        : sec.changelog ? buildChangelogRows(sec)
         : sec.claudecfg ? buildClaudeCfgRows(sec, box)
         : sec.claudeflows ? buildFlowRows(sec, box) : sec.rows.map((r) => buildRow(r, sec.id));
       for (const r of rows) { if (r.flowSearch) box.insertBefore(r.el, flowUi.host); else box.appendChild(r.el); ui.rows.push(r); }
@@ -1444,6 +1483,7 @@
     try {
       const v = await api.version();
       ui.about.vLabel.textContent = 'Mac Code ' + (v || '');
+      setCurrentVersion(v);
     } catch (_) {}
     try {
       const p = await api.path();
