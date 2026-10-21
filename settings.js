@@ -11,7 +11,8 @@ const path = require('path');
 const STR_MAX = 1024;
 
 // section -> key -> spec. `def` is the default and must reproduce today's behavior
-// (one deliberate exception: github.openAs defaults to 'overlay', a requested change).
+// (two deliberate exceptions, both requested changes: github.openAs defaults to 'overlay',
+// claude.autoResume defaults to true).
 const SCHEMA = {
   general: {
     restoreTabs:  { type: 'bool', def: true },
@@ -38,6 +39,7 @@ const SCHEMA = {
     permissionDefault: { type: 'enum', values: [null, 'default', 'auto', 'acceptEdits', 'bypassPermissions'], def: null },
     notify:            { type: 'bool', def: true },
     showUsage:         { type: 'bool', def: true },
+    autoResume:        { type: 'bool', def: true },
     cliPath:           { type: 'string', def: '' }
   },
   github: {

@@ -2818,6 +2818,10 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     // resumePending covers the gap between a Resume click and its command line arriving.
     claudeRunGen: 0, claudeStartedAt: 0, atPrompt: false, sessionPollBusy: false,
     resumePending: false, resumePendingTimer: null,
+    // lastClaudeLive: lastClaude came from a Claude that was still running when the app
+    // closed (saved as lastClaudeLive). autoResumePending: a restored pane resumes it once,
+    // at its first prompt; closingWhileRunning marks panes whose Claude the close ends.
+    lastClaudeLive: false, autoResumePending: !!opts.autoResume, closingWhileRunning: false,
     // Hybrid input: whether Claude's own composer box is currently collapsed out of the
     // terminal (and the rows/offset it was collapsed at), and whether xterm's keyboard is
     // switched off behind it.
@@ -3078,6 +3082,8 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     // Fires on every Enter; a bare Enter only redraws the prompt.
     if (data.trim()) pane.atPrompt = false;
     clearResumePending(pane);
+    // The user ran something before the first prompt: no auto resume any more.
+    if (data.trim()) pane.autoResumePending = false;
     const parts = data.trim().split(/\s+/);
     const first = parts[0]?.toLowerCase();
     const second = parts[1]?.toLowerCase();
@@ -3123,7 +3129,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       // Back at the prompt after Claude: its exit line is just above, and the shell's cwd
       // is the folder that session belongs to.
       const sid = readClaudeExitId(pane);
-      if (sid) { pane.lastClaude = { id: sid, cwd }; scheduleSaveSession(); }
+      if (sid) { pane.lastClaude = { id: sid, cwd }; pane.lastClaudeLive = !!pane.closingWhileRunning; scheduleSaveSession(); }
       pane.claudeRunning = false; scheduleAgentRender();
     }
     // From the first prompt on, the profile and prompt wrapper are in place, so the
@@ -3313,7 +3319,7 @@ async function createTab(opts = {}) {
     ]);
   });
 
-  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent, resumeClaude: opts.resumeClaude });
+  const firstPane = await createPaneProcess(tab, paneEl, { cwd: opts.cwd, runOnReady: opts.runOnReady, initialContent: opts.initialContent, resumeClaude: opts.resumeClaude, autoResume: opts.autoResume });
   tab.activePaneId = firstPane.paneId;
 
   setActive(tabId, { keepOverlay: !!opts.keepOverlay });
@@ -5241,7 +5247,30 @@ function canOfferResume(pane) {
     && !pane.claudeRunning && !pane.copilotRunning
     && isClaudeSessionId(pane.lastClaude?.id) && sameCwd(pane.lastClaude.cwd, pane.cwd);
 }
+// Shared by the Resume button and the one-shot auto resume at start.
+async function resumeClaudeInPane(pane, sid) {
+  pane.resumePending = true;
+  clearTimeout(pane.resumePendingTimer);
+  pane.resumePendingTimer = setTimeout(() => { clearResumePending(pane); updateResumeBar(pane); }, 2000);
+  // Ctrl+C first drops anything half-typed at the prompt, so the command runs alone.
+  window.term.input(pane.ptyId, '\x03');
+  await new Promise(r => setTimeout(r, 150));
+  const cmd = `claude --resume ${sid}`;
+  markAgentRunningFromCmd(pane, cmd);
+  window.term.input(pane.ptyId, cmd + '\r');
+  pane.term.focus();
+}
 function updateResumeBar(pane) {
+  // claude.autoResume: a pane restored from a live Claude resumes it once, at its first
+  // prompt. One-shot whatever happens, so a declined or failed resume never repeats.
+  if (pane.autoResumePending && pane.shellReady) {
+    pane.autoResumePending = false;
+    if (canOfferResume(pane)) {
+      hideResumeBar(pane);
+      resumeClaudeInPane(pane, pane.lastClaude.id);
+      return;
+    }
+  }
   if (!canOfferResume(pane)) { hideResumeBar(pane); return; }
   const sid = pane.lastClaude.id;
   if (pane.resumeBar?.dataset.sid === sid) return;
@@ -5259,16 +5288,7 @@ function updateResumeBar(pane) {
     const ok = canOfferResume(pane) && pane.lastClaude.id === sid;
     hideResumeBar(pane);
     if (!ok) return;
-    pane.resumePending = true;
-    clearTimeout(pane.resumePendingTimer);
-    pane.resumePendingTimer = setTimeout(() => { clearResumePending(pane); updateResumeBar(pane); }, 2000);
-    // Ctrl+C first drops anything half-typed at the prompt, so the command runs alone.
-    window.term.input(pane.ptyId, '\x03');
-    await new Promise(r => setTimeout(r, 150));
-    const cmd = `claude --resume ${sid}`;
-    markAgentRunningFromCmd(pane, cmd);
-    window.term.input(pane.ptyId, cmd + '\r');
-    pane.term.focus();
+    await resumeClaudeInPane(pane, sid);
   });
   const id = document.createElement('span');
   id.className = 'pane-resume-id';
@@ -5281,6 +5301,7 @@ function updateResumeBar(pane) {
     e.stopPropagation();
     hideResumeBar(pane);
     pane.lastClaude = null;
+    pane.lastClaudeLive = false;
     scheduleSaveSession();
   });
   bar.append(btn, id, close);
@@ -5883,6 +5904,7 @@ async function capturePaneClaudeSession(pane) {
   if (!res || res.hasTranscript !== true || !isClaudeSessionId(res.sessionId) || typeof res.cwd !== 'string') return;
   if (pane.lastClaude?.id === res.sessionId && sameCwd(pane.lastClaude.cwd, res.cwd)) return;
   pane.lastClaude = { id: res.sessionId, cwd: res.cwd };
+  pane.lastClaudeLive = false;
   scheduleSaveSession();
   updateResumeBar(pane);
 }
@@ -6256,6 +6278,12 @@ function saveSession() {
     const ap = (t.type === 'editor' || t.type === 'chat') ? null : getActivePane(t);
     let scrollback = null;
     if (ap?.serialize) { try { scrollback = ap.serialize.serialize({ scrollback: Math.min(appSetting('terminal', 'scrollback'), 5000) }); } catch (_) {} }
+    // A Claude still running at close (lastClaudeLive) wins over an older exit line: the
+    // active pane's, else a same-folder sibling's. Then the plain fallback, not live.
+    const sib = (pred) => ap && [...t.panes.values()].find(p => p.lastClaude && sameCwd(p.lastClaude.cwd, ap.cwd) && pred(p));
+    const livePane = ap && ((ap.lastClaude && ap.lastClaudeLive) ? ap : sib(p => p.lastClaudeLive));
+    const saved = !ap ? null : livePane ? { pane: livePane, live: true }
+      : (ap.lastClaude ? { pane: ap, live: false } : (() => { const p = sib(() => true); return p ? { pane: p, live: false } : null; })());
     const view = chatTabs.get(id);
     tabsData.push({
       type: t.type === 'editor' ? 'editor' : t.type === 'chat' ? 'chat' : 'terminal',
@@ -6273,8 +6301,9 @@ function saveSession() {
       // Last Claude CLI session that exited in this tab, offered as one-click resume on
       // restore. Only the active pane comes back, so a split sibling's only counts when it
       // ran in the same folder; otherwise it could never be offered.
-      lastClaude: ap ? (ap.lastClaude || [...t.panes.values()]
-        .find(p => p.lastClaude && sameCwd(p.lastClaude.cwd, ap.cwd))?.lastClaude || null) : null,
+      lastClaude: saved?.pane.lastClaude || null,
+      // Only a Claude still running at close is auto resumed at start.
+      lastClaudeLive: !!saved?.live,
       scrollback
     });
     if (id === activeId) activeIndex = i;
@@ -6307,6 +6336,8 @@ window.shortcuts?.onBeforeClose?.(async () => {
   }
   await Promise.all(pendingSaves);
   const panes = getAllClaudePanes().map(x => x.pane);
+  // Before any Ctrl+C: the exit line these produce is a live one (auto resume at start).
+  for (const p of panes) p.closingWhileRunning = true;
   if (panes.length) {
     for (const p of panes) window.term.input(p.ptyId, '\x03');
     await new Promise(r => setTimeout(r, 250));
@@ -6460,7 +6491,8 @@ window.onAppSettingsChanged(applySettings);
         }
         else tab = await createTab({ cwd: t.cwd || undefined, initialContent: t.scrollback || null,
           resumeClaude: isClaudeSessionId(t.lastClaude?.id) && typeof t.lastClaude.cwd === 'string'
-            ? { id: t.lastClaude.id, cwd: t.lastClaude.cwd } : null, keepOverlay });
+            ? { id: t.lastClaude.id, cwd: t.lastClaude.cwd } : null,
+          autoResume: !!t.lastClaudeLive && !!appSetting('claude', 'autoResume'), keepOverlay });
         if (t.color) setTabColor(tab, t.color);
         if (t.customTitle) {
           tab.customTitle = t.customTitle;

@@ -16,6 +16,7 @@ test('DEFAULTS: schema v1, reproduces today', () => {
   assert.strictEqual(DEFAULTS.claude.model, null);
   assert.strictEqual(DEFAULTS.claude.permissionDefault, null);
   assert.strictEqual(DEFAULTS.claude.cliPath, '');
+  assert.strictEqual(DEFAULTS.claude.autoResume, true);
   assert.strictEqual(DEFAULTS.github.links, 'app');
   assert.strictEqual(DEFAULTS.github.pollSeconds, 60);
   assert.strictEqual(DEFAULTS.github.openAs, 'overlay');
@@ -242,6 +243,11 @@ test('parseWorktreeList: paths and branches, main clone first, CRLF tolerated', 
   assert.strictEqual(w[1].branch, 'refs/heads/feat/x');
   assert.strictEqual(w[2].branch, null);
   assert.deepStrictEqual(parseWorktreeList(''), []);
+});
+
+test('claude.autoResume: bool kept, invalid falls back to true', () => {
+  assert.strictEqual(validate({ claude: { autoResume: false } }).claude.autoResume, false);
+  assert.strictEqual(validate({ claude: { autoResume: 'no' } }).claude.autoResume, true);
 });
 
 test('github open/merge settings: valid values kept, invalid fall back', () => {
