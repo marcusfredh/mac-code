@@ -244,6 +244,48 @@
     .tab.active .tab-close { opacity: 0.55; }
     .tab-close:hover { background: rgba(255, 255, 255, 0.10); opacity: 1; }
     .tab-close svg { width: 9px; height: 9px; }
+    /* Tab groups. The header chip sits before the group's first member; members carry
+       the group colour along their top edge (box-shadow: ::after is the active underline). */
+    .tab-group-chip {
+      display: flex;
+      align-items: center;
+      height: 32px;
+      padding: 0 5px;
+      flex-shrink: 0;
+      cursor: pointer;
+      border-radius: calc(7px * var(--radius-k)) calc(7px * var(--radius-k)) 0 0;
+      outline: none;
+      transition: background 0.12s;
+    }
+    .tab-group-chip:hover { background: var(--fill); }
+    .tab-group-chip:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+    .tab-group-chip.dragging { opacity: 0.55; cursor: grabbing; }
+    .tgc-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      height: 20px;
+      max-width: 150px;
+      padding: 0 8px;
+      border-radius: calc(5px * var(--radius-k));
+      background: var(--group-color);
+      /* every app theme's --bg is near-black: readable on all the palette colours */
+      color: var(--bg);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .tgc-name { overflow: hidden; text-overflow: ellipsis; }
+    .tgc-name:empty, .tgc-count:empty { display: none; }
+    .tgc-count { opacity: 0.8; font-variant-numeric: tabular-nums; }
+    /* no name: a short pill, which shows the count once collapsed */
+    .tab-group-chip.unnamed .tgc-pill { min-width: 16px; padding: 0 5px; justify-content: center; }
+    .tab-group-chip.unnamed:not(.collapsed) .tgc-pill { width: 16px; height: 12px; padding: 0; }
+    .tab-group-chip.renaming .tgc-pill { display: none; }
+    .tgc-input { font-size: 12px; min-width: 90px; max-width: 140px; }
+    .tab.in-group { box-shadow: inset 0 2px 0 var(--group-color); }
+    .tab.group-collapsed { display: none; }
     .new-tab-btn {
       -webkit-app-region: no-drag;
       width: 32px; height: 32px;
@@ -3314,6 +3356,7 @@
   <script src="githubView.js"></script>
   <script src="notesView.js"></script>
   <script src="repoUsage.js"></script>
+  <script src="tabGroups.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

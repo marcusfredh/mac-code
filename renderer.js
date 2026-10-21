@@ -77,6 +77,11 @@ let tabSeq = 0;
 let paneSeq = 0;
 const newTabId  = () => 'tab-'  + (++tabSeq);
 const newPaneId = () => 'pane-' + (++paneSeq);
+// Tab groups: groupId -> { groupId, name, color, collapsed, headerEl }; a member tab
+// carries tab.groupId. Ids are never reused, saved ones included (restore maps them).
+const groups = new Map();
+let groupSeq = 0;
+const newGroupId = () => 'grp-' + (++groupSeq);
 
 const tabsEl          = document.getElementById('tabs');
 const areaEl          = document.getElementById('terminal-area');
@@ -216,6 +221,8 @@ function reorderTabsMap() {
       if (t.tabEl === el) { newOrder.set(id, t); break; }
     }
   }
+  // A tab whose chip isn't in the strip (yet) must not fall out of the Map.
+  for (const [id, t] of tabs) if (!newOrder.has(id)) newOrder.set(id, t);
   tabs.clear();
   for (const [id, t] of newOrder) tabs.set(id, t);
   updateStatus();
@@ -276,23 +283,51 @@ document.addEventListener('pointermove', (e) => {
     return;
   }
 
-  for (const other of tabsEl.children) {
-    if (other === tabEl) continue;
-    const r = other.getBoundingClientRect();
-    if (e.clientX >= r.left && e.clientX <= r.right) {
-      const before = e.clientX < r.left + r.width / 2;
-      if (before) tabsEl.insertBefore(tabEl, other);
-      else tabsEl.insertBefore(tabEl, other.nextSibling);
-      break;
-    }
-  }
+  // Strip reorder. Group blocks move as units and a member stays inside its own group
+  // (tabGroups.dragOrder); a header drag carries its whole block.
+  const entries = stripEntries();
+  const me = entries.find(x => x.el === tabEl);
+  if (!me) return;
+  const order = window.tabGroups.dragOrder(entries, me, e.clientX);
+  if (order) applyStripOrder(order, entries);
 });
+// The strip as tabGroups records: one per chip and header, with its current box.
+function stripEntries() {
+  const byEl = new Map();
+  for (const [, t] of tabs) byEl.set(t.tabEl, t);
+  const out = [];
+  for (const el of tabsEl.children) {
+    const r = el.getBoundingClientRect();
+    const box = { el, left: r.left, right: r.right, hidden: el.classList.contains('group-collapsed') };
+    if (el.classList.contains('tab-group-chip')) {
+      out.push({ ...box, key: el.dataset.groupId, kind: 'header', groupId: el.dataset.groupId });
+      continue;
+    }
+    const t = byEl.get(el);
+    if (t) out.push({ ...box, key: t.tabId, kind: 'tab', groupId: (t.groupId && groups.has(t.groupId)) ? t.groupId : null });
+  }
+  return out;
+}
+// Re-append the strip's elements in key order; a no-op when nothing moved.
+function applyStripOrder(order, entries) {
+  const byKey = new Map(entries.map(x => [x.key, x.el]));
+  const els = order.map(k => byKey.get(k)).filter(Boolean);
+  const cur = Array.from(tabsEl.children);
+  if (els.length === cur.length && els.every((el, i) => el === cur[i])) return;
+  for (const el of els) tabsEl.appendChild(el);
+}
 const _endTabDrag = (e) => {
   if (!tabDrag) return;
-  const { tabEl, tabId, started, deferActivate } = tabDrag;
+  const { tabEl, tabId, started, deferActivate, groupId } = tabDrag;
   tabDrag = null;
   tabEl.classList.remove('dragging');
   clearGridDropHint();
+  // A group header: a plain click toggles the group, a drag just moved its block.
+  if (groupId) {
+    if (!started) { if (e && e.type === 'pointerup') toggleGroupCollapsed(groupId); }
+    else normalizeGroups();
+    return;
+  }
   if (!started) {
     // A plain click on a background chip while a grid was active: switch to it now.
     if (deferActivate && tabId) setActive(tabId);
@@ -303,14 +338,288 @@ const _endTabDrag = (e) => {
   const dragged = tabId && tabs.get(tabId);
   if (dropTab && dragged && dragged.type !== 'grid' && !dragged.gridOwner) {
     addToGrid(dropTab, tabId);
+    // The chip may have moved in the strip before it reached the stage.
+    normalizeGroups();
     return;
   }
   // A drag that didn't land on the grid just reorders the strip; if activation was
   // deferred (grid still active), leave the grid active rather than switching.
-  reorderTabsMap();
+  normalizeGroups();
 };
 document.addEventListener('pointerup', _endTabDrag);
 document.addEventListener('pointercancel', _endTabDrag);
+
+// ---------- tab groups ----------
+// Chrome-style groups. The strip stays flat: a .tab-group-chip header sits directly
+// before its group's first member and the members follow it contiguously; a collapsed
+// group hides its members' chips. normalizeGroups() is the one pass that restores all
+// of that, so every change to groups, membership or the strip ends with it.
+const GROUP_COLOR_NAMES = {
+  '#f44747': 'Röd', '#d7ba7d': 'Orange', '#f9f1a5': 'Gul', '#4ec994': 'Grön',
+  '#61d6d6': 'Cyan', '#3b78ff': 'Blå', '#c586c0': 'Lila', '#ff8fb3': 'Rosa'
+};
+const groupPalette = () => TAB_COLORS.filter(c => c.value !== null).map(c => c.value);
+const groupLabel = (g) => g.name || GROUP_COLOR_NAMES[g.color] || 'Namnlös grupp';
+// Members in strip order (the Map follows the strip after every normalize).
+const groupMembers = (gid) => [...tabs.values()].filter(t => t.groupId === gid);
+function chipHidden(t) {
+  const g = t && t.groupId && groups.get(t.groupId);
+  return !!(g && g.collapsed);
+}
+// The tab setActive(id) really shows: a grid member surfaces its grid.
+function shownTabFor(id) {
+  const t = tabs.get(id);
+  if (t && t.gridOwner && tabs.has(t.gridOwner)) return tabs.get(t.gridOwner);
+  return t || null;
+}
+
+// A new group isn't in the strip until a member points at it and normalizeGroups runs.
+function createGroup({ name = '', color = null, collapsed = false } = {}) {
+  if (!color) {
+    const used = new Set([...groups.values()].map(g => g.color));
+    color = window.tabGroups.pickGroupColor(groupPalette(), used, groups.size);
+  }
+  const g = { groupId: newGroupId(), name, color, collapsed, headerEl: null };
+  g.headerEl = buildGroupHeader(g);
+  groups.set(g.groupId, g);
+  return g;
+}
+
+function buildGroupHeader(g) {
+  const el = document.createElement('div');
+  el.className = 'tab-group-chip';
+  el.dataset.groupId = g.groupId;
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.innerHTML = '<span class="tgc-pill"><span class="tgc-name"></span><span class="tgc-count"></span></span>';
+  // Same press/drag/click split as a chip: _endTabDrag toggles on a plain click, the
+  // pointermove handler drags the whole block.
+  // While the header is being renamed it is only an input: no drag, no toggle.
+  el.addEventListener('pointerdown', (e) => {
+    if (el.classList.contains('renaming') || e.target.closest('.tab-rename-input') || e.button !== 0) return;
+    tabDrag = { tabEl: el, tabId: null, groupId: g.groupId, startX: e.clientX, startY: e.clientY, started: false, deferActivate: false };
+  });
+  // A click must not pull focus out of the terminal; keyboard focus (Tab) still works.
+  el.addEventListener('mousedown', (e) => { if (!el.classList.contains('renaming')) e.preventDefault(); });
+  el.addEventListener('keydown', (e) => {
+    if (e.target !== el || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault(); e.stopPropagation();
+    toggleGroupCollapsed(g.groupId);
+  });
+  el.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('.tab-rename-input')) return;
+    e.preventDefault(); e.stopPropagation();
+    showGroupMenu(g, e.clientX, e.clientY);
+  });
+  return el;
+}
+
+function renderGroupHeader(g, count) {
+  const el = g.headerEl;
+  el.style.setProperty('--group-color', g.color);
+  el.classList.toggle('collapsed', g.collapsed);
+  el.classList.toggle('unnamed', !g.name);
+  el.querySelector('.tgc-name').textContent = g.name;
+  el.querySelector('.tgc-count').textContent = g.collapsed ? String(count) : '';
+  el.setAttribute('aria-expanded', String(!g.collapsed));
+  const label = `Grupp ${groupLabel(g)}, ${count} ${count === 1 ? 'flik' : 'flikar'}`;
+  el.setAttribute('aria-label', label);
+  el.title = `${label}. Klicka för att ${g.collapsed ? 'visa' : 'dölja'} flikarna.`;
+}
+
+// The invariant pass: members contiguous at their first member's position (their
+// relative order kept), each header directly before its first member, empty groups
+// gone, the active tab's group expanded, classes and counts current. Then the Map
+// follows the strip and the session is saved.
+function normalizeGroups() {
+  const byEl = new Map();
+  for (const [, t] of tabs) {
+    if (t.groupId && !groups.has(t.groupId)) delete t.groupId;
+    byEl.set(t.tabEl, t);
+  }
+  const items = [];
+  const counts = new Map();
+  for (const el of tabsEl.children) {
+    const t = byEl.get(el);
+    if (!t) continue;
+    items.push({ id: t.tabId, groupId: t.groupId || null });
+    if (t.groupId) counts.set(t.groupId, (counts.get(t.groupId) || 0) + 1);
+  }
+  for (const [gid, g] of groups) {
+    if (counts.get(gid)) continue;
+    g.headerEl.remove();
+    groups.delete(gid);
+  }
+  for (const [, t] of tabs) if (t.groupId && !groups.has(t.groupId)) delete t.groupId;
+  const act = activeId && tabs.get(activeId);
+  if (act && act.groupId) groups.get(act.groupId).collapsed = false;
+
+  const els = window.tabGroups.normalizeOrder(items)
+    .map(k => groups.has(k) ? groups.get(k).headerEl : tabs.get(k).tabEl);
+  const cur = Array.from(tabsEl.children);
+  if (els.length !== cur.length || els.some((el, i) => el !== cur[i])) {
+    for (const el of els) tabsEl.appendChild(el);
+  }
+  for (const [, t] of tabs) {
+    const g = t.groupId && groups.get(t.groupId);
+    t.tabEl.classList.toggle('in-group', !!g);
+    t.tabEl.classList.toggle('group-collapsed', !!(g && g.collapsed));
+    if (g) t.tabEl.style.setProperty('--group-color', g.color);
+    else t.tabEl.style.removeProperty('--group-color');
+  }
+  for (const [gid, g] of groups) renderGroupHeader(g, counts.get(gid));
+  reorderTabsMap();
+}
+
+// Before a group is collapsed or closed the active tab has to leave it: the most recent
+// tab that is visible outside it (a grid member counts as its grid), then one in strip
+// order; allowHidden also takes a tab of another collapsed group (setActive expands it).
+// Nothing left outside: a new shell. Resolves false if the active tab is still inside.
+async function leaveGroup(gid, { allowHidden = false } = {}) {
+  const act = activeId && tabs.get(activeId);
+  if (!act || act.groupId !== gid) return true;
+  const outside = (id) => {
+    const s = shownTabFor(id);
+    return !!s && s.tabId !== activeId && s.groupId !== gid;
+  };
+  const visible = (id) => outside(id) && !chipHidden(shownTabFor(id));
+  const ids = [...tabHistory.filter(id => tabs.has(id)), ...tabs.keys()];
+  const next = ids.find(visible) || (allowHidden ? ids.find(outside) : null);
+  if (next) setActive(next);
+  else await createTab();
+  const now = activeId && tabs.get(activeId);
+  return !now || now.groupId !== gid;
+}
+
+async function toggleGroupCollapsed(gid) {
+  const g = groups.get(gid);
+  if (!g) return;
+  if (g.collapsed) { g.collapsed = false; normalizeGroups(); return; }
+  if (!(await leaveGroup(gid)) || !groups.has(gid)) return;
+  g.collapsed = true;
+  normalizeGroups();
+}
+
+function startGroupRename(g) {
+  if (!groups.has(g.groupId)) return;
+  const el = g.headerEl;
+  if (el.querySelector('.tab-rename-input')) return;
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'tab-rename-input tgc-input'; input.value = g.name;
+  input.maxLength = 60; input.placeholder = 'Namnge gruppen';
+  input.setAttribute('aria-label', 'Gruppens namn');
+  el.classList.add('renaming');
+  el.appendChild(input);
+  revealTabChip(el);
+  input.focus(); input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return; done = true;
+    if (commit) g.name = input.value.trim().slice(0, 60);
+    input.remove();
+    el.classList.remove('renaming');
+    normalizeGroups();
+  };
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('mousedown', (e) => e.stopPropagation());
+}
+
+function showGroupMenu(g, x, y) {
+  const gid = g.groupId;
+  if (!groups.has(gid)) return;
+  showContextMenu(x, y, [
+    { label: 'Byt namn', action: () => startGroupRename(g) },
+    { swatches: TAB_COLORS.filter(c => c.value !== null).map(c => ({ name: GROUP_COLOR_NAMES[c.value] || c.name, value: c.value })),
+      selected: g.color, onPick: (c) => { if (groups.has(gid)) { g.color = c.value; normalizeGroups(); } } },
+    { separator: true },
+    { label: 'Ny flik i gruppen', action: () => newTabInGroup(gid) },
+    { label: 'Dela upp gruppen', action: () => ungroup(gid) },
+    { separator: true },
+    { label: 'Stäng gruppen', action: () => closeGroup(gid) }
+  ]);
+}
+
+// A shell in the group's last member's folder; createTab joins it to the group (at its
+// end) and normalizes, which expands a collapsed group once the new tab is active.
+function newTabInGroup(gid) {
+  if (!groups.has(gid)) return;
+  const last = groupMembers(gid).pop();
+  // Shells and chats have a folder; an editor's tabCwd is its file, a grid has none.
+  const cwd = last && (!last.type || last.type === 'chat') ? tabCwd(last) : null;
+  createTab({ cwd: cwd || undefined, groupId: gid });
+}
+
+function ungroup(gid) {
+  for (const t of groupMembers(gid)) delete t.groupId;
+  normalizeGroups();
+}
+
+// Closing a group closes its members: one busy prompt for the lot, the active tab moved
+// out first, and a fresh shell when the group is every tab (the window would close).
+async function closeGroup(gid) {
+  const g = groups.get(gid);
+  if (!g) return;
+  if (appSetting('general', 'confirmClose') && groupMembers(gid).some(tabIsBusy)) {
+    const ok = await window.appConfirm({
+      title: 'Claude arbetar fortfarande',
+      message: `En Claude-tur pågår i gruppen ${groupLabel(g)}. Stänger du gruppen avbryts den.`,
+      okLabel: 'Stäng ändå', danger: true
+    });
+    if (!ok || !groups.has(gid)) return;
+  }
+  if (!(await leaveGroup(gid, { allowHidden: true }))) return;
+  if ([...tabs.values()].every(t => t.groupId === gid)) await createTab();
+  for (const t of groupMembers(gid)) closeTab(t.tabId);
+}
+
+// Joining a group puts the tab at the group's end; leaving one puts it right after.
+function lastGroupMemberEl(gid, except) {
+  const els = new Set(groupMembers(gid).filter(t => t !== except).map(t => t.tabEl));
+  let last = null;
+  for (const el of tabsEl.children) if (els.has(el)) last = el;
+  return last;
+}
+function addTabToGroup(tab, gid) {
+  if (!tabs.has(tab.tabId) || !groups.has(gid)) return;
+  const last = lastGroupMemberEl(gid, tab);
+  if (last) last.after(tab.tabEl);
+  tab.groupId = gid;
+  normalizeGroups();
+}
+function addTabToNewGroup(tab) {
+  if (!tabs.has(tab.tabId)) return;
+  if (tab.groupId) {
+    const last = lastGroupMemberEl(tab.groupId, tab);
+    if (last) last.after(tab.tabEl);
+  }
+  const g = createGroup();
+  tab.groupId = g.groupId;
+  normalizeGroups();
+  startGroupRename(g);   // Chrome-like: name it right away
+}
+function removeTabFromGroup(tab) {
+  if (!tab.groupId) return;
+  const last = lastGroupMemberEl(tab.groupId, tab);
+  if (last) last.after(tab.tabEl);
+  delete tab.groupId;
+  normalizeGroups();
+}
+
+// The group items every tab menu ends with (before its Close item).
+function groupMenuItems(tab) {
+  const items = [{ label: 'Lägg till i ny grupp', action: () => addTabToNewGroup(tab) }];
+  for (const [gid, g] of groups) {
+    if (gid === tab.groupId) continue;
+    items.push({ label: `Lägg till i grupp: ${groupLabel(g)}`, action: () => addTabToGroup(tab, gid) });
+  }
+  if (tab.groupId && groups.has(tab.groupId)) items.push({ label: 'Ta bort från grupp', action: () => removeTabFromGroup(tab) });
+  return items;
+}
 
 // ---------- tab helpers ----------
 function getActivePane(tab) { return tab.panes.get(tab.activePaneId); }
@@ -1950,6 +2259,9 @@ function setActive(tabId, { keepOverlay = false } = {}) {
     tab.container.classList.toggle('active', tid === tabId);
     for (const [, pane] of tab.panes) pane.suppressBusyUntil = suppressUntil;
   }
+  // Expands the new active tab's group first: a hidden chip has no box to scroll to.
+  // (A grid member came through the redirect above, so this is its grid's group.)
+  normalizeGroups();
   revealTabChip(target.tabEl);
   const tab = tabs.get(tabId);
   // A chat tab shown inside the active grid is still on-screen and must count as active,
@@ -1992,8 +2304,9 @@ function setActive(tabId, { keepOverlay = false } = {}) {
 }
 
 // Cycle the active tab in visual order. dir = +1 next, -1 previous; wraps around.
+// Chips hidden in a collapsed group are skipped.
 function cycleTab(dir) {
-  const ids = Array.from(tabs.keys());
+  const ids = Array.from(tabs.keys()).filter(id => id === activeId || !chipHidden(tabs.get(id)));
   if (ids.length < 2) return;
   const cur = activeId ? ids.indexOf(activeId) : -1;
   const next = (cur + dir + ids.length) % ids.length;
@@ -3300,6 +3613,9 @@ async function createTab(opts = {}) {
     expandedPaths: new Set(), selectedPath: null
   };
   tabs.set(tabId, tab);
+  // Joined to a group when opened from its menu ('Ny flik i gruppen').
+  if (opts.groupId && groups.has(opts.groupId)) tab.groupId = opts.groupId;
+  normalizeGroups();
   const autoColor = pickRandomUnusedColor();
   if (autoColor) setTabColor(tab, autoColor);
 
@@ -3314,6 +3630,8 @@ async function createTab(opts = {}) {
       { label: 'Repo notes', shortcut: 'Ctrl+Shift+N', action: () => { setActive(tabId); openNotes(); } },
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      ...groupMenuItems(tab),
       { separator: true },
       { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
@@ -3367,6 +3685,7 @@ function createGridTab() {
     expandedPaths: new Set(), selectedPath: null
   };
   tabs.set(tabId, tab);
+  normalizeGroups();
 
   wireTabPointer(tabEl, tabId);
   closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
@@ -3379,6 +3698,8 @@ function createGridTab() {
       { label: 'Add a tab…', action: () => pickTabForGrid(tab) },
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      ...groupMenuItems(tab),
       { separator: true },
       { label: 'Close grid', action: () => closeTab(tabId) }
     ]);
@@ -3606,6 +3927,7 @@ async function createEditorTab(filePath, opts = {}) {
     type: 'editor', filePath, editor: null, dirty: false
   };
   tabs.set(tabId, tab);
+  normalizeGroups();
   const autoColor = pickRandomUnusedColor();
   if (autoColor) setTabColor(tab, autoColor);
 
@@ -3613,7 +3935,11 @@ async function createEditorTab(filePath, opts = {}) {
   closeEl.addEventListener('click', (e) => { e.stopPropagation(); requestCloseTab(tabId); });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault(); e.stopPropagation();
-    showContextMenu(e.clientX, e.clientY, [{ label: 'Close Tab', action: () => closeTab(tabId) }]);
+    showContextMenu(e.clientX, e.clientY, [
+      ...groupMenuItems(tab),
+      { separator: true },
+      { label: 'Close Tab', action: () => closeTab(tabId) }
+    ]);
   });
 
   const editorEl = document.createElement('div');
@@ -4212,6 +4538,7 @@ function createGitHubTab() {
     type: 'github', view: null
   };
   tabs.set(tabId, tab);
+  normalizeGroups();
 
   tab.view = window.createGitHubView({
     openLink,
@@ -4236,6 +4563,8 @@ function createGitHubTab() {
       { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      ...groupMenuItems(tab),
       { separator: true },
       { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
@@ -4457,6 +4786,7 @@ async function createChatTab(opts = {}) {
     type: 'chat', chatId, cwd: cwd || null, usageCounted: countedNow
   };
   tabs.set(tabId, tab);
+  normalizeGroups();
   setTabColor(tab, opts.color || '#4ec994');
 
   wireTabPointer(tabEl, tabId);
@@ -4469,6 +4799,8 @@ async function createChatTab(opts = {}) {
       { label: 'Rename', shortcut: 'F2', action: () => startRename(tab) },
       { separator: true },
       { swatches: availableColorsForTab(tab), selected: tab.color || null, onPick: (c) => setTabColor(tab, c.value) },
+      { separator: true },
+      ...groupMenuItems(tab),
       { separator: true },
       { label: 'Close tab', action: () => requestCloseTab(tabId) }
     ]);
@@ -4694,7 +5026,7 @@ function closeTab(tabId) {
     }
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
     if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
-    updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
+    normalizeGroups(); updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
 
   // A tab that is currently displayed inside a grid: drop its cell first so the grid
@@ -4719,14 +5051,14 @@ function closeTab(tabId) {
     window.chatApi.stop(tab.chatId);
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
     if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
-    updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
+    normalizeGroups(); updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   if (tab.type === 'editor' || tab.type === 'github') {
     try { tab.editor?.dispose(); } catch (_) {}
     try { tab.view?.dispose(); } catch (_) {}
     tab.container.remove(); tab.tabEl.remove(); tabs.delete(tabId);
     if (wasActive) { activeId = null; const n = pickNextActive(); if (n) setActive(n, { keepOverlay: true }); else window.win.close(); }
-    updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
+    normalizeGroups(); updateStatus(); scheduleAgentRender(); scheduleSaveSession(); return;
   }
   for (const [, pane] of tab.panes) {
     if (pane.ro) { try { pane.ro.disconnect(); } catch (_) {} }
@@ -4743,14 +5075,17 @@ function closeTab(tabId) {
     if (next) setActive(next, { keepOverlay: true });
     else window.win.close();
   }
+  normalizeGroups();
   updateStatus();
   scheduleAgentRender();
   scheduleSaveSession();
 }
 
+// MRU first, preferring a tab that is visible (not in a collapsed group, a grid member
+// by its grid). A hidden one is the fallback; setActive then expands its group.
 function pickNextActive() {
-  for (const id of tabHistory) if (tabs.has(id)) return id;
-  return tabs.keys().next().value;
+  const ids = [...tabHistory.filter(id => tabs.has(id)), ...tabs.keys()];
+  return ids.find(id => !chipHidden(shownTabFor(id))) || ids[0];
 }
 
 // ---------- stream pty data ----------
@@ -6270,7 +6605,7 @@ function saveSession() {
     if (t.type === 'github') {
       // Never shown since restore: the view hasn't booted, so keep what was saved.
       tabsData.push({ type: 'github', github: t.pendingOpen ? (t.savedState || null) : t.view ? t.view.getState() : null,
-        customTitle: t.customTitle || null, color: t.color || null });
+        customTitle: t.customTitle || null, color: t.color || null, groupId: t.groupId || null });
       if (id === activeId) activeIndex = i;
       i++;
       continue;
@@ -6291,6 +6626,7 @@ function saveSession() {
       filePath: t.filePath || null,
       customTitle: t.customTitle || null,
       color: t.color || null,
+      groupId: t.groupId || null,
       chatSessionId: view ? (view.sessionId || t.chatSessionId || null) : null,
       chatModel: view ? view.model : null,
       chatPermissionMode: view ? view.getState().permissionMode : null,
@@ -6311,11 +6647,44 @@ function saveSession() {
   }
   window.sessionApi.save({
     tabs: tabsData, activeIndex,
+    // Tab groups; each saved tab names its own by groupId. Restore maps them to new ids.
+    groups: [...groups.values()].map(g => ({ groupId: g.groupId, name: g.name, color: g.color, collapsed: g.collapsed })),
     // The overlay's view state; a never-shown overlay keeps what the last session saved.
     githubOverlay: ghOverlay.view ? ghOverlay.view.getState() : (ghOverlay.seed || null),
     claudeSessions: claudeSessionLibrary,
     copilotSessions: copilotSessionLibrary
   });
+}
+// Session restore, once every tab is back: saved groups get fresh ids (a saved id is
+// never reused) and each recreated tab (created[i] for savedTabs[i], null = not
+// recreated) rejoins its group. Every group starts expanded: activeId is still the last
+// tab restored, and the invariant would keep its group open for good. The caller sets
+// the saved active tab, then finishGroupRestore applies the saved collapsed flags.
+// Grids aren't saved, so their members return as plain tabs.
+function restoreGroups(savedGroups, savedTabs, created) {
+  const ids = new Map();   // saved id -> new id
+  const restored = [];     // [{ groupId (new), collapsed (saved) }]
+  for (const sg of window.tabGroups.sanitizeSavedGroups(savedGroups, groupPalette())) {
+    const g = createGroup({ name: sg.name, color: sg.color, collapsed: false });
+    ids.set(sg.groupId, g.groupId);
+    restored.push({ groupId: g.groupId, collapsed: sg.collapsed });
+  }
+  (Array.isArray(savedTabs) ? savedTabs : []).forEach((st, i) => {
+    const tab = created[i];
+    if (tab && tabs.has(tab.tabId) && st && ids.has(st.groupId)) tab.groupId = ids.get(st.groupId);
+  });
+  normalizeGroups();
+  return restored;
+}
+// With the real active tab in place: collapse what was saved collapsed, except the
+// active tab's group. normalizeGroups drops any that came back empty.
+function finishGroupRestore(restored) {
+  const act = activeId && tabs.get(activeId);
+  for (const gid of window.tabGroups.collapsedAfterRestore(restored, act ? act.groupId : null)) {
+    const g = groups.get(gid);
+    if (g) g.collapsed = true;
+  }
+  normalizeGroups();
 }
 function scheduleSaveSession() {
   if (!_sessionReady) return;
@@ -6502,8 +6871,10 @@ window.onAppSettingsChanged(applySettings);
         }
         created.push(tab);
       }
+      const restoredGroups = restoreGroups(sess.groups, sess.tabs, created);
       const idx = sess.activeIndex;
       if (idx >= 0 && idx < created.length && created[idx]) setActive(created[idx].tabId, { keepOverlay });
+      finishGroupRestore(restoredGroups);
       // Only a GitHub tab was saved and it went to the overlay: start with a shell.
       restored = created.some(Boolean);
     }
