@@ -124,6 +124,34 @@
     .titlebar-btn.settings:hover { color: var(--fg-strong); }
     .titlebar-btn.settings svg { width: 14px; height: 14px; }
     .titlebar-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+    .titlebar-btn[hidden] { display: none; }
+    /* Deployments (renderer.js): dim when idle, accent + pulse while one runs, amber when a
+       gate waits (badge = how many you can approve), a red dot for an unseen failure. */
+    .titlebar-btn.deploy { position: relative; }
+    .titlebar-btn.deploy.active { color: var(--fg-strong); background: var(--fill-hover); }
+    .titlebar-btn.deploy.running { color: var(--accent); }
+    .titlebar-btn.deploy.running svg { animation: deploypulse 2.2s ease-in-out infinite; }
+    .titlebar-btn.deploy.waiting { color: var(--amber); }
+    @keyframes deploypulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }
+    @media (prefers-reduced-motion: reduce) { .titlebar-btn.deploy.running svg { animation: none; } }
+    .dep-badge {
+      position: absolute; top: 3px; right: 7px;
+      min-width: 14px; height: 14px; padding: 0 3px;
+      border-radius: calc(7px * var(--radius-k));
+      background: var(--amber); color: var(--bg);
+      font: 700 9.5px/14px var(--ui); text-align: center;
+      box-shadow: 0 0 0 1.5px var(--chrome);
+      pointer-events: none;
+    }
+    .dep-dot {
+      position: absolute; top: 8px; right: 14px;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--red); box-shadow: 0 0 0 1.5px var(--chrome);
+      pointer-events: none;
+    }
+    .dep-badge[hidden], .dep-dot[hidden] { display: none; }
+    /* both: the dot moves to the left so the badge stays readable */
+    .dep-badge:not([hidden]) ~ .dep-dot { right: auto; left: 11px; }
 
     /* ---------- Tab bar ---------- */
     .tabbar {
@@ -2364,6 +2392,9 @@
     }
     .set-input { padding: 0 10px; user-select: text; }
     .set-input.mono { font-family: var(--mono); font-size: 12.5px; }
+    .set-input.set-ta { height: auto; min-height: 64px; padding: 6px 10px; resize: vertical; line-height: 1.45; }
+    .set-input.set-ta.bad { border-color: var(--red); }
+    .set-input.set-prompt-input { width: 100%; height: auto; min-height: 72px; max-height: 40vh; padding: 8px 10px; resize: vertical; line-height: 1.45; font-size: 12.5px; }
     .set-select:focus, .set-input:focus { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
     .set-select option { background: var(--menu); color: var(--fg-strong); }
     .set-toggle-wrap { display: flex; align-items: center; gap: 10px; }
@@ -3005,6 +3036,75 @@
       border-top: 1px solid rgba(255, 255, 255, 0.07);
       font-size: 11px; color: var(--fg-muted);
     }
+    /* Deployments popover (titlebar button): same layer and look as the repos popover */
+    .deploy-menu {
+      position: fixed;
+      display: none;
+      flex-direction: column;
+      width: 460px;
+      max-width: 90vw;
+      background: var(--menu);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: calc(8px * var(--radius-k));
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.62);
+      z-index: 1001;
+      font-family: var(--ui);
+      overflow: hidden;
+    }
+    .deploy-menu.show { display: flex; }
+    .dep-head { display: flex; align-items: center; gap: 8px; padding: 8px 8px 7px 12px; border-bottom: 1px solid var(--line); }
+    .dep-head-title { font-size: 12.5px; font-weight: 600; color: var(--fg-strong); }
+    .dep-head-age { flex: 1; min-width: 0; font-size: 11px; color: var(--fg-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dep-refresh {
+      width: 26px; height: 24px; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      border: 0; border-radius: calc(5px * var(--radius-k));
+      background: transparent; color: var(--fg-dim); cursor: pointer; padding: 0;
+    }
+    .dep-refresh svg { width: 13px; height: 13px; }
+    .dep-refresh:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .dep-refresh.spin svg { animation: branch-spin 0.8s linear infinite; }
+    @media (prefers-reduced-motion: reduce) { .dep-refresh.spin svg { animation: none; } }
+    .dep-list { max-height: min(440px, 70vh); overflow-y: auto; padding: 4px 5px 5px; display: flex; flex-direction: column; gap: 1px; }
+    .dep-row { display: flex; gap: 8px; padding: 7px 8px 7px 8px; border-radius: calc(5px * var(--radius-k)); flex-shrink: 0; }
+    .dep-row:hover { background: var(--fill); }
+    .dep-glyph { width: 16px; flex-shrink: 0; text-align: center; font-size: 12.5px; line-height: 18px; color: var(--fg-faint); }
+    .dep-row.s-waiting .dep-glyph, .dep-row.s-waiting .dep-state { color: var(--amber); }
+    .dep-row.s-running .dep-glyph, .dep-row.s-running .dep-state { color: var(--accent); }
+    .dep-row.s-success .dep-glyph, .dep-row.s-success .dep-state { color: var(--green); }
+    .dep-row.s-failure .dep-glyph, .dep-row.s-failure .dep-state { color: var(--red); }
+    .dep-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .dep-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .dep-name { min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--fg-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dep-state { flex-shrink: 0; font-size: 11.5px; color: var(--fg-muted); white-space: nowrap; }
+    .dep-time { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--fg-faint); white-space: nowrap; }
+    .dep-sub { font-size: 11.5px; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dep-sub .dep-sha { font-family: var(--mono); font-size: 11px; }
+    .dep-more { color: var(--amber); }
+    /* the gate of a waiting run (may differ from the row's latest deployment) */
+    .dep-gate { margin-top: 2px; }
+    .dep-gate-label { color: var(--amber); }
+    .dep-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+    .dep-btn {
+      height: 24px; padding: 0 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12); border-radius: calc(5px * var(--radius-k));
+      background: rgba(255, 255, 255, 0.06); color: var(--fg-strong);
+      font: 12px var(--ui); cursor: pointer; white-space: nowrap;
+    }
+    .dep-btn:hover { background: rgba(255, 255, 255, 0.11); }
+    .dep-btn.approve { background: color-mix(in srgb, var(--green) 20%, transparent); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+    .dep-btn.approve:hover { background: color-mix(in srgb, var(--green) 30%, transparent); }
+    .dep-btn.reject { background: color-mix(in srgb, var(--red) 14%, transparent); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+    .dep-btn.reject:hover { background: color-mix(in srgb, var(--red) 24%, transparent); }
+    .dep-btn.link { background: transparent; border-color: transparent; color: var(--accent); padding: 0 6px; }
+    .dep-btn.link:hover { background: var(--fill-hover); }
+    .dep-btn:disabled { opacity: 0.5; cursor: default; }
+    .dep-btn:focus-visible, .dep-refresh:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+    .dep-note { font-size: 11.5px; color: var(--fg-faint); }
+    .dep-err { font-size: 11.5px; color: #f0a0a8; white-space: pre-wrap; word-break: break-word; }
+    .dep-row.problem .dep-glyph { color: var(--amber); }
+    .dep-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 18px 12px; font-size: 12px; color: var(--fg-faint); text-align: center; }
+    .dep-empty-title { font-size: 12.5px; color: var(--fg); }
     .ctx-swatches { display: flex; gap: 6px; padding: 8px 10px; align-items: center; }
     .ctx-swatch {
       width: 18px; height: 18px;
@@ -3204,6 +3304,11 @@
       <span class="titlebar-title">Mac Code</span>
     </div>
     <div class="titlebar-controls">
+      <button class="titlebar-btn settings deploy" id="btn-deployments" aria-haspopup="dialog" aria-expanded="false" aria-controls="deploy-menu" title="Deployer" aria-label="Deployer" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 16l-4-4-4 4"/><path d="M12 12v9"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+        <span class="dep-badge" hidden></span>
+        <span class="dep-dot" hidden></span>
+      </button>
       <button class="titlebar-btn settings" id="btn-settings" title="Inställningar (Ctrl+,)" aria-label="Inställningar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
@@ -3380,6 +3485,8 @@
   <script src="notesView.js"></script>
   <script src="repoUsage.js"></script>
   <script src="tabGroups.js"></script>
+  <!-- deployStatus.js: pure helpers for the Deployments button (parse, icon state, sort) -->
+  <script src="deployStatus.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

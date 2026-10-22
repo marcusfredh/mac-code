@@ -2977,6 +2977,716 @@ document.addEventListener('mousedown', (e) => {
 window.addEventListener('blur', () => closeReposMenu());
 window.addEventListener('resize', () => closeReposMenu());
 
+// ---------- Deployments (titlebar button next to the gear) ----------
+// The latest deployment per repo and environment for the repos in github.deployRepos.
+// deployStatus.js parses the list, picks the icon state and sorts; github.js asks gh.
+// The button hides while the list is empty. Hovering opens the popover, a click (or any
+// press inside it) pins it, and pending environment gates are approved / rejected from
+// there after a confirm with an optional comment.
+const deployBtn = document.getElementById('btn-deployments');
+const deployLib = window.deployStatus || null;
+const DEPLOY_SEEN_KEY = 'macDeploySeenFailed';
+const DEPLOY_SEEN_MAX = 300;
+const DEPLOY_FAST_MS = 15000;                    // while something runs (and is recent)
+const DEPLOY_FAST_WINDOW_MS = 10 * 60 * 1000;    // older "running" rows are probably stuck
+const DEPLOY_BACKOFF_MS = 30000;                 // first retry after an error, doubling…
+const DEPLOY_BACKOFF_MAX_MS = 5 * 60 * 1000;     // …up to this
+const DEPLOY_RATE_BACKOFF_MS = 5 * 60 * 1000;    // rate limited: start here, doubling…
+const DEPLOY_RATE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+const DEPLOY_CONCURRENCY = 3;
+const DEPLOY_RUNNING = new Set(['queued', 'in_progress', 'pending']);
+const DEPLOY_FAILED = new Set(['failure', 'error']);
+const DEPLOY_STATE_TEXT = {
+  waiting: 'väntar på godkännande', in_progress: 'kör', queued: 'i kö', pending: 'i kö',
+  success: 'klar', failure: 'misslyckades', error: 'fel', inactive: 'inaktiv'
+};
+
+function readDeploySeen() {
+  try {
+    const v = JSON.parse(localStorage.getItem(DEPLOY_SEEN_KEY));
+    return new Set(Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []);
+  } catch (_) { return new Set(); }
+}
+
+const deploy = {
+  entries: [],          // [{ repo, workflow, raw }] from parseRepoList
+  results: new Map(),   // entry key -> last result + { fails, retryAt, lastGood }
+  primed: new Set(),    // entry keys fetched OK once since start: their old news is not news
+  gates: new Map(),     // entry key -> Set of repo|env|waiting.runId approvable at the last fetch
+  seen: readDeploySeen(),   // repo|env|deploymentId of failures already seen
+  rows: [],             // all entries' rows, merged and sorted (row.repo added here)
+  lastAt: 0,
+  gen: 0,               // bumped when the list changes: older answers are dropped
+  timer: null,
+  inflight: null,
+  again: false,
+  pausedHidden: false,
+  menu: null,
+  open: false, pinned: false, frozen: false, dirty: false,
+  openTimer: null, closeTimer: null, ageTimer: null,
+  busy: new Set(),      // gate keys with a review on its way
+  rowErrors: new Map()  // gate key -> why the review failed (until the popover closes)
+};
+
+const deployEntryKey = (e) => (e.workflow ? e.repo + '@' + e.workflow : e.repo);
+const deployFailKey = (row) => `${row.repo}|${row.environment}|${row.deploymentId}`;
+const deployGateKey = (row) => `${row.repo}|${row.environment}|${row.waiting && row.waiting.runId}`;
+const deployBaseMs = () => { const n = Number(appSetting('github', 'pollSeconds')); return n > 0 ? n * 1000 : 0; };
+
+function writeDeploySeen() {
+  let list = [...deploy.seen];
+  if (list.length > DEPLOY_SEEN_MAX) { list = list.slice(-DEPLOY_SEEN_MAX); deploy.seen = new Set(list); }
+  try { localStorage.setItem(DEPLOY_SEEN_KEY, JSON.stringify(list)); } catch (_) {}
+}
+function markDeployFailuresSeen(rows) {
+  let added = false;
+  for (const row of rows) {
+    if (!DEPLOY_FAILED.has(row.state)) continue;
+    const k = deployFailKey(row);
+    if (!deploy.seen.has(k)) { deploy.seen.add(k); added = true; }
+  }
+  if (added) writeDeploySeen();
+}
+
+// One list from every entry. An entry whose last fetch failed keeps its last good rows,
+// so a hiccup doesn't empty the popover (its error shows on top).
+function mergeDeployRows() {
+  const out = [];
+  const dup = new Set();
+  for (const e of deploy.entries) {
+    const key = deployEntryKey(e);
+    const r = deploy.results.get(key);
+    const good = r && (r.ok ? r : r.lastGood);
+    const data = good && good.data;
+    if (!data || !Array.isArray(data.rows)) continue;
+    for (const row of data.rows) {
+      if (!row) continue;
+      const full = { ...row, repo: data.repo || e.repo, entryKey: key };
+      const k = deployFailKey(full);
+      if (dup.has(k)) continue;   // owner/repo and owner/repo@x.yml can overlap
+      dup.add(k);
+      out.push(full);
+    }
+  }
+  try {
+    const sorted = deployLib.sortRows(out);
+    return Array.isArray(sorted) ? sorted : out;
+  } catch (_) { return out; }
+}
+
+function storeDeployResult(key, r) {
+  const prev = deploy.results.get(key);
+  if (r && r.ok && r.data) { deploy.results.set(key, { ...r, fails: 0, retryAt: 0 }); return; }
+  const fails = (prev && !prev.ok ? prev.fails : 0) + 1;
+  const wait = r && r.rateLimited
+    ? Math.min(DEPLOY_RATE_BACKOFF_MAX_MS, DEPLOY_RATE_BACKOFF_MS * 2 ** (fails - 1))
+    : Math.min(DEPLOY_BACKOFF_MAX_MS, DEPLOY_BACKOFF_MS * 2 ** (fails - 1));
+  deploy.results.set(key, {
+    ok: false, error: (r && r.error) || 'Okänt fel', missing: !!(r && r.missing), rateLimited: !!(r && r.rateLimited),
+    fails, retryAt: Date.now() + wait, lastGood: prev ? (prev.ok ? prev : prev.lastGood) : null
+  });
+}
+
+// force: also the entries that are backing off (the refresh button, a review).
+async function fetchDeploys(force) {
+  if (!window.ghApi || !deployLib || !deploy.entries.length) return;
+  if (deploy.inflight) {
+    if (force) deploy.again = true;
+    return deploy.inflight;
+  }
+  const gen = deploy.gen;
+  const now = Date.now();
+  const todo = deploy.entries.map(deployEntryKey).filter((k) => {
+    const r = deploy.results.get(k);
+    return force || !r || !r.retryAt || r.retryAt <= now;
+  });
+  if (!todo.length) return;
+  setDeployRefreshing(true);
+  let next = 0;
+  const worker = async () => {
+    while (next < todo.length && gen === deploy.gen) {
+      const key = todo[next++];
+      let r;
+      try { r = await window.ghApi.deployStatus(key); } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+      if (gen !== deploy.gen) return;
+      storeDeployResult(key, r);
+    }
+  };
+  deploy.inflight = Promise.all(Array.from({ length: Math.min(DEPLOY_CONCURRENCY, todo.length) }, worker));
+  try { await deploy.inflight; } catch (_) {}
+  deploy.inflight = null;
+  setDeployRefreshing(false);
+  if (gen === deploy.gen) {
+    deploy.lastAt = Date.now();
+    afterDeployFetch();
+  }
+  if (deploy.again) { deploy.again = false; return fetchDeploys(true); }
+}
+
+function afterDeployFetch() {
+  deploy.rows = mergeDeployRows();
+  // An entry's first good answer since start (or since it was added) is the baseline:
+  // its failures count as seen and its gates are not announced.
+  const baseline = new Set();
+  for (const e of deploy.entries) {
+    const key = deployEntryKey(e);
+    const r = deploy.results.get(key);
+    if (r && r.ok && !deploy.primed.has(key)) { deploy.primed.add(key); baseline.add(key); }
+  }
+  if (baseline.size) markDeployFailuresSeen(deploy.rows.filter((row) => baseline.has(row.entryKey)));
+  if (deploy.open) markDeployFailuresSeen(deploy.rows);
+
+  // Gates live on row.waiting whatever the row's own (deployment) state is. An entry
+  // whose answer is partial (some gate lookups failed) keeps its earlier gates, so a gate
+  // that was missed once does not look new on the next poll.
+  const known = new Set();
+  for (const set of deploy.gates.values()) for (const k of set) known.add(k);
+  const gates = new Map();
+  const fresh = [];
+  for (const row of deploy.rows) {
+    // Same bar as the badge and the buttons: no sha means the popover can't approve it.
+    if (!row.waiting || !row.waiting.canApprove || !row.waiting.sha) continue;
+    const k = deployGateKey(row);
+    if (!gates.has(row.entryKey)) gates.set(row.entryKey, new Set());
+    gates.get(row.entryKey).add(k);
+    if (!known.has(k) && !baseline.has(row.entryKey)) fresh.push(row);
+  }
+  for (const e of deploy.entries) {
+    const key = deployEntryKey(e);
+    const r = deploy.results.get(key);
+    const prev = deploy.gates.get(key);
+    // partial, or not fetched OK this time: keep what was known
+    if (prev && (!r || !r.ok || (r.data && r.data.partial))) {
+      if (!gates.has(key)) gates.set(key, new Set());
+      for (const k of prev) gates.get(key).add(k);
+    }
+  }
+  deploy.gates = gates;
+  notifyDeployGates(fresh);
+  updateDeployIcon();
+  renderDeployMenu();
+}
+
+// Windows notification for a gate that just started waiting on you (never the first
+// sighting after start), only while the window has no focus. As notifyFlowChanges.
+function notifyDeployGates(rows) {
+  if (!rows.length || !appSetting('github', 'deployNotify') || document.hasFocus()) return;
+  for (const row of rows.slice(0, 3)) {
+    // The waiting run's own facts, never the row's (latest) deployment.
+    const w = row.waiting;
+    const run = w.run || {};
+    const what = run.title || (run.number != null ? '#' + run.number : '') || (w.sha && String(w.sha).slice(0, 7)) || '';
+    try {
+      const n = new Notification('Deploy väntar på godkännande', {
+        body: `${row.repo} · ${row.environment}${what ? ' — ' + what : ''}`, silent: false
+      });
+      n.onclick = () => { window.focus(); openDeployMenu({ pin: true, focus: true }); };
+    } catch (_) {}
+  }
+}
+
+function deployFastNeeded() {
+  const now = Date.now();
+  return deploy.rows.some((row) => DEPLOY_RUNNING.has(row.state) &&
+    [row.updatedAt, row.createdAt].some((t) => now - Date.parse(t) < DEPLOY_FAST_WINDOW_MS));
+}
+
+// Next poll: github.pollSeconds (0 = only when the popover opens or on refresh), 15 s
+// while a recent deploy runs. Hidden window: the normal interval when deployNotify is
+// on (so the notification can come), paused otherwise.
+function scheduleDeploys() {
+  clearTimeout(deploy.timer);
+  deploy.timer = null;
+  if (!deploy.entries.length || !window.ghApi || !deployLib) return;
+  const base = deployBaseMs();
+  if (!base) return;
+  const ms = !document.hidden && deployFastNeeded() ? Math.min(base, DEPLOY_FAST_MS) : base;
+  deploy.timer = setTimeout(deployTick, ms);
+}
+async function deployTick() {
+  deploy.timer = null;
+  if (document.hidden && !appSetting('github', 'deployNotify')) { deploy.pausedHidden = true; return; }
+  await fetchDeploys(false);
+  scheduleDeploys();
+}
+function refreshDeploysNow() {
+  fetchDeploys(true).then(scheduleDeploys, scheduleDeploys);
+}
+
+// (Re)read the list. A changed list fetches right away; a changed interval or notify
+// setting only reschedules.
+function restartDeploys() {
+  let entries = [];
+  if (deployLib && window.ghApi) {
+    try {
+      const res = deployLib.parseRepoList(String(appSetting('github', 'deployRepos') || ''));
+      entries = (res && Array.isArray(res.entries)) ? res.entries.filter((e) => e && e.repo) : [];
+    } catch (_) { entries = []; }
+  }
+  const sig = (list) => list.map(deployEntryKey).join('\n');
+  const changed = sig(entries) !== sig(deploy.entries);
+  deploy.entries = entries;
+  deploy.pausedHidden = false;
+  if (changed) {
+    deploy.gen++;
+    const keep = new Set(entries.map(deployEntryKey));
+    for (const k of [...deploy.results.keys()]) if (!keep.has(k)) deploy.results.delete(k);
+    for (const k of [...deploy.primed]) if (!keep.has(k)) deploy.primed.delete(k);
+    deploy.rows = mergeDeployRows();
+  }
+  updateDeployIcon();
+  if (!entries.length) {
+    clearTimeout(deploy.timer);
+    deploy.timer = null;
+    closeDeployMenu();
+    return;
+  }
+  renderDeployMenu();
+  if (changed && (deployBaseMs() || deploy.open)) refreshDeploysNow();
+  else scheduleDeploys();
+}
+
+// ---- the button ----
+function updateDeployIcon() {
+  if (!deployBtn) return;
+  deployBtn.hidden = !deploy.entries.length;
+  if (deployBtn.hidden) return;
+  let st = null;
+  // seen as a predicate: the keys are repo-qualified, deploymentIds alone could collide.
+  try { st = deployLib.iconState(deploy.rows, { seen: (r) => deploy.seen.has(deployFailKey(r)) }); } catch (_) { st = null; }
+  const mode = (st && st.mode) || 'idle';
+  const approvable = Math.max(0, Number(st && st.approvable) || 0);
+  const failedUnseen = !!(st && st.failedUnseen) || mode === 'failed';
+  deployBtn.classList.toggle('running', mode === 'running');
+  deployBtn.classList.toggle('waiting', mode === 'waiting');
+  const badge = deployBtn.querySelector('.dep-badge');
+  const dot = deployBtn.querySelector('.dep-dot');
+  if (badge) { badge.hidden = approvable <= 0; badge.textContent = approvable > 9 ? '9+' : String(approvable); }
+  if (dot) dot.hidden = !failedUnseen;
+
+  const parts = [];
+  const waiting = deploy.rows.filter((r) => r.waiting).length;
+  const running = deploy.rows.filter((r) => DEPLOY_RUNNING.has(r.state)).length;
+  if (approvable) parts.push(`${approvable} väntar på ditt godkännande`);
+  else if (waiting) parts.push(`${waiting} väntar på godkännande`);
+  if (running) parts.push(`${running} kör`);
+  if (failedUnseen) parts.push('en deploy har misslyckats');
+  const errs = deploy.entries.filter((e) => { const r = deploy.results.get(deployEntryKey(e)); return r && !r.ok; }).length;
+  if (errs) parts.push(errs === 1 ? 'fel för 1 repo' : `fel för ${errs} repon`);
+  const label = 'Deployer' + (parts.length ? ': ' + parts.join(', ') : '');
+  deployBtn.title = label;
+  deployBtn.setAttribute('aria-label', label);
+}
+
+function setDeployRefreshing(on) {
+  const b = deploy.menu && deploy.menu.querySelector('.dep-refresh');
+  if (b) { b.classList.toggle('spin', on); b.setAttribute('aria-busy', String(on)); }
+  if (!on && deploy.open && !deploy.lastAt) renderDeployMenu();
+}
+
+// ---- the popover ----
+function ensureDeployMenu() {
+  if (deploy.menu) return deploy.menu;
+  const el = document.createElement('div');
+  el.className = 'deploy-menu';
+  el.id = 'deploy-menu';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Deployer');
+  const head = document.createElement('div');
+  head.className = 'dep-head';
+  const title = document.createElement('span');
+  title.className = 'dep-head-title';
+  title.textContent = 'Deployer';
+  const age = document.createElement('span');
+  age.className = 'dep-head-age';
+  age.setAttribute('aria-live', 'polite');
+  const refresh = document.createElement('button');
+  refresh.type = 'button';
+  refresh.className = 'dep-refresh';
+  refresh.title = 'Uppdatera';
+  refresh.setAttribute('aria-label', 'Uppdatera deployer');
+  refresh.dataset.fk = 'refresh';
+  refresh.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+  refresh.addEventListener('click', () => refreshDeploysNow());
+  head.append(title, age, refresh);
+  const list = document.createElement('div');
+  list.className = 'dep-list';
+  el.append(head, list);
+  // Hover keeps it open; a press or focus inside pins it.
+  el.addEventListener('mouseenter', () => clearTimeout(deploy.closeTimer));
+  el.addEventListener('mouseleave', () => scheduleDeployClose());
+  el.addEventListener('mousedown', () => { deploy.pinned = true; clearTimeout(deploy.closeTimer); });
+  el.addEventListener('focusin', () => { deploy.pinned = true; clearTimeout(deploy.closeTimer); });
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeDeployMenu({ restoreFocus: true });
+  });
+  document.body.appendChild(el);
+  deploy.menu = el;
+  return el;
+}
+
+function positionDeployMenu() {
+  if (!deploy.menu || !deployBtn) return;
+  const rect = deployBtn.getBoundingClientRect();
+  deploy.menu.style.top = (rect.bottom + 4) + 'px';
+  deploy.menu.style.right = Math.max(6, window.innerWidth - rect.right) + 'px';
+}
+
+// pin: stays until Esc / outside press / the button again. focus: to the first
+// actionable element (keyboard open, notification click).
+function openDeployMenu({ pin = false, focus = false } = {}) {
+  clearTimeout(deploy.openTimer);
+  clearTimeout(deploy.closeTimer);
+  if (!deployBtn || deployBtn.hidden) return;
+  if (pin) deploy.pinned = true;
+  if (deploy.open) { if (focus) focusFirstDeployAction(); return; }
+  const el = ensureDeployMenu();
+  deploy.open = true;
+  el.classList.add('show');
+  positionDeployMenu();
+  deployBtn.classList.add('active');
+  deployBtn.setAttribute('aria-expanded', 'true');
+  // Opening is seeing: failures shown now no longer light the red dot.
+  markDeployFailuresSeen(deploy.rows);
+  updateDeployIcon();
+  renderDeployMenu();
+  if (focus) focusFirstDeployAction();
+  clearInterval(deploy.ageTimer);
+  deploy.ageTimer = setInterval(() => renderDeployMenu(), 30000);
+  // pollSeconds 0 only fetches here; otherwise when the last fetch is a while ago.
+  if (!deploy.inflight && (!deployBaseMs() || Date.now() - deploy.lastAt > 20000)) {
+    fetchDeploys(false).then(scheduleDeploys, scheduleDeploys);
+  }
+}
+
+function closeDeployMenu({ restoreFocus = false } = {}) {
+  clearTimeout(deploy.openTimer);
+  clearTimeout(deploy.closeTimer);
+  if (!deploy.open || deploy.frozen) return;
+  deploy.open = false;
+  deploy.pinned = false;
+  deploy.rowErrors.clear();
+  clearInterval(deploy.ageTimer);
+  deploy.ageTimer = null;
+  deploy.menu.classList.remove('show');
+  deployBtn.classList.remove('active');
+  deployBtn.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) window.macFocusActive();
+}
+
+function scheduleDeployClose() {
+  clearTimeout(deploy.closeTimer);
+  if (!deploy.open || deploy.pinned || deploy.frozen) return;
+  deploy.closeTimer = setTimeout(() => { if (!deploy.pinned) closeDeployMenu(); }, 300);
+}
+
+function focusFirstDeployAction() {
+  if (!deploy.menu) return;
+  const b = deploy.menu.querySelector('.dep-list button:not(:disabled)') || deploy.menu.querySelector('.dep-refresh');
+  if (b) b.focus();
+}
+
+function deployAgo(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 45) return 'nyss';
+  const m = Math.round(s / 60); if (m < 60) return `för ${m} min sedan`;
+  const h = Math.round(m / 60); if (h < 24) return `för ${h} h sedan`;
+  return `för ${Math.round(h / 24)} d sedan`;
+}
+function deployElapsed(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60); if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h} h ${m % 60} min`;
+  return `${Math.floor(h / 24)} d`;
+}
+
+function deployEl(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function deployButton(cls, text, fk, onClick) {
+  const b = deployEl('button', 'dep-btn ' + cls, text);
+  b.type = 'button';
+  b.dataset.fk = fk;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// Rebuilt from deploy.rows; never while a review dialog is open (deploy.frozen), so the
+// row the dialog talks about cannot change under it. Focus and scroll survive.
+function renderDeployMenu() {
+  if (!deploy.open || !deploy.menu) return;
+  if (deploy.frozen) { deploy.dirty = true; return; }
+  deploy.dirty = false;
+  const el = deploy.menu;
+  el.querySelector('.dep-head-age').textContent = deploy.lastAt
+    ? 'senast uppdaterad ' + deployAgo(deploy.lastAt)
+    : (deploy.inflight ? 'hämtar…' : 'inte hämtat än');
+  const list = el.querySelector('.dep-list');
+  const active = document.activeElement;
+  const focusKey = active && list.contains(active) ? active.dataset.fk : null;
+  const scroll = list.scrollTop;
+  list.textContent = '';
+  for (const e of deploy.entries) {
+    const r = deploy.results.get(deployEntryKey(e));
+    if (r && !r.ok) list.appendChild(buildDeployProblemRow(e, r));
+  }
+  for (const row of deploy.rows) list.appendChild(buildDeployRow(row));
+  if (!list.childElementCount) list.appendChild(buildDeployEmpty());
+  list.scrollTop = scroll;
+  if (focusKey) {
+    const again = [...list.querySelectorAll('[data-fk]')].find((n) => n.dataset.fk === focusKey && !n.disabled);
+    if (again) again.focus();
+    else focusFirstDeployAction();
+  }
+}
+
+function buildDeployEmpty() {
+  const box = deployEl('div', 'dep-empty');
+  if (!deploy.lastAt) { box.textContent = deploy.inflight ? 'Hämtar deployer…' : 'Inte hämtat än. Tryck på uppdatera.'; return box; }
+  box.appendChild(deployEl('div', 'dep-empty-title', 'Inga deployer hittades'));
+  box.appendChild(deployEl('div', null, 'Repona i Inställningar → GitHub → Deployer att följa har inga deployer till GitHub Environments.'));
+  const b = deployButton('', 'Öppna Inställningar', 'settings', () => { closeDeployMenu(); openSettings('github'); });
+  box.appendChild(b);
+  return box;
+}
+
+function deployProblemText(r) {
+  if (r.missing) return 'gh hittades inte. Installera GitHub CLI (gh) och starta om appen.';
+  if (r.rateLimited) return 'GitHubs gräns för anrop är nådd. Försöker igen om en stund.';
+  const msg = String(r.error || 'Okänt fel');
+  if (/auth login|not logged|authenticat|bad credentials|\b401\b/i.test(msg)) return 'gh är inte inloggad. Kör gh auth login i en terminal.';
+  return msg;
+}
+
+function buildDeployProblemRow(e, r) {
+  const rowEl = deployEl('div', 'dep-row problem');
+  rowEl.appendChild(deployEl('span', 'dep-glyph', '!'));
+  const main = deployEl('div', 'dep-main');
+  const line = deployEl('div', 'dep-line');
+  const name = deployEl('span', 'dep-name', deployEntryKey(e));
+  line.appendChild(name);
+  line.appendChild(deployEl('span', 'dep-state', r.lastGood ? 'visar senaste svaret' : 'kunde inte hämtas'));
+  main.appendChild(line);
+  main.appendChild(deployEl('div', 'dep-err', deployProblemText(r)));
+  rowEl.appendChild(main);
+  return rowEl;
+}
+
+function buildDeployRow(row) {
+  const cls = row.state === 'waiting' ? 's-waiting' : DEPLOY_RUNNING.has(row.state) ? 's-running'
+    : row.state === 'success' ? 's-success' : DEPLOY_FAILED.has(row.state) ? 's-failure' : 's-inactive';
+  const glyph = { 's-waiting': '⏸', 's-running': '⟳', 's-success': '✓', 's-failure': '✗', 's-inactive': '○' }[cls];
+  const rowEl = deployEl('div', 'dep-row ' + cls);
+  const g = deployEl('span', 'dep-glyph', glyph);
+  g.setAttribute('aria-hidden', 'true');
+  rowEl.appendChild(g);
+  const main = deployEl('div', 'dep-main');
+  const fk = deployFailKey(row);
+
+  // repo · environment, state, time
+  const line = deployEl('div', 'dep-line');
+  const repoName = String(row.repo || '').split('/').pop();
+  const name = deployEl('span', 'dep-name', `${repoName} · ${row.environment}`);
+  name.title = `${row.repo} · ${row.environment}` + (row.run && row.run.workflow ? ` (${row.run.workflow})` : '');
+  line.appendChild(name);
+  line.appendChild(deployEl('span', 'dep-state', DEPLOY_STATE_TEXT[row.state] || String(row.state || '')));
+  const live = row.state === 'waiting' || DEPLOY_RUNNING.has(row.state);
+  const at = Date.parse(live ? (row.createdAt || row.updatedAt) : (row.updatedAt || row.createdAt));
+  if (at) {
+    const time = deployEl('span', 'dep-time', live ? deployElapsed(at) : deployAgo(at));
+    time.title = new Date(at).toLocaleString('sv-SE');
+    line.appendChild(time);
+  }
+  main.appendChild(line);
+
+  // #run title · sha · actor (+N fler väntar), Öppna ↗
+  const subLine = deployEl('div', 'dep-line');
+  const sub = deployEl('span', 'dep-sub');
+  const bits = [];
+  const run = row.run;
+  if (run && (run.number != null || run.title)) bits.push(deployEl('span', null, [run.number != null ? '#' + run.number : '', run.title || ''].filter(Boolean).join(' ')));
+  if (row.sha) bits.push(deployEl('span', 'dep-sha', String(row.sha).slice(0, 7)));
+  if (row.actor) bits.push(deployEl('span', null, String(row.actor)));
+  bits.forEach((b, i) => { if (i) sub.appendChild(document.createTextNode(' · ')); sub.appendChild(b); });
+  sub.title = sub.textContent;
+  sub.style.flex = '1';
+  sub.style.minWidth = '0';
+  subLine.appendChild(sub);
+  const url = row.url || (run && run.url) || null;
+  if (url) {
+    const open = deployButton('link', 'Öppna ↗', fk + '|open', (ev) => { closeDeployMenu(); openLink(url, ev); });
+    open.title = url;
+    open.setAttribute('aria-label', `Öppna ${row.repo} · ${row.environment} på GitHub`);
+    subLine.appendChild(open);
+  }
+  main.appendChild(subLine);
+
+  // Gate: whenever row.waiting is there, whatever the row's own state (the latest
+  // deployment may be 'success' while an older run waits). Everything here is the
+  // waiting run's own: run, sha, actor. Godkänn / Avvisa, or someone else's call.
+  const w = row.waiting;
+  if (w) {
+    const gk = deployGateKey(row);
+    const wr = w.run || {};
+    const gate = deployEl('div', 'dep-line dep-gate');
+    const gsub = deployEl('span', 'dep-sub');
+    gsub.appendChild(deployEl('span', 'dep-gate-label', '⏸ väntar på godkännande'));
+    const gbits = [];
+    if (wr.number != null || wr.title) gbits.push(deployEl('span', null, [wr.number != null ? '#' + wr.number : '', wr.title || ''].filter(Boolean).join(' ')));
+    if (w.sha) gbits.push(deployEl('span', 'dep-sha', String(w.sha).slice(0, 7)));
+    if (w.actor) gbits.push(deployEl('span', null, String(w.actor)));
+    gbits.forEach((b, i) => { gsub.appendChild(document.createTextNode(i ? ' · ' : ': ')); gsub.appendChild(b); });
+    const more = Number(w.moreWaiting) > 0 ? Number(w.moreWaiting) : 0;
+    if (more) gsub.appendChild(deployEl('span', 'dep-more', ` · +${more} fler väntar`));
+    gsub.title = gsub.textContent;
+    gsub.style.flex = '1';
+    gsub.style.minWidth = '0';
+    gate.appendChild(gsub);
+    if (wr.url) {
+      const open = deployButton('link', 'Öppna ↗', gk + '|open', (ev) => { closeDeployMenu(); openLink(wr.url, ev); });
+      open.title = wr.url;
+      open.setAttribute('aria-label', `Öppna den väntande körningen för ${row.repo} · ${row.environment} på GitHub`);
+      gate.appendChild(open);
+    }
+    main.appendChild(gate);
+    const acts = deployEl('div', 'dep-actions');
+    // No sha: nothing to pin the approval to (main checks it), so only Öppna is offered.
+    if (w.canApprove && w.sha) {
+      const busy = deploy.busy.has(gk);
+      const ok = deployButton('approve', busy ? 'Skickar…' : 'Godkänn', gk + '|approve', () => reviewDeploy(row, 'approved'));
+      const no = deployButton('reject', 'Avvisa', gk + '|reject', () => reviewDeploy(row, 'rejected'));
+      ok.disabled = no.disabled = busy;
+      ok.setAttribute('aria-label', `Godkänn deploy av ${row.repo} till ${row.environment}`);
+      no.setAttribute('aria-label', `Avvisa deploy av ${row.repo} till ${row.environment}`);
+      acts.append(ok, no);
+      main.appendChild(acts);
+    } else if (!w.canApprove) {
+      acts.appendChild(deployEl('span', 'dep-note', 'väntar på annan granskare'));
+      main.appendChild(acts);
+    } else if (!wr.url) {
+      acts.appendChild(deployEl('span', 'dep-note', 'kan inte godkännas här (commit saknas)'));
+      main.appendChild(acts);
+    }
+    const err = deploy.rowErrors.get(gk);
+    if (err) {
+      const e = deployEl('div', 'dep-err', err);
+      e.setAttribute('role', 'alert');
+      main.appendChild(e);
+    }
+  }
+  rowEl.appendChild(main);
+  return rowEl;
+}
+
+// Approve / reject one waiting environment. The dialog text comes only from row.waiting
+// (the waiting run's own run / sha / actor, never the row's deployment) captured at
+// click time, and main refuses unless the run still has that sha (expectedSha). The
+// popover is pinned and frozen while the dialog is up.
+async function reviewDeploy(row, state) {
+  const w = row.waiting;
+  if (!w || !w.canApprove || !w.sha || !window.ghApi || typeof window.appPrompt !== 'function') return;
+  const gk = deployGateKey(row);
+  if (deploy.busy.has(gk)) return;
+  deploy.pinned = true;
+  deploy.frozen = true;
+  clearTimeout(deploy.closeTimer);
+  const approve = state === 'approved';
+  const run = w.run || {};
+  const sha = String(w.sha);
+  const lines = [`${row.repo} · ${row.environment}`];
+  if (run.number != null || run.title) lines.push('Körning ' + [run.number != null ? '#' + run.number : '', run.title || ''].filter(Boolean).join(' '));
+  lines.push('Commit ' + sha.slice(0, 7));
+  if (w.actor) lines.push('Startad av ' + String(w.actor));
+  // moreWaiting counts other runs gated on this same environment, not other environments.
+  if (Number(w.moreWaiting) > 0) lines.push(`${w.moreWaiting} ${Number(w.moreWaiting) === 1 ? 'annan körning' : 'andra körningar'} väntar också på ${row.environment}; de granskas var för sig.`);
+  let comment = null;
+  try {
+    comment = await window.appPrompt({
+      title: approve ? `Godkänn deploy till ${row.environment}?` : `Avvisa deploy till ${row.environment}?`,
+      message: lines.join('\n'),
+      okLabel: approve ? 'Godkänn' : 'Avvisa',
+      danger: !approve,
+      placeholder: 'Kommentar (valfritt)',
+      maxLength: 1000
+    });
+  } finally {
+    deploy.frozen = false;
+  }
+  if (typeof comment !== 'string') { if (deploy.dirty) renderDeployMenu(); return; }
+  deploy.busy.add(gk);
+  deploy.rowErrors.delete(gk);
+  renderDeployMenu();
+  let r = null;
+  try {
+    r = await window.ghApi.deployReview({ repo: row.repo, runId: w.runId, envId: w.envId, state, comment, expectedSha: sha });
+  } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+  deploy.busy.delete(gk);
+  if (!r || !r.ok) {
+    const why = (r && r.error) || 'Okänt fel';
+    // Closed meanwhile: the inline error would be lost, so say it in a dialog.
+    // deployReview's own (Swedish) text, as is.
+    if (deploy.open) deploy.rowErrors.set(gk, why);
+    else window.appAlert({ title: approve ? 'Godkännandet skickades inte' : 'Avvisningen skickades inte', message: why });
+  }
+  renderDeployMenu();
+  refreshDeploysNow();
+}
+
+if (deployBtn) {
+  deployBtn.addEventListener('mouseenter', () => {
+    clearTimeout(deploy.closeTimer);
+    if (deploy.open) return;
+    clearTimeout(deploy.openTimer);
+    deploy.openTimer = setTimeout(() => openDeployMenu(), 150);
+  });
+  deployBtn.addEventListener('mouseleave', () => {
+    clearTimeout(deploy.openTimer);
+    scheduleDeployClose();
+  });
+  // Mouse: a click pins an open (hovered) popover, or opens it pinned; a click on a
+  // pinned one closes it.
+  deployBtn.addEventListener('click', () => {
+    if (deploy.open && deploy.pinned) closeDeployMenu();
+    else openDeployMenu({ pin: true });
+  });
+  deployBtn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (deploy.open && deploy.pinned) closeDeployMenu();
+      else openDeployMenu({ pin: true, focus: true });
+    } else if (e.key === 'Escape' && deploy.open) {
+      e.preventDefault();
+      closeDeployMenu();
+    }
+  });
+}
+document.addEventListener('mousedown', (e) => {
+  // .set-overlay-top: the review dialog's backdrop, which may have just unfrozen it.
+  if (!deploy.open || deploy.frozen || e.target.closest('.set-overlay-top')) return;
+  if (!e.target.closest('#deploy-menu') && !e.target.closest('#btn-deployments')) closeDeployMenu();
+});
+window.addEventListener('blur', () => { if (!deploy.frozen) closeDeployMenu(); });
+window.addEventListener('resize', () => { if (deploy.open) positionDeployMenu(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (deploy.pausedHidden) { deploy.pausedHidden = false; deployTick(); }
+  else if (deploy.timer && deployFastNeeded()) scheduleDeploys();   // back to 15 s
+});
+if (window.onAppSettingsChanged) {
+  window.onAppSettingsChanged((next, prev) => {
+    const g = (s, k) => (s && s.github ? s.github[k] : undefined);
+    if (['deployRepos', 'pollSeconds', 'deployNotify'].some((k) => !prev || g(prev, k) !== g(next, k))) restartDeploys();
+  });
+}
+restartDeploys();
+
 // ---------- pane resizer drag ----------
 function setupResizerDrag(resizerEl, beforeEl, afterEl, direction) {
   let drag = null;
@@ -6747,6 +7457,7 @@ function appModalOpen() {
 function openSettings(section) {
   hideContextMenu();
   closeReposMenu();
+  closeDeployMenu();
   if (window.openAppSettings) window.openAppSettings(section ? { section } : {});
 }
 // Hooks the modal calls back into: open settings.json, and where focus goes on close

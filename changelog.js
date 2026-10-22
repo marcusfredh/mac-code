@@ -6,6 +6,13 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.29.0', date: '2026-10-22', items: [
+      'Ny ikon för deployer bredvid Inställningar: visar om en deploy kör, väntar på godkännande eller har misslyckats.',
+      'Håll muspekaren över ikonen för senaste deployen per repo och miljö, med status, körning, commit, vem och när. Klicka för att fästa listan.',
+      'Miljöer som väntar på ditt godkännande kan godkännas eller avvisas direkt, med en valfri kommentar.',
+      'Välj repon under Inställningar → GitHub → Deployer att följa (owner/repo eller owner/repo@fil.yml).',
+      'Windows-notis när en ny deploy väntar på ditt godkännande (går att stänga av).'
+    ] },
     { version: '0.28.0', date: '2026-10-21', items: [
       'Ny sektion "Ändringslogg" i Inställningar: alla versioner med sammanfattade ändringar, nyaste överst.',
       'Versionen du kör är märkt "Nuvarande"; de tre senaste versionerna visas utfällda.'

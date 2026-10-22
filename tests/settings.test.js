@@ -277,3 +277,26 @@ test("terminal.theme: 'app' accepted, default unchanged", () => {
   assert.strictEqual(validate({ terminal: { theme: 'app' } }).terminal.theme, 'app');
   assert.strictEqual(validate({ terminal: { theme: 'bogus' } }).terminal.theme, 'windowsTerminal');
 });
+
+test('github.deployRepos: default empty, valid lists kept, invalid falls back', () => {
+  assert.strictEqual(DEFAULTS.github.deployRepos, '');
+  assert.strictEqual(validate({ github: { deployRepos: ' a/b, c/d@deploy.yml ' } }).github.deployRepos, 'a/b, c/d@deploy.yml');
+  assert.strictEqual(validate({ github: { deployRepos: 'a/b; c/d e/f' } }).github.deployRepos, 'a/b; c/d e/f');
+  for (const bad of ['-a/b', 'a/b@x.json', 'nope', 'a/b\nc/d', 42, null,
+    Array.from({ length: 21 }, (_, i) => 'o/r' + i).join(',')]) {
+    assert.strictEqual(validate({ github: { deployRepos: bad } }).github.deployRepos, '', String(bad));
+  }
+  assert.strictEqual(validate({ github: { deployRepos: Array.from({ length: 20 }, (_, i) => 'o/r' + i).join(',') } }).github.deployRepos.split(',').length, 20);
+  const cur = validate({ github: { deployRepos: 'a/b' } });
+  assert.strictEqual(applyPatch(cur, { github: { deployRepos: 'a/..' } }).github.deployRepos, 'a/b');
+});
+
+test('github.deployNotify: bool, default true; neither key is import-protected', () => {
+  assert.strictEqual(DEFAULTS.github.deployNotify, true);
+  assert.strictEqual(validate({ github: { deployNotify: false } }).github.deployNotify, false);
+  assert.strictEqual(validate({ github: { deployNotify: 'no' } }).github.deployNotify, true);
+  const { settings, skipped } = filterImport(DEFAULTS, { github: { deployRepos: 'x/y', deployNotify: false } });
+  assert.strictEqual(settings.github.deployRepos, 'x/y');
+  assert.strictEqual(settings.github.deployNotify, false);
+  assert.deepStrictEqual(skipped, []);
+});

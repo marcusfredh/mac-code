@@ -6,7 +6,8 @@
 // validates every write, and broadcasts each change back here.
 //
 // Also builds the settings modal (Ctrl+, / the gear in the titlebar) and two small
-// in-app dialogs, appConfirm() and appAlert(), so nothing uses window.confirm/alert.
+// in-app dialogs, appConfirm() and appAlert() (plus appPrompt() for a comment), so
+// nothing uses window.confirm/alert/prompt.
 // All DOM is built with createElement/textContent: setting values and file paths
 // never go through innerHTML.
 
@@ -25,7 +26,7 @@
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
       permissionDefault: null, notify: true, showUsage: true, autoResume: true, cliPath: '' },
     github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60,
-      openAs: 'overlay', mergeMethod: 'merge', deleteBranchOnMerge: false },
+      openAs: 'overlay', mergeMethod: 'merge', deleteBranchOnMerge: false, deployRepos: '', deployNotify: true },
     editor: { autosave: 'off', wordWrap: false, minimap: false, tabSize: 2 },
     explorer: { showHidden: true }
   };
@@ -210,14 +211,90 @@
   function appAlert({ title, message, okLabel = 'OK' } = {}) {
     return appConfirm({ title, message, okLabel, alertOnly: true }).then(() => undefined);
   }
+  // -> Promise<string|null>: the trimmed text on OK ('' when left empty), null on
+  // cancel. Same shell as appConfirm with a textarea; Enter submits, Shift+Enter is a
+  // new line. Focus starts in the text, also when danger (the user just picked the action).
+  function appPrompt({ title, message, okLabel = 'OK', cancelLabel = 'Avbryt', danger = false, placeholder = '', maxLength = 0 } = {}) {
+    return new Promise((resolve) => {
+      const prev = document.activeElement;
+      const overlay = el('div', 'set-overlay set-overlay-top show');
+      const box = el('div', 'set-confirm');
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+      const titleEl = el('div', 'set-confirm-title', title || '');
+      titleEl.id = 'set-prompt-title-' + Date.now();
+      box.setAttribute('aria-labelledby', titleEl.id);
+      box.appendChild(titleEl);
+      if (message) box.appendChild(el('div', 'set-confirm-text', message));
+      const ta = el('textarea', 'set-input set-prompt-input');
+      ta.rows = 3;
+      ta.spellcheck = true;
+      ta.placeholder = placeholder || '';
+      ta.setAttribute('aria-label', placeholder || title || 'Kommentar');
+      if (maxLength > 0) ta.maxLength = maxLength;
+      box.appendChild(ta);
+      const foot = el('div', 'set-confirm-foot');
+      const cancel = el('button', 'set-btn', cancelLabel);
+      const ok = el('button', 'set-btn ' + (danger ? 'danger' : 'primary'), okLabel);
+      cancel.type = 'button';
+      ok.type = 'button';
+      foot.append(cancel, ok);
+      box.appendChild(foot);
+      overlay.appendChild(box);
+
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        overlay.remove();
+        restoreFocus(prev);
+        resolve(v);
+      };
+      const submit = () => finish(ta.value.trim());
+      ok.addEventListener('click', submit);
+      cancel.addEventListener('click', () => finish(null));
+      overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) finish(null); });
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+      });
+      overlay.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+        else trapTab(e, box);
+        e.stopPropagation();
+      });
+      document.body.appendChild(overlay);
+      ta.focus();
+    });
+  }
   window.appConfirm = appConfirm;
   window.appAlert = appAlert;
+  window.appPrompt = appPrompt;
 
   // ---------- the settings modal: what it shows ----------
   // Each row: label + description + one or more controls bound to section.key.
-  // kinds: toggle | segmented | select | number | text. Paths and the worktree
-  // template are sent on change/blur, never per keystroke.
+  // kinds: toggle | segmented | select | number | text | textarea. Paths, the worktree
+  // template and the deploy list are sent on change/blur, never per keystroke.
   const opt = (value, label) => ({ value, label });
+  // Deployer att följa: what deployStatus.parseRepoList (deployStatus.js) rejects, as one
+  // note ('' = nothing to say). Main keeps the old list while any of it is there.
+  // Also the length main allows for the saved (one-line) value.
+  const DEPLOY_REPOS_MAX_CHARS = 1024;
+  function deployReposProblems(value) {
+    const ds = window.deployStatus;
+    const errs = [];
+    if (ds && typeof ds.parseRepoList === 'function') {
+      let res = null;
+      try { res = ds.parseRepoList(String(value || '')); } catch (_) { res = null; }
+      if (res && Array.isArray(res.errors)) errs.push(...res.errors.map(String));
+      const max = Number(ds.MAX_REPOS) || 0;
+      if (max && res && Array.isArray(res.entries) && res.entries.length > max) errs.push('Högst ' + max + ' repon.');
+    }
+    if (oneLineList(value).length > DEPLOY_REPOS_MAX_CHARS) errs.push(`Listan är för lång (max ${DEPLOY_REPOS_MAX_CHARS} tecken)`);
+    if (!errs.length) return '';
+    const text = errs.slice(0, 5);
+    if (errs.length > 5) text.push('… och ' + (errs.length - 5) + ' till');
+    return 'Sparas inte förrän det här är rättat:\n' + text.join('\n');
+  }
   const SECTIONS = [
     { id: 'general', label: 'Allmänt', rows: [
       { label: 'Återställ flikar vid start',
@@ -321,9 +398,17 @@
         desc: '"Create PR with Claude" kör gh pr create --draft.',
         controls: [{ kind: 'toggle', sec: 'github', key: 'draftPr' }] },
       { label: 'Uppdatera PR- och CI-status',
-        desc: 'Hur ofta GitHub-fliken frågar gh medan den visas.',
+        desc: 'Hur ofta GitHub-fliken frågar gh medan den visas, och hur ofta deployerna vid ikonen bredvid Inställningar hämtas.',
         controls: [{ kind: 'select', sec: 'github', key: 'pollSeconds', options: [
           opt(60, 'Var 60:e sekund'), opt(300, 'Var 5:e minut'), opt(0, 'Bara när fliken öppnas')] }] },
+      { label: 'Deployer att följa',
+        desc: 'Repon vars deployer (GitHub Environments) visas vid ikonen bredvid Inställningar. Lägg till @fil.yml för att bara följa ett workflow.',
+        controls: [{ kind: 'textarea', sec: 'github', key: 'deployRepos', placeholder: 'owner/repo, owner/repo@deploy.yml', mono: true, width: 260, oneLine: true,
+          validate: deployReposProblems,
+          invalid: 'Listan sparades inte (ogiltigt repo eller för många). Den gamla behålls.' }] },
+      { label: 'Notis när en deploy väntar på mitt godkännande',
+        desc: 'Windows-notis när en ny miljö väntar på att du godkänner den. Bara när fönstret saknar fokus. På = deployerna hämtas även när fönstret är minimerat.',
+        controls: [{ kind: 'toggle', sec: 'github', key: 'deployNotify' }] },
       { label: 'Förvalt merge-sätt',
         desc: 'Förvalt i Merge-dialogen. Tillåter repot inte valet förväljs det första som repot tillåter.',
         controls: [{ kind: 'segmented', sec: 'github', key: 'mergeMethod', options: [
@@ -382,17 +467,25 @@
 
   // Write one control's value; flag the row when main kept the old value instead.
   async function commit(row, c, value) {
+    const before = getAppSetting(c.sec, c.key);
     const res = await writePatch({ [c.sec]: { [c.key]: value } });
     if (!res) { setNote(row, 'Kunde inte spara.', 'err'); syncAll(); return; }
     const got = res[c.sec][c.key];
     const sent = typeof value === 'string' ? value.trim() : value;
-    // Numbers come back clamped to their range; that is a fix-up, not an error.
-    if (c.kind !== 'number' && !same(got, sent)) {
+    // Numbers come back clamped to their range; that is a fix-up, not an error. A list
+    // (textarea) may come back tidied by main: only keeping the old value is an error.
+    const rejected = c.kind === 'textarea' ? !same(got, sent) && same(got, before) && !same(before, sent)
+      : c.kind !== 'number' && !same(got, sent);
+    // A rejected list keeps the user's text in the field (c.keepText) so the typo can be
+    // fixed; Esc in the field or reopening settings puts the saved value back.
+    if (c.kind === 'textarea') c.keepText = rejected;
+    if (rejected) {
       setNote(row, c.invalid || INVALID_DEFAULT, 'err');
       row.noteSticky = true;
     } else {
       row.noteSticky = false;
-      setNote(row, '', null);
+      const problem = c.validate ? c.validate(got) : '';
+      setNote(row, problem, problem ? 'warn' : null);
     }
     syncAll();
     if (c.check) refreshChecks();
@@ -512,6 +605,59 @@
     return i;
   }
 
+  // Settings strings are one line (main rejects newlines): lines become ', '-separated.
+  function oneLineList(v) {
+    return String(v || '').split(/[\r\n]+/).map((x) => x.trim().replace(/[,;\s]+$/, '')).filter(Boolean).join(', ');
+  }
+  // A multi-line list (Deployer att följa). Sent on blur / Ctrl+Enter like a text row;
+  // c.validate gives a live note while typing.
+  function buildTextarea(row, c) {
+    const t = el('textarea', 'set-input set-ta' + (c.mono ? ' mono' : ''));
+    t.rows = 3;
+    t.spellcheck = false;
+    t.autocomplete = 'off';
+    t.placeholder = c.placeholder || '';
+    t.setAttribute('aria-label', c.aria || row.def.label);
+    if (c.width) t.style.width = c.width + 'px';
+    const say = (value) => {
+      const problem = c.validate ? c.validate(value) : '';
+      setNote(row, problem, problem ? 'warn' : null);
+    };
+    t.addEventListener('input', () => { row.noteSticky = false; say(t.value); });
+    t.addEventListener('change', () => commit(row, c, c.oneLine ? oneLineList(t.value) : t.value));
+    t.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); t.blur(); }
+      else if (e.key === 'Escape' && c.keepText) {
+        // First Esc drops the rejected text (back to the saved list); the next one
+        // closes settings as usual.
+        e.preventDefault();
+        e.stopPropagation();
+        c.resetText();
+      }
+    });
+    // Back to the saved value (Esc, or settings opened again).
+    c.resetText = () => {
+      c.keepText = false;
+      row.noteSticky = false;
+      t.value = getAppSetting(c.sec, c.key);
+      say(t.value);
+      markBad();
+    };
+    const markBad = () => {
+      t.classList.toggle('bad', !!c.keepText);
+      t.setAttribute('aria-invalid', String(!!c.keepText));
+    };
+    c.sync = (s) => {
+      markBad();
+      // A rejected list stays as typed so it can be fixed (see commit).
+      if (document.activeElement === t || c.keepText) return;
+      t.value = s[c.sec][c.key];
+      if (!row.noteSticky) say(t.value);
+    };
+    c.input = t;
+    return t;
+  }
+
   function buildRow(def, sectionId) {
     const row = { def, sectionId, controls: def.controls || [], note: null, noteSticky: false };
     const rowEl = el('div', 'set-row');
@@ -526,7 +672,7 @@
     rowEl.appendChild(text);
     const ctl = el('div', 'set-row-ctl');
     for (const c of row.controls) {
-      const build = { toggle: buildToggle, segmented: buildSegmented, select: buildSelect, number: buildNumber, text: buildText }[c.kind];
+      const build = { toggle: buildToggle, segmented: buildSegmented, select: buildSelect, number: buildNumber, text: buildText, textarea: buildTextarea }[c.kind];
       if (build) ctl.appendChild(build(row, c));
     }
     rowEl.appendChild(ctl);
@@ -1499,6 +1645,8 @@
     if (opts.section) activeSection = opts.section;
     ui.search.value = '';
     ui.about && ui.about.say('', null);
+    // A list kept as typed after a rejected save goes back to the saved value.
+    for (const r of ui.rows) for (const c of r.controls) if (c.keepText && c.resetText) c.resetText();
     syncAll();
     ui.overlay.classList.add('show');
     showSection(activeSection);
@@ -1515,7 +1663,7 @@
     flowFlush();
     // A text field with an unsent edit: commit it the way a blur would.
     const a = document.activeElement;
-    if (a && ui.dlg.contains(a) && a.tagName === 'INPUT' && a.type === 'text') a.blur();
+    if (a && ui.dlg.contains(a) && ((a.tagName === 'INPUT' && a.type === 'text') || a.tagName === 'TEXTAREA')) a.blur();
     // An unsaved Claude-konfiguration form does not outlive the dialog.
     cfg.form = null;
     ui.overlay.classList.remove('show');

@@ -117,7 +117,9 @@ contextBridge.exposeInMainWorld('ghApi', {
   varDelete:   (args) => ipcRenderer.invoke('gh:varDelete', args),
   envList:     (args) => ipcRenderer.invoke('gh:envList', args),
   envSave:     (args) => ipcRenderer.invoke('gh:envSave', args),
-  envDelete:   (args) => ipcRenderer.invoke('gh:envDelete', args)
+  envDelete:   (args) => ipcRenderer.invoke('gh:envDelete', args),
+  deployStatus: (entry) => ipcRenderer.invoke('gh:deployStatus', entry),
+  deployReview: (args)  => ipcRenderer.invoke('gh:deployReview', args)
 });
 
 contextBridge.exposeInMainWorld('notesApi', {

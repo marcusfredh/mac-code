@@ -7,6 +7,7 @@
 // Unknown sections and keys are dropped.
 const fs = require('fs');
 const path = require('path');
+const { parseRepoList, MAX_REPOS } = require('./deployStatus');
 
 const STR_MAX = 1024;
 
@@ -50,7 +51,11 @@ const SCHEMA = {
     pollSeconds:      { type: 'enum', values: [60, 300, 0], def: 60 },
     openAs:           { type: 'enum', values: ['overlay', 'tab'], def: 'overlay' },
     mergeMethod:      { type: 'enum', values: ['squash', 'merge', 'rebase'], def: 'merge' },
-    deleteBranchOnMerge: { type: 'bool', def: false }
+    deleteBranchOnMerge: { type: 'bool', def: false },
+    // Followed repos for deployment status: 'owner/repo' or 'owner/repo@workflow.yml',
+    // separated by comma, semicolon or space (one line, like every string setting).
+    deployRepos:      { type: 'string', def: '', check: isValidDeployRepos },
+    deployNotify:     { type: 'bool', def: true }
   },
   editor: {
     autosave: { type: 'enum', values: ['off', 'blur', 'delay'], def: 'off' },
@@ -170,6 +175,11 @@ function parseWorktreeList(stdout) {
     }
   }
   return out;
+}
+
+function isValidDeployRepos(s) {
+  const p = parseRepoList(s);
+  return p.errors.length === 0 && p.entries.length <= MAX_REPOS;
 }
 
 function isValidWorktreeTemplate(t) {

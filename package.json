@@ -1,6 +1,6 @@
 {
   "name": "mac-code",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Modern PowerShell wrapper for Windows built on Electron + xterm.js + node-pty",
   "main": "main.js",
   "author": "Marcus",
@@ -53,6 +53,7 @@
       "settingsView.js",
       "repoUsage.js",
       "tabGroups.js",
+      "deployStatus.js",
       "errorNotes.js",
       "errorHook.js",
       "folderUri.js",

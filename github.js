@@ -17,6 +17,7 @@ const os = require('os');
 const { resolveWorktreePath, parseWorktreeList } = require('./settings');
 const { buildMergeArgs, buildCopilotReviewArgs } = require('./ghArgs');
 const { normalizeTimeline, copilotReviewState, normalizeReviewThreads, attachReviewThreads } = require('./ghTimeline');
+const DS = require('./deployStatus');
 
 const GH_TIMEOUT_MS = 30000;
 
@@ -624,6 +625,201 @@ function register(ipcMain, getMainWindow, getSettings) {
     if (!validRepo(repo) || !validEnvName(name)) return { ok: false, error: 'bad request' };
     return ghRun(['api', '-X', 'DELETE', `repos/${repo}/environments/${encodeURIComponent(name)}`]);
   });
+
+  // ---------- deployment status ----------
+  // The renderer polls this per followed entry ('owner/repo' or 'owner/repo@wf.yml').
+  // The entry is re-parsed here; nothing from the renderer reaches gh unchecked.
+  ipcMain.handle('gh:deployStatus', async (_e, entry) => {
+    const parsed = DS.parseRepoList(typeof entry === 'string' ? entry : '');
+    if (parsed.errors.length || parsed.entries.length !== 1) return { ok: false, error: 'bad repo' };
+    const { repo, workflow } = parsed.entries[0];
+    try { return await deployStatus(repo, workflow); }
+    catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
+  });
+
+  // Approve or reject a pending environment gate. The gate is re-fetched first, so a
+  // stale button can't act on a gate that is gone or that the user may not approve, and
+  // the run's commit must match the one the dialog showed (expectedSha).
+  ipcMain.handle('gh:deployReview', async (e, args) => {
+    const win = getMainWindow && getMainWindow();
+    if (!win || win.isDestroyed() || e.sender !== win.webContents ||
+        (e.senderFrame && e.senderFrame !== win.webContents.mainFrame)) return { ok: false, error: 'not allowed' };
+    const { repo: rawRepo, runId, envId, state, comment, expectedSha } = args && typeof args === 'object' ? args : {};
+    const parsed = DS.parseRepoList(typeof rawRepo === 'string' ? rawRepo : '');
+    if (parsed.errors.length || parsed.entries.length !== 1) return { ok: false, error: 'bad repo' };
+    const repo = parsed.entries[0].repo;
+    if (!DS.validId(runId) || !DS.validId(envId)) return { ok: false, error: 'bad id' };
+    if (state !== 'approved' && state !== 'rejected') return { ok: false, error: 'bad state' };
+    const text = comment == null ? '' : comment;
+    if (typeof text !== 'string' || text.length > REVIEW_COMMENT_MAX) return { ok: false, error: 'bad comment' };
+    if (typeof expectedSha !== 'string' || !/^[0-9a-f]{7,40}$/i.test(expectedSha)) return { ok: false, error: 'bad sha' };
+    const p = await ghApiJson(['api', `repos/${repo}/actions/runs/${runId}/pending_deployments`], { cwd: os.homedir() });
+    if (!p.ok) return { ok: false, error: p.error };
+    const gate = (Array.isArray(p.data) ? p.data : []).find((x) => x && x.environment && x.environment.id === envId);
+    if (!gate) return { ok: false, error: 'Godkännandet väntar inte längre' };
+    if (gate.current_user_can_approve !== true) return { ok: false, error: 'Du får inte godkänna den här miljön' };
+    const run = await ghApiJson(['api', `repos/${repo}/actions/runs/${runId}`, '--jq', '{head_sha}'], { cwd: os.homedir() });
+    if (!run.ok) return { ok: false, error: run.error };
+    const head = run.data && typeof run.data.head_sha === 'string' ? run.data.head_sha.toLowerCase() : '';
+    if (!head || !head.startsWith(expectedSha.toLowerCase())) {
+      return { ok: false, error: 'Körningen matchar inte det som visades — uppdatera och försök igen' };
+    }
+    return ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/pending_deployments`, '--input', '-'],
+      { cwd: os.homedir(), input: JSON.stringify({ environment_ids: [envId], state, comment: text }) });
+  });
+}
+
+// ---------- deployment status helpers ----------
+// Per poll: environments (cached 10 min) + one GraphQL call + one `run list` + one
+// pending_deployments call per waiting run + run lookups not yet cached.
+const DEPLOY_ENV_TTL_MS = 10 * 60 * 1000;
+const DEPLOY_MAX_ENVS = 30;
+const DEPLOY_MAX_WAITING = 20;
+const RUN_CACHE_MAX = 5000;
+const REVIEW_COMMENT_MAX = 1024;
+const deployEnvCache = new Map();   // repo lowercased -> { at, names }
+// A run's workflow, number and title never change, so lookups are kept for good
+// (bounded; the oldest entry goes first).
+const deployRunCache = new Map();   // 'repo#runId' lowercased -> run info
+
+function isRateLimited(text) { return /rate limit|HTTP 429/i.test(String(text || '')); }
+
+// ghJson plus rate-limit detection.
+async function ghApiJson(args, opts) {
+  const r = await runGh(args, opts);
+  if (r.missing) return { ok: false, error: 'GitHub CLI (gh) is not installed', missing: true };
+  if (r.code !== 0) {
+    const text = r.stderr || r.stdout;
+    return { ok: false, error: firstErrorLine(text), rateLimited: isRateLimited(text), notFound: /HTTP 404/.test(String(text || '')) };
+  }
+  try { return { ok: true, data: JSON.parse(r.stdout || 'null') }; }
+  catch (e) { return { ok: false, error: 'Bad JSON from gh: ' + e.message }; }
+}
+
+function deployFail(r) {
+  const out = { ok: false, error: r.error || 'gh failed' };
+  if (r.missing) out.missing = true;
+  if (r.rateLimited) out.rateLimited = true;
+  return out;
+}
+
+async function deployEnvNames(repo) {
+  const key = repo.toLowerCase();
+  const hit = deployEnvCache.get(key);
+  if (hit && Date.now() - hit.at < DEPLOY_ENV_TTL_MS) return { ok: true, data: hit.names };
+  const r = await ghApiJson(['api', `repos/${repo}/environments?per_page=100`, '--jq', '[.environments[]?.name]']);
+  if (!r.ok) return r;
+  const names = (Array.isArray(r.data) ? r.data : []).filter((n) => typeof n === 'string' && n).slice(0, DEPLOY_MAX_ENVS);
+  deployEnvCache.set(key, { at: Date.now(), names });
+  return { ok: true, data: names };
+}
+
+// Query text is built from fixed aliases only; environment names go in as variables.
+const DEPLOY_NODE = 'databaseId environment state createdAt updatedAt commitOid creator { login } ' +
+  'latestStatus { state logUrl environmentUrl createdAt }';
+function deployQuery(n) {
+  const vars = [], fields = [];
+  for (let i = 0; i < n; i++) {
+    vars.push(`$e${i}: [String!]`);
+    fields.push(`e${i}: deployments(environments: $e${i}, last: 10, orderBy: {field: CREATED_AT, direction: ASC}) { nodes { ${DEPLOY_NODE} } }`);
+  }
+  return `query($owner: String!, $name: String!, ${vars.join(', ')}) { repository(owner: $owner, name: $name) { ${fields.join(' ')} } }`;
+}
+
+// Run id -> { id, number, title, url, workflow (file name), createdAt, sha, actor } or null.
+// ctx.rateLimited is set when a lookup hit the rate limit. A 404 (run deleted) is
+// cached as null too, so it is not asked for again on every poll.
+async function deployRunInfo(repo, id, ctx) {
+  const key = (repo + '#' + id).toLowerCase();
+  if (deployRunCache.has(key)) return deployRunCache.get(key);
+  const r = await ghApiJson(['api', `repos/${repo}/actions/runs/${id}`,
+    '--jq', '{path, run_number, display_title, html_url, created_at, head_sha, triggering_actor: .triggering_actor.login, actor: .actor.login}']);
+  if (!r.ok) {
+    if (r.rateLimited) ctx.rateLimited = true;
+    else if (r.notFound) cacheRun(key, null);
+    return null;
+  }
+  const d = r.data || {};
+  const file = typeof d.path === 'string' ? d.path.replace(/@.*$/, '').split('/').pop() : '';
+  const info = {
+    id, number: d.run_number, title: d.display_title,
+    url: typeof d.html_url === 'string' ? d.html_url : `https://github.com/${repo}/actions/runs/${id}`,
+    workflow: file || null, createdAt: d.created_at, sha: d.head_sha,
+    actor: d.triggering_actor || d.actor || null
+  };
+  cacheRun(key, info);
+  return info;
+}
+
+function cacheRun(key, info) {
+  if (deployRunCache.size >= RUN_CACHE_MAX) deployRunCache.delete(deployRunCache.keys().next().value);
+  deployRunCache.set(key, info);
+}
+
+function fallbackRun(repo, id) {
+  return { id, number: null, title: null, url: `https://github.com/${repo}/actions/runs/${id}`, workflow: null };
+}
+
+async function deployStatus(repo, workflow) {
+  const ctx = { rateLimited: false };
+  const envs = await deployEnvNames(repo);
+  if (!envs.ok) return deployFail(envs);
+  const names = envs.data;
+  const [owner, name] = repo.split('/');
+  const wfLower = workflow ? workflow.toLowerCase() : null;
+
+  const [gq, wl] = await Promise.all([
+    names.length
+      ? ghApiJson(['api', 'graphql', '-f', 'query=' + deployQuery(names.length), '-f', 'owner=' + owner, '-f', 'name=' + name,
+        ...names.flatMap((n, i) => ['-f', `e${i}[]=${n}`])])
+      : Promise.resolve({ ok: true, data: { data: { repository: {} } } }),
+    ghApiJson(['run', 'list', '--repo=' + repo, '--status=waiting', '--json', 'databaseId', '--limit', '20',
+      ...(workflow ? ['--workflow=' + workflow] : [])])
+  ]);
+  if (!gq.ok) return deployFail(gq);
+  if (!wl.ok && (wl.rateLimited || wl.missing)) return deployFail(wl);
+  const repoNode = gq.data && gq.data.data && gq.data.data.repository;
+  if (!repoNode) return { ok: false, error: 'Not found: ' + repo };
+
+  // Newest deployment per environment (from the filtered workflow when one is set).
+  const rows = (await Promise.all(names.map(async (env, i) => {
+    const conn = repoNode['e' + i];
+    const deps = DS.newestFirst(((conn && conn.nodes) || []).map((n) => DS.normalizeDeployment(env, n)));
+    for (const dep of deps) {
+      if (!dep.runId) {
+        if (workflow) continue;
+        return DS.makeRow(dep, null);
+      }
+      const info = await deployRunInfo(repo, dep.runId, ctx);
+      if (workflow) {
+        if (!info || !info.workflow || info.workflow.toLowerCase() !== wfLower) continue;
+        return DS.makeRow(dep, info);
+      }
+      return DS.makeRow(dep, info || fallbackRun(repo, dep.runId));
+    }
+    return null;
+  }))).filter(Boolean);
+  if (ctx.rateLimited) return { ok: false, error: 'GitHub rate limit', rateLimited: true };
+
+  // Waiting gates: runs behind 'waiting' rows plus runs gh lists as waiting.
+  const ids = new Set(rows.filter((r) => r.state === 'waiting' && r.run).map((r) => r.run.id));
+  for (const w of (wl.ok && Array.isArray(wl.data) ? wl.data : [])) if (w && DS.validId(w.databaseId)) ids.add(w.databaseId);
+  const candidates = [...ids].sort((a, b) => b - a).slice(0, DEPLOY_MAX_WAITING);
+  // partial: some gate lookup failed, so gates may be missing from this answer (the
+  // renderer keeps the ones it already knows for this entry instead of dropping them).
+  let partial = !wl.ok;
+  const pendings = await Promise.all(candidates.map(async (runId) => {
+    const p = await ghApiJson(['api', `repos/${repo}/actions/runs/${runId}/pending_deployments`]);
+    if (!p.ok) { if (p.rateLimited) ctx.rateLimited = true; partial = true; return null; }
+    const entries = Array.isArray(p.data) ? p.data : [];
+    if (!entries.length) return null;
+    const run = (await deployRunInfo(repo, runId, ctx)) || fallbackRun(repo, runId);
+    return { runId, run, entries };
+  }));
+  if (ctx.rateLimited) return { ok: false, error: 'GitHub rate limit', rateLimited: true };
+  DS.attachWaiting(rows, pendings.filter(Boolean));
+
+  return { ok: true, data: { repo, workflow: workflow || null, rows: DS.sortRows(rows), partial } };
 }
 
 // ---------- helpers for the write paths ----------
