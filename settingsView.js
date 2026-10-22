@@ -22,7 +22,7 @@
     v: 1,
     general: { restoreTabs: true, shell: 'pwsh', startDir: '', confirmClose: false, appTheme: 'default' },
     terminal: { fontFamily: 'Cascadia Code', fontSize: 13, theme: 'windowsTerminal', cursorStyle: 'bar',
-      scrollback: 5000, copyOnSelect: false, rightClickPaste: false },
+      scrollback: 5000, copyOnSelect: false, rightClickPaste: false, multilinePaste: 'oneLine' },
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
       permissionDefault: null, notify: true, showUsage: true, autoResume: true, cliPath: '' },
     github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60,
@@ -337,7 +337,11 @@
         controls: [{ kind: 'toggle', sec: 'terminal', key: 'copyOnSelect' }] },
       { label: 'Högerklick klistrar in',
         desc: 'Shift+högerklick öppnar menyn. Av = högerklick öppnar menyn.',
-        controls: [{ kind: 'toggle', sec: 'terminal', key: 'rightClickPaste' }] }
+        controls: [{ kind: 'toggle', sec: 'terminal', key: 'rightClickPaste' }] },
+      { label: 'Flerradig inklistring',
+        desc: 'Vid PowerShell-prompten: text med flera rader slås ihop till en rad (kommentarsrader tas bort) i stället för att första raden körs direkt. Gäller inte när Claude eller ett program med bracketed paste tar emot texten.',
+        controls: [{ kind: 'segmented', sec: 'terminal', key: 'multilinePaste', options: [
+          opt('oneLine', 'Som en rad'), opt('asIs', 'Rad för rad')] }] }
     ] },
     { id: 'claude', label: 'Claude', rows: [
       { label: 'Hybrid input',

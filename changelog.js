@@ -6,6 +6,13 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.30.0', date: '2026-10-22', items: [
+      'Text med flera rader som klistras in vid PowerShell-prompten slås ihop till en rad, så att första raden inte körs direkt.',
+      'Kommentarsrader, tomma rader och radfortsättningar (`) tas bort vid sammanslagningen.',
+      'Claude, Copilot och program med bracketed paste får texten som den är.',
+      'Ny inställning "Flerradig inklistring" (Terminal): "Som en rad" eller "Rad för rad".',
+      'Nytt val "Copy as one line" i terminalens högerklicksmeny.'
+    ] },
     { version: '0.29.0', date: '2026-10-22', items: [
       'Ny ikon för deployer bredvid Inställningar: visar om en deploy kör, väntar på godkännande eller har misslyckats.',
       'Håll muspekaren över ikonen för senaste deployen per repo och miljö, med status, körning, commit, vem och när. Klicka för att fästa listan.',

@@ -3879,6 +3879,24 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     }
   });
 
+  // Every terminal paste goes through here. terminal.multilinePaste 'oneLine': at a
+  // PowerShell prompt, multi-line text is joined into one line (pasteText.toOneLine) so
+  // PSReadLine does not run the first line right away. Claude/Copilot and programs that
+  // asked for bracketed paste get the text as is, and so does text that cannot be joined
+  // without changing what runs (inline comments, here-strings; pasteText.canJoin).
+  function pasteIntoPane(text) {
+    if (!text) return;
+    if (appSetting('terminal', 'multilinePaste') === 'oneLine' &&
+        window.pasteText.isMultiline(text) && window.pasteText.canJoin(text) &&
+        pane.atPrompt && !pane.claudeRunning && !pane.copilotRunning &&
+        !term.modes.bracketedPasteMode) {
+      const one = window.pasteText.toOneLine(text);
+      if (one) term.paste(one);
+      return;
+    }
+    term.paste(text);
+  }
+
   // Ctrl+C: copy if selection, else send ^C to pty
   // Ctrl+V: explicit paste (works even if xterm textarea lost focus, e.g. during TUI redraws)
   // Ctrl+Backspace: delete word backward (send ^W / 0x17)
@@ -3895,7 +3913,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (e.ctrlKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
       e.preventDefault();
       navigator.clipboard.readText().then(t => {
-        if (t) term.paste(t);
+        if (t) pasteIntoPane(t);
         term.focus();
       }).catch(() => {});
       return false;
@@ -3903,7 +3921,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     if (e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'Insert') {
       e.preventDefault();
       navigator.clipboard.readText().then(t => {
-        if (t) term.paste(t);
+        if (t) pasteIntoPane(t);
         term.focus();
       }).catch(() => {});
       return false;
@@ -3926,7 +3944,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     e.preventDefault();
     e.stopPropagation();
     const t = e.clipboardData && e.clipboardData.getData('text/plain');
-    if (t) term.paste(t);
+    if (t) pasteIntoPane(t);
     term.focus();
   }, true);
 
@@ -4029,7 +4047,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     // pane's composer instead; with no composer, the menu opens as usual.
     if (appSetting('terminal', 'rightClickPaste') && !e.shiftKey && termWrap.contains(e.target)) {
       if (!term.options.disableStdin) {
-        navigator.clipboard.readText().then((t) => { if (t) term.paste(t); term.focus(); }).catch(() => {});
+        navigator.clipboard.readText().then((t) => { if (t) pasteIntoPane(t); term.focus(); }).catch(() => {});
         return;
       }
       if (pane.hybridBar) {
@@ -4059,8 +4077,21 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
         action: () => { if (term.hasSelection()) { navigator.clipboard.writeText(term.getSelection()).catch(() => {}); term.clearSelection(); } term.focus(); }
       },
       {
+        label: 'Copy as one line',
+        disabled: !term.hasSelection(),
+        action: () => {
+          if (term.hasSelection()) {
+            // Plain join: terminal output keeps its '#' lines (markdown headings etc.).
+            const one = window.pasteText.joinLines(term.getSelection());
+            if (one) navigator.clipboard.writeText(one).catch(() => {});
+            term.clearSelection();
+          }
+          term.focus();
+        }
+      },
+      {
         label: 'Paste',
-        action: async () => { try { const t = await navigator.clipboard.readText(); if (t) term.paste(t); } catch (_) {} term.focus(); }
+        action: async () => { try { const t = await navigator.clipboard.readText(); if (t) pasteIntoPane(t); } catch (_) {} term.focus(); }
       },
       { separator: true },
       { label: 'Split Right', action: () => splitPane(tab, paneId, 'h') },

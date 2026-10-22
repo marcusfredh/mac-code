@@ -12,8 +12,8 @@ const { parseRepoList, MAX_REPOS } = require('./deployStatus');
 const STR_MAX = 1024;
 
 // section -> key -> spec. `def` is the default and must reproduce today's behavior
-// (two deliberate exceptions, both requested changes: github.openAs defaults to 'overlay',
-// claude.autoResume defaults to true).
+// (three deliberate exceptions, all requested changes: github.openAs defaults to 'overlay',
+// claude.autoResume defaults to true, terminal.multilinePaste defaults to 'oneLine').
 const SCHEMA = {
   general: {
     restoreTabs:  { type: 'bool', def: true },
@@ -29,7 +29,8 @@ const SCHEMA = {
     cursorStyle:     { type: 'enum', values: ['block', 'bar', 'underline'], def: 'bar' },
     scrollback:      { type: 'int', min: 0, max: 100000, def: 5000 },
     copyOnSelect:    { type: 'bool', def: false },
-    rightClickPaste: { type: 'bool', def: false }
+    rightClickPaste: { type: 'bool', def: false },
+    multilinePaste:  { type: 'enum', values: ['oneLine', 'asIs'], def: 'oneLine' }
   },
   claude: {
     hybridInput:       { type: 'bool', def: false },

@@ -272,6 +272,15 @@ test('general.appTheme: defaults to default, accepts the 8 themes, invalid falls
   assert.strictEqual(applyPatch(cur, { general: { appTheme: 'nope' } }).general.appTheme, 'fjord');
 });
 
+test("terminal.multilinePaste: defaults to 'oneLine', invalid falls back", () => {
+  assert.strictEqual(DEFAULTS.terminal.multilinePaste, 'oneLine');
+  assert.strictEqual(validate({ terminal: { multilinePaste: 'asIs' } }).terminal.multilinePaste, 'asIs');
+  assert.strictEqual(validate({ terminal: { multilinePaste: 'lines' } }).terminal.multilinePaste, 'oneLine');
+  assert.strictEqual(validate({ terminal: { multilinePaste: true } }).terminal.multilinePaste, 'oneLine');
+  const cur = validate({ terminal: { multilinePaste: 'asIs' } });
+  assert.strictEqual(applyPatch(cur, { terminal: { multilinePaste: 'nope' } }).terminal.multilinePaste, 'asIs');
+});
+
 test("terminal.theme: 'app' accepted, default unchanged", () => {
   assert.strictEqual(DEFAULTS.terminal.theme, 'windowsTerminal');
   assert.strictEqual(validate({ terminal: { theme: 'app' } }).terminal.theme, 'app');
