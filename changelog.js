@@ -6,6 +6,11 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.31.0', date: '2026-10-24', items: [
+      'Flikar i en Grid visar nu det nya namnet direkt när du byter namn på fliken, även efter att den lagts till i griden.',
+      'När Claude kör i en flik i en Grid visar cellens rubrik vad Claude jobbar på, bredvid flikens namn.',
+      'I en vanlig terminalflik visas vad Claude jobbar på i en smal rad överst i terminalen medan Claude kör. Kör ett flow står uppgiften i flow-raden bredvid stegen.'
+    ] },
     { version: '0.30.0', date: '2026-10-22', items: [
       'Text med flera rader som klistras in vid PowerShell-prompten slås ihop till en rad, så att första raden inte körs direkt.',
       'Kommentarsrader, tomma rader och radfortsättningar (`) tas bort vid sammanslagningen.',

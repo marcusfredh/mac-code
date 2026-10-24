@@ -645,6 +645,7 @@ function setTabTitle(tab, text) {
   const dot = document.createElement('span');
   dot.className = 'tab-dirty';
   tab.titleEl.appendChild(dot);
+  refreshGridCellTitle(tab);
 }
 function setTabDirty(tab, dirty) {
   tab.dirty = !!dirty;
@@ -912,9 +913,11 @@ function createFlowWidget({ compact = false } = {}) {
 }
 
 // Terminal panes have no header, so a slim bar is added on top of the pane only while a
-// flow is matched to it, and the pane's xterm is refitted when it comes or goes.
+// flow is matched to it or Claude has named its task, and the pane's xterm is refitted
+// when it comes or goes. Claude's task stands in for the flow's own label.
 function syncPaneFlowBar(tab, pane, target) {
-  if (!target) {
+  const task = (pane.claudeRunning && pane.claudeTitle) || null;
+  if (!target && !task) {
     if (pane.flowBar) {
       pane.flowBar.bar.remove();
       pane.flowBar.widget.drawer.remove();
@@ -928,20 +931,23 @@ function syncPaneFlowBar(tab, pane, target) {
     bar.className = 'pane-flowbar';
     const title = document.createElement('span');
     title.className = 'pf-title';
-    title.textContent = 'Flow';
     const label = document.createElement('span');
     label.className = 'pf-label';
     const widget = createFlowWidget();
     bar.append(title, label, widget.btn);
     pane.el.insertBefore(bar, pane.el.firstChild);
     pane.el.appendChild(widget.drawer);
-    pane.flowBar = { bar, label, widget };
+    pane.flowBar = { bar, title, label, widget };
     requestAnimationFrame(() => fitPane(pane));
   }
-  const v = target.view;
+  const v = target ? target.view : null;
   const fb = pane.flowBar;
-  if (fb.label.textContent !== (v.label || '')) fb.label.textContent = v.label || '';
-  const ov = flowOverall(v);
+  const head = v ? 'Flow' : 'Claude';
+  if (fb.title.textContent !== head) fb.title.textContent = head;
+  const text = task || (v && v.label) || '';
+  if (fb.label.textContent !== text) { fb.label.textContent = text; fb.label.title = text; }
+  // The fail/done tint belongs to the flow's own label, not to Claude's task text.
+  const ov = v && !task ? flowOverall(v) : null;
   const lcls = 'pf-label' + (ov === 'fail' ? ' fail' : ov === 'done' ? ' done' : '');
   if (fb.label.className !== lcls) fb.label.className = lcls;
   fb.widget.update(target);
@@ -2215,6 +2221,7 @@ function setActivePane(tab, paneId) {
   // Hybrid mode switched the terminal's keyboard off, so focus belongs in this pane's
   // own composer instead.
   if (pane.masked && pane.hybridBar) pane.hybridBar.input.focus();
+  refreshGridCellTitle(tab);
   if (tab.tabId === activeId) {
     if (!tab.customTitle) setTabTitle(tab, basename(pane.cwd || '') || 'PowerShell');
     updateStatus();
@@ -3857,7 +3864,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     runOnReady: opts.runOnReady || null,
     undoState: { current: '', stack: [] },
     // MAC_CODE_FLOW_KEY this pty was spawned with: matches flow views to the pane.
-    // flowBar is the slim stepper bar, present only while a flow is matched.
+    // flowBar is the slim bar on top, present while a flow is matched or Claude has a task.
     flowKey: flowKey || null, flowBar: null
   };
   tab.panes.set(paneId, pane);
@@ -4130,6 +4137,17 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
   // rather than a timer.
   term.onRender(() => updatePaneMask(pane));
 
+  // OSC 0/2: Claude Code names the terminal after what it is working on. Shown as the
+  // task in the pane's bar (or its grid cell header); the shell's own titles are ignored.
+  term.onTitleChange((title) => {
+    if (!pane.claudeRunning) return;
+    const task = claudeTaskTitle(title);
+    if (task === pane.claudeTitle) return;
+    pane.claudeTitle = task;
+    refreshGridCellTitle(tab);
+    scheduleAgentRender();
+  });
+
   // OSC 6633: command line capture (claude / copilot detection)
   term.parser.registerOscHandler(6633, (data) => {
     if (typeof data !== 'string') return false;
@@ -4185,6 +4203,7 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
       const sid = readClaudeExitId(pane);
       if (sid) { pane.lastClaude = { id: sid, cwd }; pane.lastClaudeLive = !!pane.closingWhileRunning; scheduleSaveSession(); }
       pane.claudeRunning = false; scheduleAgentRender();
+      if (pane.claudeTitle) { pane.claudeTitle = null; refreshGridCellTitle(tab); }
     }
     // From the first prompt on, the profile and prompt wrapper are in place, so the
     // resume button's keystrokes land at PSReadLine.
@@ -4479,7 +4498,7 @@ function buildGridCell(tab, id) {
   if (m.color) dot.style.setProperty('--gc-color', m.color);
   const title = document.createElement('span');
   title.className = 'gc-title';
-  title.textContent = m.customTitle || tabAutoName(m);
+  fillGridCellTitle(title, m);
   const pop = document.createElement('span');
   pop.className = 'gc-btn'; pop.title = 'Open as full tab (remove from grid)';
   pop.innerHTML = '<svg viewBox="0 0 10 10"><path d="M3 1h6v6M9 1L4 6M4 3H1v6h6V6" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -4504,6 +4523,39 @@ function buildGridCell(tab, id) {
   cell.classList.toggle('needs', !!(ft && ft.view.needsYou));
   cell.addEventListener('mousedown', () => focusGridCell(tab, id));
   return cell;
+}
+
+// Claude's terminal title minus its leading status glyph (spinner / ✳), or null when it
+// says nothing beyond the default name.
+function claudeTaskTitle(raw) {
+  const t = String(raw || '').replace(/\p{Cc}/gu, '').replace(/^[^\p{L}\p{N}]+/u, '').trim().slice(0, 120);
+  return t && t !== 'Claude Code' ? t : null;
+}
+function gridCellTask(m) {
+  const pane = m.panes ? getActivePane(m) : null;
+  return (pane && pane.claudeRunning && pane.claudeTitle) || null;
+}
+function fillGridCellTitle(el, m) {
+  const name = m.customTitle || tabAutoName(m);
+  const task = gridCellTask(m);
+  el.textContent = name;
+  el.title = task ? name + ' — ' + task : name;
+  if (task) {
+    const t = document.createElement('span');
+    t.className = 'gc-task';
+    t.textContent = task;
+    el.appendChild(t);
+  }
+}
+// A member's name or Claude task changed: update its cell header in place.
+function refreshGridCellTitle(m) {
+  const g = m && m.gridOwner ? tabs.get(m.gridOwner) : null;
+  if (!g || !g.stage) return;
+  for (const cell of g.stage.querySelectorAll('.grid-cell')) {
+    if (cell.dataset.member !== String(m.tabId)) continue;
+    const el = cell.querySelector('.gc-title');
+    if (el) fillGridCellTitle(el, m);
+  }
 }
 
 // Rebuild the cell chrome from tab.members, re-mounting each member's live container.

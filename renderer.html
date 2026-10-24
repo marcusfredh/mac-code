@@ -559,6 +559,8 @@
     .grid-cell.focused .grid-cell-hdr { color: var(--fg-strong); }
     .gc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--gc-color, #5a5a5a); }
     .gc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gc-task { margin-left: 6px; opacity: 0.65; }
+    .gc-task::before { content: '— '; }
     .gc-btn { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; border-radius: calc(3px * var(--radius-k)); opacity: 0.55; flex-shrink: 0; }
     .gc-btn:hover { opacity: 1; background: var(--fill-hover); }
     .gc-btn svg { width: 9px; height: 9px; }
@@ -3172,8 +3174,8 @@
     .flow-stepper.compact .fs-dot { width: 8px; height: 8px; }
     .flow-stepper.compact .fs-step.s-done .fs-dot::after { left: 2.2px; top: 0.9px; }
 
-    /* Terminal pane: a slim bar on top of the pane, present only while a flow is
-       matched. The right padding keeps clear of the pane's hover close button. */
+    /* Terminal pane: a slim bar on top of the pane, present while a flow is matched or
+       Claude has named its task. The right padding keeps clear of the pane's hover close button. */
     .pane-flowbar {
       flex-shrink: 0; height: 28px; margin-bottom: 6px;
       display: flex; align-items: center; gap: 10px; min-width: 0;
