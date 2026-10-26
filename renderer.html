@@ -3195,6 +3195,28 @@
     }
     @container flowbar (max-width: 360px) { .pf-label { display: none; } }
 
+    /* Orchestrate mode switch: a native select styled as a chip, at the end of the pane
+       bar / chat header slot. Amber while reviews (or the whole flow) are off. */
+    .flow-mode {
+      flex: 0 0 auto; height: 22px; padding: 0 6px; margin-left: 4px;
+      font: inherit; font-size: 11.5px; color: var(--fg-dim);
+      background: var(--fill); border: 1px solid var(--line); border-radius: calc(5px * var(--radius-k));
+      cursor: pointer;
+    }
+    .flow-mode:hover { background: var(--fill-hover); color: var(--fg-strong); }
+    .flow-mode:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+    .flow-mode:disabled { cursor: default; opacity: 0.6; }
+    .flow-mode option { background: var(--dialog); color: var(--fg); }
+    .flow-mode.warn {
+      color: var(--amber); font-weight: 600;
+      background: color-mix(in srgb, var(--amber) 14%, transparent);
+      border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+    }
+    /* With no flow stepper showing, the switch takes the stepper's right-aligned spot. */
+    .pane-flowbar .flow-stepper[hidden] + .flow-mode { margin-left: auto; }
+    .chat-hdr-flow .flow-mode { margin-left: 6px; }
+    @container flowbar (max-width: 360px) { .flow-mode { max-width: 92px; } }
+
     /* Chat pane: the stepper sits in the header next to the permission pill. */
     .chat-hdr { container: chathdr / inline-size; }
     .chat-hdr-flow { display: flex; align-items: center; flex-shrink: 0; min-width: 0; }

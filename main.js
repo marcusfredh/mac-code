@@ -108,6 +108,7 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const pty = require('node-pty');
 const { deriveFlow } = require('./flowState');
+const flowMode = require('./flowMode');
 const { autoAllowsCommand } = require('./autoMode');
 const { parseSessionFile, parseProcessSnapshot, lastTurnEnd, PaneSessionTracker } = require('./claudeSessions');
 const github = require('./github');
@@ -356,6 +357,7 @@ ipcMain.on('app:close-ready', finishClose);
 app.whenReady().then(() => {
   createWindow();
   startFlowWatcher();
+  pruneFlowModes();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -402,6 +404,7 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
     }
     ptys.delete(id);
     forgetPaneClaude(id);
+    clearFlowMode(flowKey);
   });
 
   return { id, shell, cwd, flowKey };
@@ -509,6 +512,50 @@ function stopFlowWatcher() {
 }
 
 ipcMain.handle('flow:list', () => currentFlowViews());
+
+// ----- Orchestrate flow mode -----
+// Per-session switch (flowMode.js): the hook reads <flowKey>.json to skip Skeptic
+// reviews or the whole flow. No file means "full", so a key's file goes away with
+// the process that inherited it.
+const MODE_DIR = path.join(os.homedir(), '.claude', 'state', 'orchestrate-mode');
+const MODE_MAX_AGE = 7 * 24 * 3600 * 1000;
+
+function clearFlowMode(flowKey) {
+  const p = flowMode.modePath(MODE_DIR, flowKey);
+  if (!p) return;
+  try { fs.unlinkSync(p); } catch (_) {}
+}
+
+// Files left behind by a crash: a key is never reused, so old ones are dead.
+function pruneFlowModes() {
+  let names = [];
+  try { names = fs.readdirSync(MODE_DIR); } catch (_) { return; }
+  const cutoff = Date.now() - MODE_MAX_AGE;
+  for (const name of names) {
+    const p = path.join(MODE_DIR, name);
+    try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch (_) {}
+  }
+}
+
+ipcMain.handle('flowMode:set', (e, args) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  const p = flowMode.modePath(MODE_DIR, args && args.flowKey);
+  if (!p) return { ok: false, error: 'invalid flow key' };
+  const mode = flowMode.normalizeMode(args.mode);
+  try {
+    if (mode === 'full') {
+      try { fs.unlinkSync(p); } catch (err) { if (!err || err.code !== 'ENOENT') throw err; }
+      return { ok: true };
+    }
+    fs.mkdirSync(MODE_DIR, { recursive: true });
+    const tmp = p + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, flowMode.serialize(mode, Date.now()), 'utf8');
+    try { fs.renameSync(tmp, p); } catch (err) { try { fs.unlinkSync(tmp); } catch (_) {} throw err; }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 // ----- IPC: window -----
 ipcMain.on('window:minimize', () => mainWindow && mainWindow.minimize());
@@ -1859,6 +1906,8 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
   // is only cleaned up when the entry is still this process — otherwise the restart
   // would tear down the pane it just brought up.
   const finish = (payload) => {
+    // This process's key dies with it (a relaunch gets a new one).
+    clearFlowMode(flowKey);
     if (!chat.silentExit) send('chat:exit', { chatId, ...payload });
     if (chats.get(chatId) === chat) killChat(chatId);
     else releaseChatPerms(chat);

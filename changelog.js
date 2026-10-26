@@ -6,6 +6,11 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.32.0', date: '2026-10-26', items: [
+      'Ny väljare för orchestrate-flödet per Claude-session: "Full flow", "No Skeptic" eller "Flow off". Den sitter i terminalens flow-rad medan Claude kör och i chattens rubrik.',
+      '"No Skeptic" stänger av Skeptic-granskningarna, "Flow off" stänger av hela flödet för sessionen. Väljaren blir gul när granskningar är avstängda.',
+      'Ändringen gäller direkt från Claudes nästa steg, utan omstart. Valet sparas inte mellan starter och följer med när en chatt startas om.'
+    ] },
     { version: '0.31.0', date: '2026-10-24', items: [
       'Flikar i en Grid visar nu det nya namnet direkt när du byter namn på fliken, även efter att den lagts till i griden.',
       'När Claude kör i en flik i en Grid visar cellens rubrik vad Claude jobbar på, bredvid flikens namn.',
