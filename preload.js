@@ -214,6 +214,11 @@ contextBridge.exposeInMainWorld('flowApi', {
   }
 });
 
+// Per-session orchestrate mode ('full' | 'no-skeptic' | 'off'), keyed by a pane's flowKey.
+contextBridge.exposeInMainWorld('flowModeApi', {
+  set: (args) => ipcRenderer.invoke('flowMode:set', args)
+});
+
 contextBridge.exposeInMainWorld('sessionApi', {
   load: ()        => ipcRenderer.invoke('session:load'),
   save: (data)    => ipcRenderer.send('session:save', data),

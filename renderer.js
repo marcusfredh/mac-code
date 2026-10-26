@@ -912,12 +912,64 @@ function createFlowWidget({ compact = false } = {}) {
   return w;
 }
 
-// Terminal panes have no header, so a slim bar is added on top of the pane only while a
-// flow is matched to it or Claude has named its task, and the pane's xterm is refitted
-// when it comes or goes. Claude's task stands in for the flow's own label.
+// Per-session orchestrate mode: 'full', 'no-skeptic' (Skeptic reviews blocked) or 'off'
+// (the whole flow off). It lives on the owner (pane / chat tab) and is sent to main for
+// the owner's current flowKey; the hook reads it on its next call. Not persisted.
+const FLOW_MODES = [
+  { value: 'full', label: 'Full flow' },
+  { value: 'no-skeptic', label: 'No Skeptic' },
+  { value: 'off', label: 'Flow off' }
+];
+function sendFlowMode(owner) {
+  if (!owner.flowKey || !window.flowModeApi) return Promise.resolve({ ok: false, error: 'no flow key' });
+  return window.flowModeApi.set({ flowKey: owner.flowKey, mode: owner.flowMode || 'full' })
+    .catch((err) => ({ ok: false, error: String(err && err.message || err) }));
+}
+// A native select styled as a chip; tinted while reviews are off. sync() re-reads the
+// owner, so the control follows a reverted or programmatic change.
+function createFlowModeSelect(owner) {
+  const sel = document.createElement('select');
+  sel.className = 'flow-mode';
+  sel.setAttribute('aria-label', 'Orchestrate mode for this session');
+  for (const m of FLOW_MODES) {
+    const o = document.createElement('option');
+    o.value = m.value; o.textContent = m.label;
+    sel.appendChild(o);
+  }
+  const sync = () => {
+    const mode = owner.flowMode || 'full';
+    if (sel.value !== mode) sel.value = mode;
+    sel.classList.toggle('warn', mode !== 'full');
+    sel.disabled = !owner.flowKey;
+    sel.title = !owner.flowKey ? 'Orchestrate mode: session not started yet'
+      : mode === 'full' ? 'Orchestrate mode: full flow'
+      : mode === 'no-skeptic' ? 'Orchestrate mode: Skeptic reviews are off'
+      : 'Orchestrate mode: the orchestrate flow is off';
+  };
+  // Like the flow drawer: clicks must not reach the pane (terminal focus) or a grid drag.
+  sel.addEventListener('mousedown', (e) => e.stopPropagation());
+  sel.addEventListener('click', (e) => e.stopPropagation());
+  sel.addEventListener('change', async () => {
+    const prev = owner.flowMode || 'full';
+    owner.flowMode = sel.value;
+    sync();
+    const res = await sendFlowMode(owner);
+    if (!res || !res.ok) {
+      console.warn('[flow-mode] could not set', sel.value, res && res.error);
+      // Only revert if nothing changed the mode again while the call was in flight.
+      if (owner.flowMode === sel.value) { owner.flowMode = prev; sync(); }
+    }
+  });
+  sync();
+  return { el: sel, sync };
+}
+
+// Terminal panes have no header, so a slim bar is added on top of the pane while Claude
+// runs in it, a flow is matched to it or Claude has named its task, and the pane's xterm
+// is refitted when it comes or goes. Claude's task stands in for the flow's own label.
 function syncPaneFlowBar(tab, pane, target) {
   const task = (pane.claudeRunning && pane.claudeTitle) || null;
-  if (!target && !task) {
+  if (!pane.claudeRunning && !target && !task) {
     if (pane.flowBar) {
       pane.flowBar.bar.remove();
       pane.flowBar.widget.drawer.remove();
@@ -934,10 +986,11 @@ function syncPaneFlowBar(tab, pane, target) {
     const label = document.createElement('span');
     label.className = 'pf-label';
     const widget = createFlowWidget();
-    bar.append(title, label, widget.btn);
+    const mode = createFlowModeSelect(pane);
+    bar.append(title, label, widget.btn, mode.el);
     pane.el.insertBefore(bar, pane.el.firstChild);
     pane.el.appendChild(widget.drawer);
-    pane.flowBar = { bar, title, label, widget };
+    pane.flowBar = { bar, title, label, widget, mode };
     requestAnimationFrame(() => fitPane(pane));
   }
   const v = target ? target.view : null;
@@ -951,6 +1004,7 @@ function syncPaneFlowBar(tab, pane, target) {
   const lcls = 'pf-label' + (ov === 'fail' ? ' fail' : ov === 'done' ? ' done' : '');
   if (fb.label.className !== lcls) fb.label.className = lcls;
   fb.widget.update(target);
+  fb.mode.sync();
 }
 
 // Patch every flow surface from the cached views. Cheap when nothing changed (identity
@@ -3864,8 +3918,10 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     runOnReady: opts.runOnReady || null,
     undoState: { current: '', stack: [] },
     // MAC_CODE_FLOW_KEY this pty was spawned with: matches flow views to the pane.
-    // flowBar is the slim bar on top, present while a flow is matched or Claude has a task.
-    flowKey: flowKey || null, flowBar: null
+    // flowBar is the slim bar on top, present while Claude runs, a flow is matched or
+    // Claude has a task. flowMode is the orchestrate mode set from that bar; the pty keeps
+    // one flowKey for its lifetime, so it never needs re-sending.
+    flowKey: flowKey || null, flowBar: null, flowMode: 'full'
   };
   tab.panes.set(paneId, pane);
   // Restored panes, splits and a chat's drawer shell don't count as a new use.
@@ -5576,7 +5632,8 @@ async function createChatTab(opts = {}) {
     title: name, customTitle: null, color: null,
     panes: new Map(), activePaneId: null,
     expandedPaths: new Set(), selectedPath: null,
-    type: 'chat', chatId, cwd: cwd || null, usageCounted: countedNow
+    type: 'chat', chatId, cwd: cwd || null, usageCounted: countedNow,
+    flowMode: 'full'
   };
   tabs.set(tabId, tab);
   normalizeGroups();
@@ -5645,7 +5702,8 @@ async function createChatTab(opts = {}) {
   const flowHost = typeof view.flowHost === 'function' ? view.flowHost() : null;
   if (flowHost && flowHost.slot && flowHost.overlay) {
     tab.flowWidget = createFlowWidget();
-    flowHost.slot.appendChild(tab.flowWidget.btn);
+    tab.flowModeSel = createFlowModeSelect(tab);
+    flowHost.slot.append(tab.flowWidget.btn, tab.flowModeSel.el);
     flowHost.overlay.appendChild(tab.flowWidget.drawer);
   }
   view.setActive(true);
@@ -5663,7 +5721,7 @@ async function createChatTab(opts = {}) {
     permissionMode,
     resumeSessionId: opts.resumeSessionId || null
   });
-  if (res && res.flowKey) tab.flowKey = res.flowKey;
+  if (res && res.flowKey) adoptChatFlowKey(tab, res.flowKey);
   if (res && res.error) view.handleStderr('Could not start Claude: ' + res.error);
   else if (res && res.cwd) { tab.cwd = res.cwd; updateStatus(); renderTree(); }
 
@@ -5751,8 +5809,24 @@ async function restartChat(tab, model) {
   });
   // The relaunched process gets a fresh flow key; the hook re-stamps the session's state
   // with it on its next event, so the flow follows the pane across the restart.
-  if (res && res.flowKey) { tab.flowKey = res.flowKey; scheduleAgentRender(); }
+  if (res && res.flowKey) { adoptChatFlowKey(tab, res.flowKey); scheduleAgentRender(); }
   if (res && res.error) view.handleStderr('Could not restart Claude: ' + res.error);
+}
+
+// A chat's process got a (new) flow key: main dropped the old key's mode file with the
+// old process, so a non-default mode is sent again for the new key.
+function adoptChatFlowKey(tab, flowKey) {
+  tab.flowKey = flowKey;
+  if (tab.flowMode && tab.flowMode !== 'full') {
+    sendFlowMode(tab).then((r) => {
+      if (!r || !r.ok) {
+        console.warn('[flow-mode] could not re-apply', tab.flowMode, r && r.error);
+        tab.flowMode = 'full';
+      }
+      if (tab.flowModeSel) tab.flowModeSel.sync();
+    });
+  }
+  if (tab.flowModeSel) tab.flowModeSel.sync();
 }
 
 function saveChatSession(tab) {
