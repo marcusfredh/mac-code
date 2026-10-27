@@ -6,6 +6,11 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.33.0', date: '2026-10-27', items: [
+      'Väljaren för orchestrate-läge ("Full flow", "No Skeptic", "Flow off") finns nu också i cellrubriken i en Grid: för chattar alltid, för terminalflikar medan Claude kör i den aktiva panelen.',
+      'Nya terminalflikar och chattar startar med "Flow off" som standard.',
+      'Ny inställning "Orchestrate-läge vid start" (Claude) för att välja vilket läge nya sessioner startar i.'
+    ] },
     { version: '0.32.0', date: '2026-10-26', items: [
       'Ny väljare för orchestrate-flödet per Claude-session: "Full flow", "No Skeptic" eller "Flow off". Den sitter i terminalens flow-rad medan Claude kör och i chattens rubrik.',
       '"No Skeptic" stänger av Skeptic-granskningarna, "Flow off" stänger av hela flödet för sessionen. Väljaren blir gul när granskningar är avstängda.',

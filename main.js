@@ -376,18 +376,27 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
   // The orchestrate hook stamps this key into its state file, so a flow can be
   // matched back to the pane whose Claude session produced it.
   const flowKey = crypto.randomUUID();
+  // The pane's starting mode is on disk before the shell exists, so a Claude started
+  // in it never sees the key without it.
+  const appliedMode = initFlowMode(flowKey, opts.flowMode);
 
-  const ptyProcess = pty.spawn(shell, shellArgs(shell), {
-    name: 'xterm-256color',
-    cols,
-    rows,
-    cwd,
-    // FORCE_HYPERLINK: xterm renders OSC 8 hyperlinks, but nothing in this environment
-    // tells CLIs so (no WT_SESSION / TERM_PROGRAM they recognise), and without it Claude
-    // Code prints its statusline worktree path as plain text instead of a folder link.
-    env: { ...process.env, MAC_CODE_FLOW_KEY: flowKey, FORCE_HYPERLINK: '1' },
-    useConpty: true
-  });
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(shell, shellArgs(shell), {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      // FORCE_HYPERLINK: xterm renders OSC 8 hyperlinks, but nothing in this environment
+      // tells CLIs so (no WT_SESSION / TERM_PROGRAM they recognise), and without it Claude
+      // Code prints its statusline worktree path as plain text instead of a folder link.
+      env: { ...process.env, MAC_CODE_FLOW_KEY: flowKey, FORCE_HYPERLINK: '1' },
+      useConpty: true
+    });
+  } catch (err) {
+    clearFlowMode(flowKey);
+    throw err;
+  }
 
   const id = ptyProcess.pid + ':' + Date.now();
   ptys.set(id, ptyProcess);
@@ -407,7 +416,7 @@ ipcMain.handle('terminal:create', (event, opts = {}) => {
     clearFlowMode(flowKey);
   });
 
-  return { id, shell, cwd, flowKey };
+  return { id, shell, cwd, flowKey, flowMode: appliedMode };
 });
 
 ipcMain.on('terminal:input', (event, id, data) => {
@@ -537,24 +546,39 @@ function pruneFlowModes() {
   }
 }
 
-ipcMain.handle('flowMode:set', (e, args) => {
-  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
-  const p = flowMode.modePath(MODE_DIR, args && args.flowKey);
-  if (!p) return { ok: false, error: 'invalid flow key' };
-  const mode = flowMode.normalizeMode(args.mode);
+// Returns the mode now in effect for the key, or null when the change failed (the
+// previous file, if any, stays). Never throws, so a spawn path can call it unguarded.
+function writeFlowMode(flowKey, mode) {
+  const p = flowMode.modePath(MODE_DIR, flowKey);
+  if (!p) return null;
+  mode = flowMode.normalizeMode(mode);
   try {
     if (mode === 'full') {
       try { fs.unlinkSync(p); } catch (err) { if (!err || err.code !== 'ENOENT') throw err; }
-      return { ok: true };
+      return 'full';
     }
     fs.mkdirSync(MODE_DIR, { recursive: true });
     const tmp = p + '.' + process.pid + '.tmp';
     fs.writeFileSync(tmp, flowMode.serialize(mode, Date.now()), 'utf8');
     try { fs.renameSync(tmp, p); } catch (err) { try { fs.unlinkSync(tmp); } catch (_) {} throw err; }
-    return { ok: true };
+    return mode;
   } catch (err) {
-    return { ok: false, error: err.message };
+    console.error('flow mode write failed:', err.message);
+    return null;
   }
+}
+
+// Before a spawn the key is brand new, so a failed write leaves no file: 'full'.
+function initFlowMode(flowKey, mode) {
+  return writeFlowMode(flowKey, mode) || 'full';
+}
+
+ipcMain.handle('flowMode:set', (e, args) => {
+  if (!fromMainWindow(e)) return { ok: false, error: 'not allowed' };
+  if (!flowMode.isValidKey(args && args.flowKey)) return { ok: false, error: 'invalid flow key' };
+  return writeFlowMode(args.flowKey, args.mode)
+    ? { ok: true }
+    : { ok: false, error: 'could not write flow mode' };
 });
 
 // ----- IPC: window -----
@@ -1848,6 +1872,8 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
   if (opts.resumeSessionId) args.push('--resume', opts.resumeSessionId);
   // Same role as in terminal:create: lets the flow tracker find this chat pane.
   const flowKey = crypto.randomUUID();
+  // On disk before the spawn, so the CLI's first hook call already sees it.
+  const appliedMode = initFlowMode(flowKey, opts.flowMode);
 
   let proc;
   try {
@@ -1864,6 +1890,7 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
       stdio: ['pipe', 'pipe', 'pipe']
     });
   } catch (err) {
+    clearFlowMode(flowKey);
     return { error: 'could not launch claude: ' + err.message };
   }
 
@@ -1920,7 +1947,7 @@ ipcMain.handle('chat:start', async (_event, opts = {}) => {
 
   proc.on('exit', (code) => finish({ code, sessionId: chat.sessionId }));
 
-  return { ok: true, chatId, cwd, bin, pid: proc.pid, flowKey };
+  return { ok: true, chatId, cwd, bin, pid: proc.pid, flowKey, flowMode: appliedMode };
 });
 
 ipcMain.handle('chat:send', (_event, args = {}) => {

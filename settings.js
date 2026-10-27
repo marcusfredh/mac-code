@@ -12,8 +12,9 @@ const { parseRepoList, MAX_REPOS } = require('./deployStatus');
 const STR_MAX = 1024;
 
 // section -> key -> spec. `def` is the default and must reproduce today's behavior
-// (three deliberate exceptions, all requested changes: github.openAs defaults to 'overlay',
-// claude.autoResume defaults to true, terminal.multilinePaste defaults to 'oneLine').
+// (four deliberate exceptions, all requested changes: github.openAs defaults to 'overlay',
+// claude.autoResume defaults to true, terminal.multilinePaste defaults to 'oneLine',
+// claude.flowModeDefault defaults to 'off').
 const SCHEMA = {
   general: {
     restoreTabs:  { type: 'bool', def: true },
@@ -42,6 +43,8 @@ const SCHEMA = {
     notify:            { type: 'bool', def: true },
     showUsage:         { type: 'bool', def: true },
     autoResume:        { type: 'bool', def: true },
+    // Orchestrate mode a new terminal pane or chat starts in (flowMode.js MODES).
+    flowModeDefault:   { type: 'enum', values: ['full', 'no-skeptic', 'off'], def: 'off' },
     cliPath:           { type: 'string', def: '' }
   },
   github: {
