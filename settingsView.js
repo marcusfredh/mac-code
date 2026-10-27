@@ -24,7 +24,7 @@
     terminal: { fontFamily: 'Cascadia Code', fontSize: 13, theme: 'windowsTerminal', cursorStyle: 'bar',
       scrollback: 5000, copyOnSelect: false, rightClickPaste: false, multilinePaste: 'oneLine' },
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
-      permissionDefault: null, notify: true, showUsage: true, autoResume: true, cliPath: '' },
+      permissionDefault: null, notify: true, showUsage: true, autoResume: true, flowModeDefault: 'off', cliPath: '' },
     github: { links: 'app', ctrlFlips: true, worktreeTemplate: '', draftPr: false, pollSeconds: 60,
       openAs: 'overlay', mergeMethod: 'merge', deleteBranchOnMerge: false, deployRepos: '', deployNotify: true },
     editor: { autosave: 'off', wordWrap: false, minimap: false, tabSize: 2 },
@@ -376,6 +376,10 @@
       { label: 'Återuppta Claude-sessioner vid start',
         desc: 'Claude-sessioner som körde i terminalflikar när appen stängdes startar igen med claude --resume. Gäller inte sessioner du själv avslutat.',
         controls: [{ kind: 'toggle', sec: 'claude', key: 'autoResume' }] },
+      { label: 'Orchestrate-läge vid start',
+        desc: 'Läget en ny terminalflik eller chatt startar i. Kan bytas per session i panelens meny.',
+        controls: [{ kind: 'segmented', sec: 'claude', key: 'flowModeDefault', options: [
+          opt('full', 'Full flow'), opt('no-skeptic', 'No Skeptic'), opt('off', 'Flow off')] }] },
       { label: 'Sökväg till claude',
         desc: 'Gäller chattpaneler och appens egna claude-kommandon (t.ex. MCP), inte terminalflikar. Fullständig sökväg till claude.exe, .cmd eller .bat. Tomt = PATH, sedan ~\\.local\\bin\\claude.exe.',
         controls: [{ kind: 'text', sec: 'claude', key: 'cliPath', placeholder: 'Automatisk', check: 'cliPath', mono: true }] }

@@ -3279,6 +3279,9 @@
        so the member's own bar / header stepper is hidden while it is borrowed. */
     .grid-cell-hdr .flow-stepper { padding: 1px 4px; }
     .grid-cell-hdr .fs-step { font-size: 11px; }
+    .gc-mode { display: flex; flex-shrink: 0; }
+    .gc-mode[hidden] { display: none; }
+    .grid-cell-hdr .flow-mode { height: 18px; padding: 0 3px; margin-left: 0; font-size: 10.5px; max-width: 92px; }
     .grid-cell.needs { border-color: rgba(231, 72, 86, 0.55); }
     .term-container.in-grid .pane-flowbar,
     .term-container.in-grid .pane-container > .flow-drawer,

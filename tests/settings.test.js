@@ -281,6 +281,17 @@ test("terminal.multilinePaste: defaults to 'oneLine', invalid falls back", () =>
   assert.strictEqual(applyPatch(cur, { terminal: { multilinePaste: 'nope' } }).terminal.multilinePaste, 'asIs');
 });
 
+test("claude.flowModeDefault: defaults to 'off', invalid falls back", () => {
+  assert.strictEqual(DEFAULTS.claude.flowModeDefault, 'off');
+  for (const m of ['full', 'no-skeptic', 'off']) {
+    assert.strictEqual(validate({ claude: { flowModeDefault: m } }).claude.flowModeDefault, m);
+  }
+  assert.strictEqual(validate({ claude: { flowModeDefault: 'skeptic' } }).claude.flowModeDefault, 'off');
+  assert.strictEqual(validate({ claude: { flowModeDefault: null } }).claude.flowModeDefault, 'off');
+  const cur = validate({ claude: { flowModeDefault: 'full' } });
+  assert.strictEqual(applyPatch(cur, { claude: { flowModeDefault: 'nope' } }).claude.flowModeDefault, 'full');
+});
+
 test("terminal.theme: 'app' accepted, default unchanged", () => {
   assert.strictEqual(DEFAULTS.terminal.theme, 'windowsTerminal');
   assert.strictEqual(validate({ terminal: { theme: 'app' } }).terminal.theme, 'app');

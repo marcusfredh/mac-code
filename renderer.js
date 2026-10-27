@@ -915,11 +915,18 @@ function createFlowWidget({ compact = false } = {}) {
 // Per-session orchestrate mode: 'full', 'no-skeptic' (Skeptic reviews blocked) or 'off'
 // (the whole flow off). It lives on the owner (pane / chat tab) and is sent to main for
 // the owner's current flowKey; the hook reads it on its next call. Not persisted.
+// A new pane or chat starts in claude.flowModeDefault, which main writes before the
+// spawn and echoes back as the result's flowMode (the mode actually applied).
 const FLOW_MODES = [
   { value: 'full', label: 'Full flow' },
   { value: 'no-skeptic', label: 'No Skeptic' },
   { value: 'off', label: 'Flow off' }
 ];
+function defaultFlowMode() {
+  let m = null;
+  try { m = appSetting('claude', 'flowModeDefault'); } catch (_) {}
+  return FLOW_MODES.some((x) => x.value === m) ? m : 'off';
+}
 function sendFlowMode(owner) {
   if (!owner.flowKey || !window.flowModeApi) return Promise.resolve({ ok: false, error: 'no flow key' });
   return window.flowModeApi.set({ flowKey: owner.flowKey, mode: owner.flowMode || 'full' })
@@ -959,6 +966,8 @@ function createFlowModeSelect(owner) {
       // Only revert if nothing changed the mode again while the call was in flight.
       if (owner.flowMode === sel.value) { owner.flowMode = prev; sync(); }
     }
+    // An owner can have two selects (a chat's header and its grid cell): let the other follow.
+    scheduleAgentRender();
   });
   sync();
   return { el: sel, sync };
@@ -1018,6 +1027,7 @@ function syncFlowUi() {
     for (const t of targets) live.add(t.ownerKey);
     if (tab.type === 'chat') {
       if (tab.flowWidget) tab.flowWidget.update(primaryFlowTarget(tab, byKey));
+      if (tab.flowModeSel) tab.flowModeSel.sync();
     } else {
       for (const [, pane] of tab.panes) {
         syncPaneFlowBar(tab, pane, targets.find((t) => t.pane === pane) || null);
@@ -1042,6 +1052,7 @@ function syncFlowUi() {
     const t = primaryFlowTarget(tabs.get(memberId), byKey);
     w.update(t);
     if (w.cell) w.cell.classList.toggle('needs', !!(t && t.view.needsYou));
+    syncGridModeSel(w, tabs.get(memberId));
   }
   // Forget open drawers whose owner went away, so a reused key never opens by surprise.
   for (const k of flowOpen) if (!live.has(k)) flowOpen.delete(k);
@@ -2276,6 +2287,8 @@ function setActivePane(tab, paneId) {
   // own composer instead.
   if (pane.masked && pane.hybridBar) pane.hybridBar.input.focus();
   refreshGridCellTitle(tab);
+  // A grid cell's mode switch follows the member's active pane.
+  scheduleAgentRender();
   if (tab.tabId === activeId) {
     if (!tab.customTitle) setTabTitle(tab, basename(pane.cwd || '') || 'PowerShell');
     updateStatus();
@@ -3880,8 +3893,9 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     try { term.write(opts.initialContent); } catch (_) {}
   }
 
-  const { id: ptyId, cwd, shell, flowKey } = await window.term.create({
-    cols: term.cols, rows: term.rows, cwd: opts.cwd || undefined
+  const startMode = defaultFlowMode();
+  const { id: ptyId, cwd, shell, flowKey, flowMode: appliedMode } = await window.term.create({
+    cols: term.cols, rows: term.rows, cwd: opts.cwd || undefined, flowMode: startMode
   });
   if (shell && statusShell) {
     statusShell.textContent = basename(shell).replace(/\.exe$/i, '');
@@ -3919,9 +3933,9 @@ async function createPaneProcess(tab, paneEl, opts = {}) {
     undoState: { current: '', stack: [] },
     // MAC_CODE_FLOW_KEY this pty was spawned with: matches flow views to the pane.
     // flowBar is the slim bar on top, present while Claude runs, a flow is matched or
-    // Claude has a task. flowMode is the orchestrate mode set from that bar; the pty keeps
-    // one flowKey for its lifetime, so it never needs re-sending.
-    flowKey: flowKey || null, flowBar: null, flowMode: 'full'
+    // Claude has a task. flowMode is the orchestrate mode set from that bar (main already
+    // wrote the starting one); the pty keeps one flowKey for its lifetime.
+    flowKey: flowKey || null, flowBar: null, flowMode: appliedMode || 'full'
   };
   tab.panes.set(paneId, pane);
   // Restored panes, splits and a chat's drawer shell don't count as a new use.
@@ -4568,7 +4582,13 @@ function buildGridCell(tab, id) {
   const flow = createFlowWidget({ compact: true });
   flow.cell = cell;
   gridFlowWidgets.set(id, flow);
-  hdr.append(dot, title, flow.btn, pop, rm);
+  // Orchestrate mode switch after the stepper; its owner is resolved on each sync.
+  flow.modeHost = document.createElement('span');
+  flow.modeHost.className = 'gc-mode';
+  flow.modeHost.hidden = true;
+  flow.modeOwner = null; flow.modeSel = null;
+  hdr.append(dot, title, flow.btn, flow.modeHost, pop, rm);
+  syncGridModeSel(flow, m);
 
   cell.appendChild(hdr);
   m.container.classList.add('in-grid');
@@ -4579,6 +4599,27 @@ function buildGridCell(tab, id) {
   cell.classList.toggle('needs', !!(ft && ft.view.needsYou));
   cell.addEventListener('mousedown', () => focusGridCell(tab, id));
   return cell;
+}
+
+// Whose orchestrate mode a grid cell switches: a chat member's tab, or a terminal
+// member's active pane while Claude runs in it (the member's own bars are hidden).
+function gridModeOwner(m) {
+  if (!m) return null;
+  if (m.type === 'chat') return m;
+  const pane = m.panes ? getActivePane(m) : null;
+  return pane && pane.claudeRunning ? pane : null;
+}
+// The select is bound to one owner, so a new owner gets a new select.
+function syncGridModeSel(w, m) {
+  const owner = gridModeOwner(m);
+  if (owner !== w.modeOwner) {
+    if (w.modeSel) w.modeSel.el.remove();
+    w.modeSel = owner ? createFlowModeSelect(owner) : null;
+    if (w.modeSel) w.modeHost.appendChild(w.modeSel.el);
+    w.modeOwner = owner;
+    w.modeHost.hidden = !owner;
+  }
+  if (w.modeSel) w.modeSel.sync();
 }
 
 // Claude's terminal title minus its leading status glyph (spinner / ✳), or null when it
@@ -5633,7 +5674,7 @@ async function createChatTab(opts = {}) {
     panes: new Map(), activePaneId: null,
     expandedPaths: new Set(), selectedPath: null,
     type: 'chat', chatId, cwd: cwd || null, usageCounted: countedNow,
-    flowMode: 'full'
+    flowMode: defaultFlowMode()
   };
   tabs.set(tabId, tab);
   normalizeGroups();
@@ -5719,9 +5760,10 @@ async function createChatTab(opts = {}) {
     chatId, cwd,
     model: opts.model || defaultChatModel(),
     permissionMode,
-    resumeSessionId: opts.resumeSessionId || null
+    resumeSessionId: opts.resumeSessionId || null,
+    flowMode: tab.flowMode
   });
-  if (res && res.flowKey) adoptChatFlowKey(tab, res.flowKey);
+  if (res && res.flowKey) adoptChatFlowKey(tab, res);
   if (res && res.error) view.handleStderr('Could not start Claude: ' + res.error);
   else if (res && res.cwd) { tab.cwd = res.cwd; updateStatus(); renderTree(); }
 
@@ -5805,27 +5847,21 @@ async function restartChat(tab, model) {
     model: model || defaultChatModel(), resumeSessionId,
     // Carry the pane's mode across, or the gate would silently drop back to asking
     // while the pill still showed the old mode.
-    permissionMode: view.getState().permissionMode
+    permissionMode: view.getState().permissionMode,
+    // Same for the orchestrate mode: main writes it for the new key before the spawn.
+    flowMode: tab.flowMode
   });
   // The relaunched process gets a fresh flow key; the hook re-stamps the session's state
   // with it on its next event, so the flow follows the pane across the restart.
-  if (res && res.flowKey) { adoptChatFlowKey(tab, res.flowKey); scheduleAgentRender(); }
+  if (res && res.flowKey) { adoptChatFlowKey(tab, res); scheduleAgentRender(); }
   if (res && res.error) view.handleStderr('Could not restart Claude: ' + res.error);
 }
 
-// A chat's process got a (new) flow key: main dropped the old key's mode file with the
-// old process, so a non-default mode is sent again for the new key.
-function adoptChatFlowKey(tab, flowKey) {
-  tab.flowKey = flowKey;
-  if (tab.flowMode && tab.flowMode !== 'full') {
-    sendFlowMode(tab).then((r) => {
-      if (!r || !r.ok) {
-        console.warn('[flow-mode] could not re-apply', tab.flowMode, r && r.error);
-        tab.flowMode = 'full';
-      }
-      if (tab.flowModeSel) tab.flowModeSel.sync();
-    });
-  }
+// A chat's process got a (new) flow key from chat:start. Main wrote the requested mode
+// for it before the spawn and reports what it applied ('full' if that write failed).
+function adoptChatFlowKey(tab, res) {
+  tab.flowKey = res.flowKey;
+  if (res.flowMode) tab.flowMode = res.flowMode;
   if (tab.flowModeSel) tab.flowModeSel.sync();
 }
 
