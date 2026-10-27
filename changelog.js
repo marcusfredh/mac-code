@@ -6,6 +6,12 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.34.0', date: '2026-10-27', items: [
+      'Celler i en Grid kan nu minimeras med knappen i cellrubriken eller genom att dubbelklicka på rubriken. Då visas bara rubriken och cellerna bredvid eller under får platsen.',
+      'Är alla celler i en kolumn minimerade krymper kolumnen till en smal list med namnen på högkant, och de andra kolumnerna blir bredare.',
+      'En minimerad flik fortsätter köra. Den öppnas igen med samma knapp, ett dubbelklick, eller när du går till fliken (Ctrl+Tab, fliken i flikraden, en notis).',
+      'Den sista öppna cellen i en Grid går inte att minimera.'
+    ] },
     { version: '0.33.0', date: '2026-10-27', items: [
       'Väljaren för orchestrate-läge ("Full flow", "No Skeptic", "Flow off") finns nu också i cellrubriken i en Grid: för chattar alltid, för terminalflikar medan Claude kör i den aktiva panelen.',
       'Nya terminalflikar och chattar startar med "Flow off" som standard.',

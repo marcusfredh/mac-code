@@ -243,6 +243,7 @@ function wireTabPointer(tabEl, tabId) {
       // A chip whose content lives in a grid: don't show it standalone (its container is
       // inside a hidden grid) — surface the grid and focus its cell instead.
       if (t && t.gridOwner && tabs.has(t.gridOwner)) {
+        restoreGridMember(tabs.get(t.gridOwner), tabId);
         setActive(t.gridOwner);
         focusGridCell(tabs.get(t.gridOwner), tabId);
       } else {
@@ -2313,6 +2314,8 @@ function setActive(tabId, { keepOverlay = false } = {}) {
   const target = tabs.get(tabId);
   if (target.gridOwner && tabs.has(target.gridOwner)) {
     const g = tabs.get(target.gridOwner);
+    // Asked for by name, so a minimized cell opens up again.
+    restoreGridMember(g, tabId);
     if (activeId !== g.tabId) setActive(g.tabId, { keepOverlay });
     // Grid already active: setActive(grid) didn't run, so GitHub member views the
     // overlay paused still need their polling back.
@@ -4510,7 +4513,7 @@ function createGridTab() {
   const tab = {
     tabId, container, tabEl, titleEl, stage,
     title: 'Grid', customTitle: null, color: null,
-    type: 'grid', members: [], focusedMember: null,
+    type: 'grid', members: [], focusedMember: null, minimized: new Set(),
     panes: new Map(), activePaneId: null,
     expandedPaths: new Set(), selectedPath: null
   };
@@ -4557,8 +4560,9 @@ function gridColSizes(n, cols) {
 
 function buildGridCell(tab, id) {
   const m = tabs.get(id);
+  const min = tab.minimized.has(id);
   const cell = document.createElement('div');
-  cell.className = 'grid-cell' + (id === tab.focusedMember ? ' focused' : '');
+  cell.className = 'grid-cell' + (id === tab.focusedMember ? ' focused' : '') + (min ? ' min' : '');
   cell.dataset.member = id;
 
   const hdr = document.createElement('div');
@@ -4569,6 +4573,25 @@ function buildGridCell(tab, id) {
   const title = document.createElement('span');
   title.className = 'gc-title';
   fillGridCellTitle(title, m);
+  // Minimize / restore. The last open cell can't be minimized, so the stage never goes
+  // blank. Mousedown is swallowed so pressing it neither focuses this cell nor steals
+  // keyboard focus from the surface that has it.
+  const lastOpen = !min && tab.members.every((x) => x === id || tab.minimized.has(x));
+  const minBtn = document.createElement('button');
+  minBtn.type = 'button';
+  minBtn.className = 'gc-btn gc-min';
+  minBtn.title = min ? 'Restore' : 'Minimize';
+  minBtn.setAttribute('aria-label', (min ? 'Restore ' : 'Minimize ') + (m.customTitle || tabAutoName(m)));
+  minBtn.setAttribute('aria-pressed', min ? 'true' : 'false');
+  minBtn.disabled = lastOpen;
+  minBtn.innerHTML = min
+    ? '<svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>'
+    : '<svg viewBox="0 0 10 10"><path d="M2 5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  minBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); });
+  minBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setGridCellMin(tab, id, !tab.minimized.has(id), { fromKey: e.detail === 0 });
+  });
   const pop = document.createElement('span');
   pop.className = 'gc-btn'; pop.title = 'Open as full tab (remove from grid)';
   pop.innerHTML = '<svg viewBox="0 0 10 10"><path d="M3 1h6v6M9 1L4 6M4 3H1v6h6V6" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -4587,8 +4610,18 @@ function buildGridCell(tab, id) {
   flow.modeHost.className = 'gc-mode';
   flow.modeHost.hidden = true;
   flow.modeOwner = null; flow.modeSel = null;
-  hdr.append(dot, title, flow.btn, flow.modeHost, pop, rm);
+  hdr.append(dot, title, flow.btn, flow.modeHost, minBtn, pop, rm);
   syncGridModeSel(flow, m);
+  // Double-clicking the header toggles too, except on its own controls.
+  hdr.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.gc-btn, .gc-mode, .flow-stepper, select')) return;
+    setGridCellMin(tab, id, !tab.minimized.has(id));
+  });
+  // Opening the flow drawer of a minimized cell opens the cell first (capture runs before
+  // the stepper's own handler), or the drawer would be hidden along with the body.
+  hdr.addEventListener('click', (e) => {
+    if (tab.minimized.has(id) && e.target.closest('.flow-stepper')) setGridCellMin(tab, id, false);
+  }, true);
 
   cell.appendChild(hdr);
   m.container.classList.add('in-grid');
@@ -4597,7 +4630,8 @@ function buildGridCell(tab, id) {
   const ft = primaryFlowTarget(m, pickFlowViews(flowViews));
   flow.update(ft);
   cell.classList.toggle('needs', !!(ft && ft.view.needsYou));
-  cell.addEventListener('mousedown', () => focusGridCell(tab, id));
+  // A minimized cell has no surface to focus; double-click restores (and focuses) it.
+  cell.addEventListener('mousedown', () => { if (!tab.minimized.has(id)) focusGridCell(tab, id); });
   return cell;
 }
 
@@ -4664,6 +4698,9 @@ function renderGrid(tab) {
   tab.members = tab.members.filter((id) => tabs.has(id));
   const members = tab.members;
   if (!members.includes(tab.focusedMember)) tab.focusedMember = members[0] || null;
+  // Forget minimized cells that left, and never leave every cell minimized (blank stage).
+  for (const id of tab.minimized) if (!members.includes(id)) tab.minimized.delete(id);
+  if (members.length && members.every((id) => tab.minimized.has(id))) tab.minimized.delete(tab.focusedMember);
 
   if (!members.length) {
     const empty = document.createElement('div');
@@ -4680,25 +4717,75 @@ function renderGrid(tab) {
   for (let c = 0; c < cols; c++) {
     const col = document.createElement('div');
     col.className = 'grid-col';
+    let allMin = true;
     for (let r = 0; r < sizes[c] && idx < members.length; r++) {
-      col.appendChild(buildGridCell(tab, members[idx++]));
+      const id = members[idx++];
+      if (!tab.minimized.has(id)) allMin = false;
+      col.appendChild(buildGridCell(tab, id));
     }
+    // A column of only minimized cells collapses to a thin strip; the rest share the width.
+    if (allMin) col.classList.add('min');
     stage.appendChild(col);
   }
 
   requestAnimationFrame(() => { for (const id of members) refitMember(tabs.get(id)); });
 }
 
+// True when m sits in a grid cell that is minimized (its container is display:none).
+function gridMemberMinimized(m) {
+  const g = m && m.gridOwner ? tabs.get(m.gridOwner) : null;
+  return !!(g && g.minimized && g.minimized.has(m.tabId));
+}
+
+// Minimize or restore a grid cell. A minimized cell keeps only its header; its member
+// stays mounted and running but hidden (display:none, so nothing refits it to a sliver).
+// renderGrid's rAF refits the open members, the restored one included.
+function setGridCellMin(tab, id, min, { fromKey = false, focus = true } = {}) {
+  if (!tab || tab.type !== 'grid' || !tab.members.includes(id)) return;
+  if (min === tab.minimized.has(id)) return;
+  if (min) {
+    if (tab.members.every((x) => x === id || tab.minimized.has(x))) return;   // last open cell
+    // Close the cell's flow drawer, so it doesn't come back open on restore.
+    const w = gridFlowWidgets.get(id);
+    if (w && w.ownerKey && flowOpen.has(w.ownerKey)) setFlowDrawer(w.ownerKey, false);
+    tab.minimized.add(id);
+  } else {
+    tab.minimized.delete(id);
+  }
+  renderGrid(tab);
+  if (min && tab.focusedMember === id) {
+    const next = tab.members.find((x) => !tab.minimized.has(x));
+    if (next) focusGridCell(tab, next, { focus: false });
+  }
+  if (!focus || activeId !== tab.tabId) return;
+  // Re-mounting the containers drops keyboard focus: hand it back to the button used
+  // from the keyboard, else to the focused cell's surface.
+  if (fromKey) {
+    for (const cell of tab.stage.querySelectorAll('.grid-cell')) {
+      if (cell.dataset.member !== String(id)) continue;
+      const b = cell.querySelector('.gc-min');
+      if (b && !b.disabled) { b.focus(); return; }
+    }
+  }
+  focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
+}
+// A minimized member that is asked for directly (Ctrl+Tab, its chip, a notification)
+// opens up again. Focus is left to the caller, which surfaces the cell next.
+function restoreGridMember(g, id) {
+  if (g && g.minimized && g.minimized.has(id)) setGridCellMin(g, id, false, { focus: false });
+}
+
 // Bring a member's terminal/editor/chat back in step with the cell size it now occupies.
+// A minimized member is hidden and skipped; it is refit when restored.
 function refitMember(m) {
-  if (!m) return;
+  if (!m || gridMemberMinimized(m)) return;
   if (m.type === 'editor') { try { m.editor?.layout(); } catch (_) {} return; }
   for (const [, pane] of m.panes) {
     try { pane.fit.fit(); window.term.resize(pane.ptyId, pane.term.cols, pane.term.rows); } catch (_) {}
   }
 }
 function focusMemberSurface(m) {
-  if (!m) return;
+  if (!m || gridMemberMinimized(m)) return;
   if (m.type === 'editor') { try { m.editor?.focus(); } catch (_) {} return; }
   if (m.type === 'chat') { const v = chatTabs.get(m.tabId); if (v) v.focus(); return; }
   if (m.type === 'github') { if (m.view) m.view.focus(); return; }
@@ -4728,7 +4815,7 @@ function addToGrid(tab, memberId) {
   if (!m || m.type === 'grid' || memberId === tab.tabId) return;
   if (m.gridOwner) {                       // already gridded — focus it where it lives
     const g = tabs.get(m.gridOwner);
-    if (g) { setActive(g.tabId); focusGridCell(g, memberId); }
+    if (g) { restoreGridMember(g, memberId); setActive(g.tabId); focusGridCell(g, memberId); }
     return;
   }
   m.gridOwner = tab.tabId;
@@ -4749,6 +4836,7 @@ function addToGrid(tab, memberId) {
 function removeFromGrid(tab, memberId, asFull) {
   const idx = tab.members.indexOf(memberId);
   if (idx !== -1) tab.members.splice(idx, 1);
+  tab.minimized.delete(memberId);
   const m = tabs.get(memberId);
   if (m) {
     delete m.gridOwner;
