@@ -564,6 +564,28 @@
     .gc-btn { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; border-radius: calc(3px * var(--radius-k)); opacity: 0.55; flex-shrink: 0; }
     .gc-btn:hover { opacity: 1; background: var(--fill-hover); }
     .gc-btn svg { width: 9px; height: 9px; }
+    button.gc-btn { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: default; }
+    button.gc-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 0; }
+    button.gc-btn:disabled { opacity: 0.2; background: none; }
+    /* A minimized cell keeps only its header. The member is hidden with display:none (not
+       squeezed to zero height), so its terminal is never refit to a sliver; it keeps
+       running and is refit when the cell is restored. */
+    .grid-cell.min { flex: 0 0 auto; }
+    .grid-cell.min .grid-cell-hdr { border-bottom: 0; }
+    .grid-cell.min > .term-container.in-grid,
+    .grid-cell.min > .flow-drawer { display: none !important; }
+    /* A column whose cells are all minimized collapses to a thin strip with vertical
+       headers (dot, name, restore); the other columns take the width. */
+    .grid-col.min { flex: 0 0 28px; }
+    .grid-col.min .grid-cell { flex: 0 1 auto; }
+    .grid-col.min .grid-cell-hdr {
+      writing-mode: vertical-rl;
+      width: auto; height: auto; min-height: 0; flex-shrink: 1;
+      padding: 8px 0 6px;
+    }
+    .grid-col.min .grid-cell-hdr > :not(.gc-dot):not(.gc-title):not(.gc-min) { display: none !important; }
+    .grid-col.min .gc-title { flex: 0 1 auto; min-height: 0; }
+    .grid-col.min .gc-task { display: none; }
     /* The borrowed container, mounted into a cell: fill it instead of insetting the stage. */
     .term-container.in-grid {
       position: static; inset: auto;
