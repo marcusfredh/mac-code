@@ -21,7 +21,9 @@ const SCHEMA = {
     shell:        { type: 'enum', values: ['pwsh', 'powershell'], def: 'pwsh' },
     startDir:     { type: 'string', def: '', check: (s) => s === '' || isDriveAbsolutePath(s) },
     confirmClose: { type: 'bool', def: false },
-    appTheme:     { type: 'enum', values: ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt', 'spiris'], def: 'default' }
+    appTheme:     { type: 'enum', values: ['default', 'fjord', 'heather', 'deep', 'graphite', 'contrast', 'cobalt', 'spiris'], def: 'default' },
+    // How a grid member's tab chip shows in the strip.
+    gridChips:    { type: 'enum', values: ['hide', 'compact', 'normal'], def: 'compact' }
   },
   terminal: {
     fontFamily:      { type: 'enum', values: ['Cascadia Code', 'Consolas', 'JetBrains Mono'], def: 'Cascadia Code' },

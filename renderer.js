@@ -299,7 +299,7 @@ function stripEntries() {
   const out = [];
   for (const el of tabsEl.children) {
     const r = el.getBoundingClientRect();
-    const box = { el, left: r.left, right: r.right, hidden: el.classList.contains('group-collapsed') };
+    const box = { el, left: r.left, right: r.right, hidden: el.classList.contains('group-collapsed') || r.width === 0 };
     if (el.classList.contains('tab-group-chip')) {
       out.push({ ...box, key: el.dataset.groupId, kind: 'header', groupId: el.dataset.groupId });
       continue;
@@ -7850,6 +7850,7 @@ function applySettings(next, prev) {
     window.applyAppTheme(next.general.appTheme);
     applyTerminalSettings();
   }
+  if (ch('general', 'gridChips')) applyGridChips();
   if (ch('claude', 'hybridInput')) updateHybrid();
   if (ch('claude', 'showUsage')) {
     pushPlanLimits();
@@ -7860,6 +7861,9 @@ function applySettings(next, prev) {
   refreshSettingsEditors();
 }
 window.onAppSettingsChanged(applySettings);
+// general.gridChips: the CSS keys a grid member's chip (.tab.in-grid-chip) off this.
+function applyGridChips() { document.body.dataset.gridChips = appSetting('general', 'gridChips') || 'compact'; }
+applyGridChips();
 
 // ---------- boot ----------
 (async () => {

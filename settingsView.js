@@ -20,7 +20,7 @@
   // DEFAULTS in settings.js, which stays the source of truth.
   const FALLBACK = {
     v: 1,
-    general: { restoreTabs: true, shell: 'pwsh', startDir: '', confirmClose: false, appTheme: 'default' },
+    general: { restoreTabs: true, shell: 'pwsh', startDir: '', confirmClose: false, appTheme: 'default', gridChips: 'compact' },
     terminal: { fontFamily: 'Cascadia Code', fontSize: 13, theme: 'windowsTerminal', cursorStyle: 'bar',
       scrollback: 5000, copyOnSelect: false, rightClickPaste: false, multilinePaste: 'oneLine' },
     claude: { hybridInput: false, autosaveChats: 'off', autoClearDays: 0, model: null, oneM: false,
@@ -310,6 +310,10 @@
       { label: 'Fråga innan flik med körande Claude stängs',
         desc: 'När en Claude-tur pågår i en chatt- eller terminalflik. Gäller inte när appen avslutas.',
         controls: [{ kind: 'toggle', sec: 'general', key: 'confirmClose' }] },
+      { label: 'Flikar i en Grid',
+        desc: 'Hur flikraden visar en flik som ligger i en Grid. Fliken visas ändå bara i gridden; ett klick på den går till dess cell.',
+        controls: [{ kind: 'segmented', sec: 'general', key: 'gridChips', options: [
+          opt('hide', 'Dölj'), opt('compact', 'Minimera'), opt('normal', 'Som vanligt')] }] },
       { label: 'Apptema',
         desc: 'Färger, hörn och ikon i hela appen. Terminalen följer med om Terminal → Färgschema är "Följ apptema".',
         controls: [{ kind: 'select', sec: 'general', key: 'appTheme', options: [
