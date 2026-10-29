@@ -550,11 +550,14 @@
     }
     .grid-cell.focused { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
     .grid-cell.drop-hot { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .grid-cell-hdr { user-select: none; }
+    .grid-cell.dragging { opacity: 0.55; }
+    body.grid-cell-dragging, body.grid-cell-dragging * { cursor: grabbing !important; }
     .grid-cell-hdr {
       display: flex; align-items: center; gap: 6px;
       height: 24px; flex-shrink: 0; padding: 0 6px 0 8px;
       font-size: 11px; color: var(--fg-dim);
-      border-bottom: 1px solid var(--line); cursor: default;
+      border-bottom: 1px solid var(--line); cursor: grab;
     }
     .grid-cell.focused .grid-cell-hdr { color: var(--fg-strong); }
     .gc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--gc-color, #5a5a5a); }

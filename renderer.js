@@ -4617,6 +4617,13 @@ function buildGridCell(tab, id) {
     if (e.target.closest('.gc-btn, .gc-mode, .flow-stepper, select')) return;
     setGridCellMin(tab, id, !tab.minimized.has(id));
   });
+  // Dragging the header onto another cell swaps the two cells' places.
+  hdr.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('.gc-btn, .gc-mode, .flow-stepper, select')) return;
+    if (tab.members.length < 2) return;
+    gridCellDrag = { tab, id, cell, startX: e.clientX, startY: e.clientY, started: false };
+  });
+
   // Opening the flow drawer of a minimized cell opens the cell first (capture runs before
   // the stepper's own handler), or the drawer would be hidden along with the body.
   hdr.addEventListener('click', (e) => {
@@ -4729,6 +4736,48 @@ function renderGrid(tab) {
   }
 
   requestAnimationFrame(() => { for (const id of members) refitMember(tabs.get(id)); });
+}
+
+// ---------- grid cell drag-to-move ----------
+let gridCellDrag = null;
+function gridCellDragTarget(d, e) {
+  const el = document.elementFromPoint(e.clientX, e.clientY)?.closest('.grid-cell');
+  if (!el || el === d.cell || !d.tab.stage.contains(el)) return null;
+  return d.tab.members.includes(el.dataset.member) ? el : null;
+}
+document.addEventListener('pointermove', (e) => {
+  const d = gridCellDrag;
+  if (!d) return;
+  if (!d.started) {
+    if (Math.abs(e.clientX - d.startX) < 5 && Math.abs(e.clientY - d.startY) < 5) return;
+    d.started = true;
+    d.cell.classList.add('dragging');
+    document.body.classList.add('grid-cell-dragging');
+  }
+  clearGridDropHint();
+  gridCellDragTarget(d, e)?.classList.add('drop-hot');
+});
+function endGridCellDrag(e) {
+  const d = gridCellDrag;
+  if (!d) return;
+  gridCellDrag = null;
+  d.cell.classList.remove('dragging');
+  document.body.classList.remove('grid-cell-dragging');
+  clearGridDropHint();
+  if (!d.started || e.type !== 'pointerup') return;
+  const target = gridCellDragTarget(d, e);
+  if (target) swapGridMembers(d.tab, d.id, target.dataset.member);
+}
+document.addEventListener('pointerup', endGridCellDrag);
+document.addEventListener('pointercancel', endGridCellDrag);
+
+// Swap two members' places in the grid. Their minimized state travels with them.
+function swapGridMembers(tab, a, b) {
+  const i = tab.members.indexOf(a), j = tab.members.indexOf(b);
+  if (i === -1 || j === -1 || i === j) return;
+  [tab.members[i], tab.members[j]] = [tab.members[j], tab.members[i]];
+  renderGrid(tab);
+  if (activeId === tab.tabId) focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
 }
 
 // True when m sits in a grid cell that is minimized (its container is display:none).

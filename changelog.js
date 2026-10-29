@@ -6,6 +6,9 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.35.0', date: '2026-10-29', items: [
+      'Celler i en Grid kan nu flyttas: dra i cellens rubrik och släpp på en annan cell så byter de plats. Praktiskt för att samla minimerade celler i samma kolumn.'
+    ] },
     { version: '0.34.0', date: '2026-10-27', items: [
       'Celler i en Grid kan nu minimeras med knappen i cellrubriken eller genom att dubbelklicka på rubriken. Då visas bara rubriken och cellerna bredvid eller under får platsen.',
       'Är alla celler i en kolumn minimerade krymper kolumnen till en smal list med namnen på högkant, och de andra kolumnerna blir bredare.',
