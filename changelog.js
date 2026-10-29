@@ -6,6 +6,9 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.37.0', date: '2026-10-29', items: [
+      'Flikar som ligger i en Grid visas nu smala i flikraden och utan stängknapp, eftersom de ändå bara visas i gridden. Klick på fliken går fortfarande till dess cell.'
+    ] },
     { version: '0.36.0', date: '2026-10-29', items: [
       'Grids sparas nu när Mac Code stängs och kommer tillbaka vid start med samma flikar, i samma ordning, med samma minimerade och fokuserade celler.'
     ] },
