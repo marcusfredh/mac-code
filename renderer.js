@@ -4718,20 +4718,23 @@ function renderGrid(tab) {
     return;
   }
 
-  const cols = Math.min(gridColsFor(members.length), members.length);
-  const sizes = gridColSizes(members.length, cols);
+  // The open cells share the grid; every minimized cell goes to one thin strip on the
+  // right, in member order, so they are all in one place to reopen.
+  const open = members.filter((id) => !tab.minimized.has(id));
+  const mins = members.filter((id) => tab.minimized.has(id));
+  const cols = Math.min(gridColsFor(open.length), open.length);
+  const sizes = gridColSizes(open.length, cols);
   let idx = 0;
   for (let c = 0; c < cols; c++) {
     const col = document.createElement('div');
     col.className = 'grid-col';
-    let allMin = true;
-    for (let r = 0; r < sizes[c] && idx < members.length; r++) {
-      const id = members[idx++];
-      if (!tab.minimized.has(id)) allMin = false;
-      col.appendChild(buildGridCell(tab, id));
-    }
-    // A column of only minimized cells collapses to a thin strip; the rest share the width.
-    if (allMin) col.classList.add('min');
+    for (let r = 0; r < sizes[c] && idx < open.length; r++) col.appendChild(buildGridCell(tab, open[idx++]));
+    stage.appendChild(col);
+  }
+  if (mins.length) {
+    const col = document.createElement('div');
+    col.className = 'grid-col min';
+    for (const id of mins) col.appendChild(buildGridCell(tab, id));
     stage.appendChild(col);
   }
 
