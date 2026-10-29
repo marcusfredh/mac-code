@@ -6,6 +6,9 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.39.0', date: '2026-10-29', items: [
+      'Minimerade celler i en Grid samlas nu alltid i en smal list längst till höger, oavsett var de låg innan. De öppna cellerna delar på resten av ytan.'
+    ] },
     { version: '0.38.0', date: '2026-10-29', items: [
       'Ny inställning "Flikar i en Grid" (Allmänt): välj om flikar som ligger i en Grid ska döljas i flikraden, minimeras (smala, som i 0.37.0) eller visas som vanligt.'
     ] },
