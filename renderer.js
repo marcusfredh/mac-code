@@ -4492,7 +4492,7 @@ function gridColsFor(n) {
   return 4;
 }
 
-function createGridTab() {
+function createGridTab({ keepOverlay = false } = {}) {
   const tabId = newTabId();
 
   const container = document.createElement('div');
@@ -4541,7 +4541,7 @@ function createGridTab() {
   const autoColor = pickRandomUnusedColor();
   if (autoColor) setTabColor(tab, autoColor);
 
-  setActive(tabId);
+  setActive(tabId, { keepOverlay });
   renderGrid(tab);
   updateStatus();
   return tab;
@@ -4777,6 +4777,7 @@ function swapGridMembers(tab, a, b) {
   if (i === -1 || j === -1 || i === j) return;
   [tab.members[i], tab.members[j]] = [tab.members[j], tab.members[i]];
   renderGrid(tab);
+  scheduleSaveSession();
   if (activeId === tab.tabId) focusMemberSurface(tab.focusedMember && tabs.get(tab.focusedMember));
 }
 
@@ -4802,6 +4803,7 @@ function setGridCellMin(tab, id, min, { fromKey = false, focus = true } = {}) {
     tab.minimized.delete(id);
   }
   renderGrid(tab);
+  scheduleSaveSession();
   if (min && tab.focusedMember === id) {
     const next = tab.members.find((x) => !tab.minimized.has(x));
     if (next) focusGridCell(tab, next, { focus: false });
@@ -7638,10 +7640,21 @@ function saveSession() {
   const tabsData = [];
   let activeIndex = -1;
   let i = 0;
+  const indexOf = new Map();   // tabId -> its index in tabsData
+  const grids = [];            // [{ entry, tab }], members filled in once every index is known
   for (const [id, t] of tabs) {
-    // Grids are a transient layout over other tabs; their members persist on their own,
-    // so the grid shell itself is not saved (v1).
-    if (t.type === 'grid') continue;
+    // A grid saves its layout; its members are saved as tabs of their own and the grid
+    // names them by index (see below).
+    if (t.type === 'grid') {
+      const entry = { type: 'grid', customTitle: t.customTitle || null, color: t.color || null, groupId: t.groupId || null };
+      grids.push({ entry, tab: t });
+      tabsData.push(entry);
+      indexOf.set(id, i);
+      if (id === activeId) activeIndex = i;
+      i++;
+      continue;
+    }
+    indexOf.set(id, i);
     if (t.type === 'github') {
       // Never shown since restore: the view hasn't booted, so keep what was saved.
       tabsData.push({ type: 'github', github: t.pendingOpen ? (t.savedState || null) : t.view ? t.view.getState() : null,
@@ -7685,6 +7698,13 @@ function saveSession() {
     if (id === activeId) activeIndex = i;
     i++;
   }
+  // Members in cell order; a member that wasn't saved drops out of its grid.
+  for (const { entry, tab } of grids) {
+    const known = tab.members.filter((m) => indexOf.has(m));
+    entry.members = known.map((m) => indexOf.get(m));
+    entry.minimized = known.filter((m) => tab.minimized.has(m)).map((m) => indexOf.get(m));
+    entry.focused = indexOf.has(tab.focusedMember) ? indexOf.get(tab.focusedMember) : null;
+  }
   window.sessionApi.save({
     tabs: tabsData, activeIndex,
     // Tab groups; each saved tab names its own by groupId. Restore maps them to new ids.
@@ -7700,7 +7720,23 @@ function saveSession() {
 // recreated) rejoins its group. Every group starts expanded: activeId is still the last
 // tab restored, and the invariant would keep its group open for good. The caller sets
 // the saved active tab, then finishGroupRestore applies the saved collapsed flags.
-// Grids aren't saved, so their members return as plain tabs.
+// Session restore: put a saved grid's members back in their cells, in their saved order,
+// with the minimized and focused cells as they were. Indexes point into created[]; a
+// member that wasn't recreated (or is taken already) is skipped.
+function restoreGrid(tab, saved, created) {
+  const at = (n) => (Number.isInteger(n) && n >= 0 && n < created.length && created[n]) || null;
+  for (const n of Array.isArray(saved.members) ? saved.members : []) {
+    const m = at(n);
+    if (m && m.type !== 'grid' && !m.gridOwner) addToGrid(tab, m.tabId);
+  }
+  for (const n of Array.isArray(saved.minimized) ? saved.minimized : []) {
+    const m = at(n);
+    if (m && tab.members.includes(m.tabId)) tab.minimized.add(m.tabId);
+  }
+  const f = at(saved.focused);
+  if (f && tab.members.includes(f.tabId)) tab.focusedMember = f.tabId;
+  renderGrid(tab);
+}
 function restoreGroups(savedGroups, savedTabs, created) {
   const ids = new Map();   // saved id -> new id
   const restored = [];     // [{ groupId (new), collapsed (saved) }]
@@ -7866,9 +7902,14 @@ window.onAppSettingsChanged(applySettings);
       // behind it must not close it or take focus.
       const keepOverlay = true;
       const created = [];
+      const savedGrids = [];   // [{ tab, saved }], filled once every member is back
       for (const t of sess.tabs) {
         let tab;
-        if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath, { keepOverlay });
+        if (t.type === 'grid') {
+          tab = createGridTab({ keepOverlay });
+          savedGrids.push({ tab, saved: t });
+        }
+        else if (t.type === 'editor' && t.filePath) tab = await createEditorTab(t.filePath, { keepOverlay });
         else if (t.type === 'github') {
           // Overlay mode: a saved GitHub tab becomes the overlay's starting state instead,
           // unless the overlay's own saved state (newer) or a live view already covers it.
@@ -7912,6 +7953,7 @@ window.onAppSettingsChanged(applySettings);
         }
         created.push(tab);
       }
+      for (const { tab, saved } of savedGrids) restoreGrid(tab, saved, created);
       const restoredGroups = restoreGroups(sess.groups, sess.tabs, created);
       const idx = sess.activeIndex;
       if (idx >= 0 && idx < created.length && created[idx]) setActive(created[idx].tabId, { keepOverlay });

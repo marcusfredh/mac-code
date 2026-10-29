@@ -6,6 +6,9 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.36.0', date: '2026-10-29', items: [
+      'Grids sparas nu när Mac Code stängs och kommer tillbaka vid start med samma flikar, i samma ordning, med samma minimerade och fokuserade celler.'
+    ] },
     { version: '0.35.0', date: '2026-10-29', items: [
       'Celler i en Grid kan nu flyttas: dra i cellens rubrik och släpp på en annan cell så byter de plats. Praktiskt för att samla minimerade celler i samma kolumn.'
     ] },
