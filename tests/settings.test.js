@@ -281,6 +281,14 @@ test("terminal.multilinePaste: defaults to 'oneLine', invalid falls back", () =>
   assert.strictEqual(applyPatch(cur, { terminal: { multilinePaste: 'nope' } }).terminal.multilinePaste, 'asIs');
 });
 
+test("general.gridChips: defaults to 'compact', invalid falls back", () => {
+  assert.strictEqual(DEFAULTS.general.gridChips, 'compact');
+  for (const m of ['hide', 'compact', 'normal']) {
+    assert.strictEqual(validate({ general: { gridChips: m } }).general.gridChips, m);
+  }
+  assert.strictEqual(validate({ general: { gridChips: 'small' } }).general.gridChips, 'compact');
+});
+
 test("claude.flowModeDefault: defaults to 'off', invalid falls back", () => {
   assert.strictEqual(DEFAULTS.claude.flowModeDefault, 'off');
   for (const m of ['full', 'no-skeptic', 'off']) {

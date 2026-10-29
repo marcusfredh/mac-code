@@ -6,6 +6,9 @@
   'use strict';
 
   const CHANGELOG = [
+    { version: '0.38.0', date: '2026-10-29', items: [
+      'Ny inställning "Flikar i en Grid" (Allmänt): välj om flikar som ligger i en Grid ska döljas i flikraden, minimeras (smala, som i 0.37.0) eller visas som vanligt.'
+    ] },
     { version: '0.37.0', date: '2026-10-29', items: [
       'Flikar som ligger i en Grid visas nu smala i flikraden och utan stängknapp, eftersom de ändå bara visas i gridden. Klick på fliken går fortfarande till dess cell.'
     ] },

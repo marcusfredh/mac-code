@@ -602,10 +602,13 @@
       border: 1px dashed var(--line); border-radius: calc(8px * var(--radius-k)); cursor: default;
     }
     .grid-empty.drop-hot { border-color: var(--accent); color: var(--accent); }
-    /* A tab chip whose content lives inside a grid. It is only shown there, so the chip shrinks to a narrow handle:
-       name trimmed, no close button (close it from the grid cell or the menu). */
-    .tab.in-grid-chip { opacity: 0.72; min-width: 0; max-width: 96px; gap: 5px; padding: 0 7px 0 8px; }
-    .tab.in-grid-chip .tab-close { display: none; }
+    /* A tab chip whose content lives inside a grid. Its content only shows there, so
+       general.gridChips can shrink the chip to a narrow handle (name trimmed, no close
+       button) or hide it outright. */
+    .tab.in-grid-chip { opacity: 0.72; }
+    body[data-grid-chips="compact"] .tab.in-grid-chip { min-width: 0; max-width: 96px; gap: 5px; padding: 0 7px 0 8px; }
+    body[data-grid-chips="compact"] .tab.in-grid-chip .tab-close { display: none; }
+    body[data-grid-chips="hide"] .tab.in-grid-chip { display: none; }
     .tab.in-grid-chip .tab-title::after {
       content: '▦'; margin-left: 5px; font-size: 10px; opacity: 0.7;
     }
